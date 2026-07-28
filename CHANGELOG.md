@@ -2,6 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.3 - 2026-07-28
+
+### Changed
+
+- Bumped the package patch version for a fresh PyPI artifact set.
+
 ## 0.1.2 - 2026-07-28
 
 ### Changed
