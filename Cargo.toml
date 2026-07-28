@@ -19,7 +19,7 @@ arrow-ipc = "54"
 arrow-schema = "54"
 crossbeam-channel = "0.5"
 hex = "0.4"
-pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }
 rand = "0.8"
 rand_chacha = "0.3"
 serde = { version = "1", features = ["derive"] }

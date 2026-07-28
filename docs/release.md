@@ -1,16 +1,20 @@
 # Release
 
-DatasetRT releases are built locally to avoid spending GitHub Actions minutes on wheel matrices.
+DatasetRT releases are built locally to avoid spending GitHub Actions minutes on wheel builds.
 
 GitHub CI remains checks-only. It validates Rust, Python linting, type checking, and tests on Python 3.11, but it does not publish artifacts.
 
 ## Local Build Matrix
 
+DatasetRT uses PyO3 `abi3-py310`. Each wheel is tagged `cp310-abi3`, so one wheel per platform supports Python 3.10, 3.11, 3.12, and 3.13.
+
 `scripts/release_local.py` builds:
 
 - source distribution
-- macOS wheels on the local host architecture for Python 3.10, 3.11, 3.12, and 3.13
-- Linux wheels for the matching host architecture in Podman for Python 3.10, 3.11, 3.12, and 3.13
+- macOS `arm64` wheel
+- macOS `x86_64` wheel
+- Linux `x86_64` wheel with Zig cross-compilation
+- Linux `aarch64` wheel with Zig cross-compilation
 
 Artifacts are written to `dist/`.
 
@@ -18,25 +22,22 @@ Artifacts are written to `dist/`.
 just release-all
 ```
 
-The Linux builds use the `ghcr.io/pyo3/maturin:latest` manylinux container through Podman. On macOS, Podman must have a running machine before Linux wheels can be built.
+The Linux builds use `maturin --zig`, so they do not require QEMU or a running Podman machine.
 
-To request multiple Linux architectures from a machine with working emulation, set `DATASETRT_LINUX_TARGETS`:
+To request a custom Linux target set, set `DATASETRT_LINUX_TARGETS`:
 
 ```bash
-DATASETRT_LINUX_TARGETS="x86_64-unknown-linux-gnu:linux/amd64 aarch64-unknown-linux-gnu:linux/arm64" \
+DATASETRT_LINUX_TARGETS="x86_64-unknown-linux-gnu" \
   uv run --python 3.11 --extra dev scripts/release_local.py
 ```
 
-For the most reliable full matrix, run the default script once on an arm64 machine and once on an x86_64 machine, then combine the `dist/` artifacts before publishing.
-
 Useful release environment variables:
 
-- `DATASETRT_PYTHON_VERSIONS`: space-separated Python versions, default `3.10 3.11 3.12 3.13`.
-- `DATASETRT_LINUX_TARGETS`: space-separated `rust-target:container-platform` values.
+- `DATASETRT_LINUX_TARGETS`: space-separated Rust Linux target triples, default `x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu`.
+- `DATASETRT_MACOS_TARGETS`: space-separated Rust macOS target triples, default `aarch64-apple-darwin x86_64-apple-darwin`.
 - `DATASETRT_SKIP_MACOS`: set to `true` to skip host macOS wheels.
-- `DATASETRT_SKIP_LINUX`: set to `true` to skip Podman Linux wheels.
-- `DATASETRT_CONTAINER_IMAGE`: maturin container image, default `ghcr.io/pyo3/maturin:latest`.
-- `DATASETRT_COMPATIBILITY`: Linux wheel compatibility tag, default `manylinux_2_28`.
+- `DATASETRT_SKIP_LINUX`: set to `true` to skip Zig Linux wheels.
+- `DATASETRT_COMPATIBILITY`: Linux wheel compatibility tag, default `manylinux_2_17`.
 
 ## Publish
 

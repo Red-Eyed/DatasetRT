@@ -26,7 +26,7 @@ If `ruff format` changes files, re-read touched files before making further edit
 
 CI runs the same checks on Python 3.11 and Rust stable. The editable extension is built with maturin before Python tests run.
 
-Release wheel matrices are built locally with Podman instead of GitHub Actions. See [Release](release.md).
+Release wheels are built locally with Zig instead of GitHub Actions. See [Release](release.md).
 
 ## Smoke Benchmark
 

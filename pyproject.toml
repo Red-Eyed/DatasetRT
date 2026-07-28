@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "maturin>=1.7,<2",
+    "maturin[zig]>=1.7,<2",
     "pytest>=8",
     "ruff>=0.5",
     "pyrefly>=0.21",

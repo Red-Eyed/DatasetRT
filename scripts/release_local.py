@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -11,7 +12,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = PROJECT_ROOT / "dist"
-DEFAULT_PYTHON_VERSIONS = ("3.10", "3.11", "3.12", "3.13")
+DEFAULT_MACOS_TARGETS = (
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+)
+DEFAULT_LINUX_TARGETS = (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+)
 
 
 class ReleaseConfig(BaseSettings):
@@ -19,46 +27,44 @@ class ReleaseConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="DATASETRT_")
 
-    python_versions: str = " ".join(DEFAULT_PYTHON_VERSIONS)
-    """Space-separated Python versions to build wheels for."""
-
     linux_targets: str = ""
-    """Space-separated `rust-target:container-platform` Linux target specs."""
+    """Space-separated Rust Linux target triples."""
 
-    container_image: str = "ghcr.io/pyo3/maturin:latest"
-    """Maturin container image used for Linux wheels."""
+    macos_targets: str = ""
+    """Space-separated Rust macOS target triples."""
 
-    compatibility: str = "manylinux_2_28"
+    compatibility: str = "manylinux_2_17"
     """Linux wheel compatibility tag passed to maturin."""
 
     skip_macos: bool = False
     """Skip host macOS wheel builds."""
 
     skip_linux: bool = False
-    """Skip Podman Linux wheel builds."""
-
-    @property
-    def parsed_python_versions(self) -> tuple[str, ...]:
-        return split_nonempty(self.python_versions)
+    """Skip Zig Linux wheel builds."""
 
     @property
     def parsed_linux_targets(self) -> tuple[str, ...]:
         if self.linux_targets:
             return split_nonempty(self.linux_targets)
-        return (default_linux_target(),)
+        return DEFAULT_LINUX_TARGETS
+
+    @property
+    def parsed_macos_targets(self) -> tuple[str, ...]:
+        if self.macos_targets:
+            return split_nonempty(self.macos_targets)
+        return DEFAULT_MACOS_TARGETS
 
 
 def main() -> None:
     config = ReleaseConfig()
     require_command("uv")
     require_command("cargo")
-    if not config.skip_linux:
-        require_command("podman")
+    require_command("rustup")
 
     clean_dist()
     build_sdist()
     if not config.skip_macos:
-        build_macos_wheels(config.parsed_python_versions)
+        build_macos_wheels(config)
     if not config.skip_linux:
         build_linux_wheels(config)
     print_artifacts()
@@ -78,14 +84,17 @@ def build_sdist() -> None:
     run(["uv", "run", "--python", "3.11", "--extra", "dev", "maturin", "sdist", "--out", DIST_DIR])
 
 
-def build_macos_wheels(python_versions: Sequence[str]) -> None:
-    for python_version in python_versions:
+def build_macos_wheels(config: ReleaseConfig) -> None:
+    if platform.system() != "Darwin":
+        raise SystemExit("macOS wheels must be built on macOS; set DATASETRT_SKIP_MACOS=true")
+    for target in config.parsed_macos_targets:
+        ensure_rust_target(target)
         run(
             [
                 "uv",
                 "run",
                 "--python",
-                python_version,
+                "3.11",
                 "--extra",
                 "dev",
                 "maturin",
@@ -93,66 +102,52 @@ def build_macos_wheels(python_versions: Sequence[str]) -> None:
                 "--release",
                 "--out",
                 DIST_DIR,
+                "--target",
+                target,
             ]
         )
 
 
 def build_linux_wheels(config: ReleaseConfig) -> None:
-    for target_spec in config.parsed_linux_targets:
-        target = parse_linux_target(target_spec)
+    for target in config.parsed_linux_targets:
         build_linux_target(config, target)
 
 
-def parse_linux_target(target_spec: str) -> tuple[str, str]:
-    parts = target_spec.split(":", maxsplit=1)
-    if len(parts) != 2:
-        raise SystemExit(
-            f"linux target must use `rust-target:container-platform`, got: {target_spec}"
-        )
-    return parts[0], parts[1]
-
-
-def build_linux_target(config: ReleaseConfig, target: tuple[str, str]) -> None:
-    rust_target, container_platform = target
-    interpreters = [manylinux_python_path(version) for version in config.parsed_python_versions]
+def build_linux_target(config: ReleaseConfig, target: str) -> None:
+    ensure_rust_target(target)
     run(
         [
-            "podman",
+            "uv",
             "run",
-            "--rm",
-            "--platform",
-            container_platform,
-            "--volume",
-            f"{PROJECT_ROOT}:/io",
-            "--workdir",
-            "/io",
-            config.container_image,
+            "--python",
+            "3.11",
+            "--extra",
+            "dev",
+            "maturin",
             "build",
             "--release",
             "--out",
-            "/io/dist",
+            DIST_DIR,
             "--target",
-            rust_target,
+            target,
+            "--zig",
             "--compatibility",
             config.compatibility,
-            "--interpreter",
-            *interpreters,
-        ]
+        ],
+        env=zig_cache_env(),
     )
 
 
-def default_linux_target() -> str:
-    machine = platform.machine().lower()
-    if machine in {"arm64", "aarch64"}:
-        return "aarch64-unknown-linux-gnu:linux/arm64"
-    if machine in {"x86_64", "amd64"}:
-        return "x86_64-unknown-linux-gnu:linux/amd64"
-    raise SystemExit(f"unsupported host architecture for default Linux target: {machine}")
+def ensure_rust_target(target: str) -> None:
+    run(["rustup", "target", "add", target])
 
 
-def manylinux_python_path(version: str) -> str:
-    compact = version.replace(".", "")
-    return f"/opt/python/cp{compact}-cp{compact}/bin/python"
+def zig_cache_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("CARGO_ZIGBUILD_CACHE_DIR", "/tmp/cargo-zigbuild")
+    env.setdefault("ZIG_GLOBAL_CACHE_DIR", "/tmp/zig-global-cache")
+    env.setdefault("ZIG_LOCAL_CACHE_DIR", "/tmp/zig-local-cache")
+    return env
 
 
 def split_nonempty(value: str) -> tuple[str, ...]:
@@ -178,9 +173,9 @@ def project_version() -> str:
     return version
 
 
-def run(command: Sequence[str | Path]) -> None:
+def run(command: Sequence[str | Path], *, env: dict[str, str] | None = None) -> None:
     normalized = [str(part) for part in command]
-    subprocess.run(normalized, cwd=PROJECT_ROOT, check=True)
+    subprocess.run(normalized, cwd=PROJECT_ROOT, check=True, env=env)
 
 
 if __name__ == "__main__":

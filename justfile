@@ -2,7 +2,6 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 python := "3.11"
 py := "uv run --python " + python + " --extra dev"
-python_versions := "3.10 3.11 3.12 3.13"
 
 default:
     just --list
@@ -52,10 +51,10 @@ release-sdist:
     DATASETRT_SKIP_MACOS=true DATASETRT_SKIP_LINUX=true {{py}} scripts/release_local.py
 
 release-macos:
-    DATASETRT_SKIP_LINUX=true DATASETRT_PYTHON_VERSIONS="{{python_versions}}" {{py}} scripts/release_local.py
+    DATASETRT_SKIP_LINUX=true {{py}} scripts/release_local.py
 
 release-linux:
-    DATASETRT_SKIP_MACOS=true DATASETRT_PYTHON_VERSIONS="{{python_versions}}" {{py}} scripts/release_local.py
+    DATASETRT_SKIP_MACOS=true {{py}} scripts/release_local.py
 
 publish:
     {{py}} scripts/publish_pypi.py

@@ -169,7 +169,9 @@ The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled
 
 ## Release Builds
 
-Release wheels are built locally with `just release-all`. Linux wheels use Podman manylinux containers; macOS wheels build on the local host. GitHub Actions stays checks-only.
+Release wheels are built locally with `just release-all`. Linux wheels use Zig cross-compilation; macOS arm64 and x86_64 wheels build on the local host. GitHub Actions stays checks-only.
+
+Wheels use Python's stable ABI (`cp310-abi3`) and support Python 3.10 through 3.13.
 
 ## Status
 
