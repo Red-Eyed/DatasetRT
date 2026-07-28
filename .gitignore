@@ -1,0 +1,15 @@
+/target/
+/.venv/
+/dist/
+*.egg-info/
+**/__pycache__/
+/.pytest_cache/
+/.ruff_cache/
+/.pyrefly/
+/.mypy_cache/
+/.coverage
+/htmlcov/
+.DS_Store
+*.so
+*.pyd
+*.pyc
