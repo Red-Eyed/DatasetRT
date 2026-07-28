@@ -26,7 +26,7 @@ If `ruff format` changes files, re-read touched files before making further edit
 
 CI runs the same checks on Python 3.11 and Rust stable. The editable extension is built with maturin before Python tests run.
 
-Release wheels are built locally with Zig instead of GitHub Actions. See [Release](release.md).
+Distribution artifacts are built locally with Zig instead of GitHub Actions. See [Build Artifacts](build.md).
 
 ## Smoke Benchmark
 

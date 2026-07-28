@@ -22,8 +22,8 @@ DEFAULT_LINUX_TARGETS = (
 )
 
 
-class ReleaseConfig(BaseSettings):
-    """Configuration for local release artifact builds."""
+class BuildConfig(BaseSettings):
+    """Configuration for local artifact builds."""
 
     model_config = SettingsConfigDict(env_prefix="DATASETRT_")
 
@@ -56,7 +56,7 @@ class ReleaseConfig(BaseSettings):
 
 
 def main() -> None:
-    config = ReleaseConfig()
+    config = BuildConfig()
     require_command("uv")
     require_command("cargo")
     require_command("rustup")
@@ -84,7 +84,7 @@ def build_sdist() -> None:
     run(["uv", "run", "--python", "3.11", "--extra", "dev", "maturin", "sdist", "--out", DIST_DIR])
 
 
-def build_macos_wheels(config: ReleaseConfig) -> None:
+def build_macos_wheels(config: BuildConfig) -> None:
     if platform.system() != "Darwin":
         raise SystemExit("macOS wheels must be built on macOS; set DATASETRT_SKIP_MACOS=true")
     for target in config.parsed_macos_targets:
@@ -108,12 +108,12 @@ def build_macos_wheels(config: ReleaseConfig) -> None:
         )
 
 
-def build_linux_wheels(config: ReleaseConfig) -> None:
+def build_linux_wheels(config: BuildConfig) -> None:
     for target in config.parsed_linux_targets:
         build_linux_target(config, target)
 
 
-def build_linux_target(config: ReleaseConfig, target: str) -> None:
+def build_linux_target(config: BuildConfig, target: str) -> None:
     ensure_rust_target(target)
     run(
         [
@@ -153,7 +153,7 @@ def zig_cache_env() -> dict[str, str]:
 def split_nonempty(value: str) -> tuple[str, ...]:
     parts = tuple(part for part in value.split() if part)
     if not parts:
-        raise SystemExit("release configuration list must not be empty")
+        raise SystemExit("build configuration list must not be empty")
     return parts
 
 
@@ -166,8 +166,8 @@ def print_artifacts() -> None:
 
 
 def project_version() -> str:
-    data = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
-    version = data["project"]["version"]
+    data = tomllib.loads((PROJECT_ROOT / "Cargo.toml").read_text())
+    version = data["package"]["version"]
     if not isinstance(version, str):
         raise SystemExit("project version must be a string")
     return version

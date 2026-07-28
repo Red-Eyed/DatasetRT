@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "dataset-rt"
-version = "0.1.1"
 description = "Framework-independent dataset cache runtime"
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
 authors = [
     { name = "Vadym Stupakov", email = "vadim.stupakov@gmail.com" },
 ]

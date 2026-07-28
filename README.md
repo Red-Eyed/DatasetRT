@@ -165,12 +165,12 @@ The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled
 - [Determinism](docs/determinism.md)
 - [Serialization Boundary](docs/serialization.md)
 - [Development](docs/development.md)
-- [Release](docs/release.md)
+- [Build Artifacts](docs/build.md)
 - [Changelog](CHANGELOG.md)
 
-## Release Builds
+## Artifact Builds
 
-Release wheels are built locally with `just release-all`. Linux wheels use Zig cross-compilation; macOS arm64 and x86_64 wheels build on the local host. GitHub Actions stays checks-only.
+Distribution artifacts are built locally with `just build-all`. Linux wheels use Zig cross-compilation; macOS arm64 and x86_64 wheels build on the local host. GitHub Actions stays checks-only.
 
 Wheels use Python's stable ABI (`cp310-abi3`) and support Python 3.10 through 3.13.
 

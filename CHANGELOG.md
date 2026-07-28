@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.2 - 2026-07-28
+
+### Changed
+
+- Rebuilt artifact packaging with `cp310-abi3` wheels for Python 3.10 through 3.13.
+- Added local Linux `x86_64` and `aarch64` wheel builds through `maturin --zig`.
+- Clarified local artifact building with `just build-all`.
+
 ## 0.1.0 - 2026-07-28
 
 ### Added
@@ -14,7 +22,7 @@ All notable changes to DatasetRT are documented here.
 - Rust-owned writer prefetching, worker threads, ordered commits, and multi-source cache writes.
 - Optional sized PyTorch `IterableDataset` adapter through `to_torch_iterable_dataset`.
 - Stable ABI wheels (`cp310-abi3`) for Python 3.10 through 3.13.
-- Local release tooling for macOS arm64, macOS x86_64, Linux x86_64, Linux aarch64, and sdist artifacts.
+- Local artifact build tooling for macOS arm64, macOS x86_64, Linux x86_64, Linux aarch64, and sdist artifacts.
 - GitHub CI for checks, plus `just` project commands for common workflows.
 
 ### Limits

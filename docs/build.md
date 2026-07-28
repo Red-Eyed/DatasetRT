@@ -1,6 +1,6 @@
-# Release
+# Build Artifacts
 
-DatasetRT releases are built locally to avoid spending GitHub Actions minutes on wheel builds.
+DatasetRT distribution artifacts are built locally to avoid spending GitHub Actions minutes on wheel builds.
 
 GitHub CI remains checks-only. It validates Rust, Python linting, type checking, and tests on Python 3.11, but it does not publish artifacts.
 
@@ -8,7 +8,7 @@ GitHub CI remains checks-only. It validates Rust, Python linting, type checking,
 
 DatasetRT uses PyO3 `abi3-py310`. Each wheel is tagged `cp310-abi3`, so one wheel per platform supports Python 3.10, 3.11, 3.12, and 3.13.
 
-`scripts/release_local.py` builds:
+`scripts/build_local.py` builds:
 
 - source distribution
 - macOS `arm64` wheel
@@ -19,7 +19,7 @@ DatasetRT uses PyO3 `abi3-py310`. Each wheel is tagged `cp310-abi3`, so one whee
 Artifacts are written to `dist/`.
 
 ```bash
-just release-all
+just build-all
 ```
 
 The Linux builds use `maturin --zig`, so they do not require QEMU or a running Podman machine.
@@ -28,10 +28,10 @@ To request a custom Linux target set, set `DATASETRT_LINUX_TARGETS`:
 
 ```bash
 DATASETRT_LINUX_TARGETS="x86_64-unknown-linux-gnu" \
-  uv run --python 3.11 --extra dev scripts/release_local.py
+  uv run --python 3.11 --extra dev scripts/build_local.py
 ```
 
-Useful release environment variables:
+Useful build environment variables:
 
 - `DATASETRT_LINUX_TARGETS`: space-separated Rust Linux target triples, default `x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu`.
 - `DATASETRT_MACOS_TARGETS`: space-separated Rust macOS target triples, default `aarch64-apple-darwin x86_64-apple-darwin`.
@@ -39,22 +39,22 @@ Useful release environment variables:
 - `DATASETRT_SKIP_LINUX`: set to `true` to skip Zig Linux wheels.
 - `DATASETRT_COMPATIBILITY`: Linux wheel compatibility tag, default `manylinux_2_17`.
 
-## Publish
+## Publishing
 
-Publishing is handled outside the project `justfile` with your PyPI publishing flow.
+Publishing is handled outside the project `justfile`.
 
-Use `pypi-publish` against the files already present in `dist/`. If PyPI reports `File already exists`, resume with your publish tool's skip-existing mode. PyPI files are immutable: if an existing filename needs different contents, bump the project version and rebuild instead of trying to overwrite it.
+PyPI files are immutable: if an existing filename needs different contents, bump the project version and rebuild instead of trying to overwrite it.
 
-## Recommended Release Flow
+## Recommended Build Flow
 
 ```bash
 just check
-just release-all
+just build-all
 ```
 
 After inspecting `dist/`, tag and push the release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
