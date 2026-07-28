@@ -58,3 +58,6 @@ release-linux:
 
 publish:
     {{py}} scripts/publish_pypi.py
+
+publish-resume:
+    DATASETRT_SKIP_EXISTING=true {{py}} scripts/publish_pypi.py

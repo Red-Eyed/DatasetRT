@@ -49,7 +49,15 @@ just publish
 
 The publish script uploads the files already present in `dist/` through `maturin upload`. Configure PyPI credentials in the local environment before running it.
 
-Set `DATASETRT_SKIP_EXISTING=true` to pass `--skip-existing` to maturin upload. Set `DATASETRT_REPOSITORY_URL` to upload to a custom package repository.
+If publishing was interrupted and PyPI reports `File already exists`, resume with:
+
+```bash
+just publish-resume
+```
+
+`publish-resume` passes `--skip-existing` to maturin upload and continues with missing files. PyPI files are immutable: if an existing filename needs different contents, bump the project version and rebuild instead of trying to overwrite it.
+
+Set `DATASETRT_REPOSITORY_URL` to upload to a custom package repository.
 
 ## Recommended Release Flow
 
