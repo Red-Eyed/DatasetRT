@@ -166,6 +166,7 @@ The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled
 - [Serialization Boundary](docs/serialization.md)
 - [Development](docs/development.md)
 - [Release](docs/release.md)
+- [Changelog](CHANGELOG.md)
 
 ## Release Builds
 
