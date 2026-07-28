@@ -19,12 +19,7 @@ Python commands use `uv`.
 Run the relevant checks before committing:
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-uv run ruff check dataset_rt tests
-uv run ruff format dataset_rt tests
-uv run pyrefly check
-uv run pytest
+just check
 ```
 
 If `ruff format` changes files, re-read touched files before making further edits.
@@ -38,7 +33,7 @@ Release wheel matrices are built locally with Podman instead of GitHub Actions. 
 Use the benchmark smoke script to verify the recommended factory path and get rough throughput numbers:
 
 ```bash
-uv run --python 3.11 --extra dev scripts/bench_smoke.py
+just smoke
 ```
 
 The script writes a temporary synthetic cache through `CachedDataset.from_cache_sources`, reads it back in physical order, and prints JSON.

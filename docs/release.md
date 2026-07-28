@@ -15,7 +15,7 @@ GitHub CI remains checks-only. It validates Rust, Python linting, type checking,
 Artifacts are written to `dist/`.
 
 ```bash
-uv run --python 3.11 --extra dev scripts/release_local.py
+just release-all
 ```
 
 The Linux builds use the `ghcr.io/pyo3/maturin:latest` manylinux container through Podman. On macOS, Podman must have a running machine before Linux wheels can be built.
@@ -43,7 +43,7 @@ Useful release environment variables:
 Publishing is a separate explicit step:
 
 ```bash
-uv run --python 3.11 --extra dev scripts/publish_pypi.py
+just publish
 ```
 
 The publish script uploads the files already present in `dist/` through `maturin upload`. Configure PyPI credentials in the local environment before running it.
@@ -53,13 +53,8 @@ Set `DATASETRT_SKIP_EXISTING=true` to pass `--skip-existing` to maturin upload. 
 ## Recommended Release Flow
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-uv run --python 3.11 --extra dev ruff format --check dataset_rt tests scripts
-uv run --python 3.11 --extra dev ruff check dataset_rt tests scripts
-uv run --python 3.11 --extra dev pyrefly check
-uv run --python 3.11 --extra dev pytest
-uv run --python 3.11 --extra dev scripts/release_local.py
+just check
+just release-all
 ```
 
 After inspecting `dist/`, tag and push the release:
