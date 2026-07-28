@@ -143,12 +143,14 @@ impl NumWorkers {
 #[serde(rename_all = "snake_case")]
 pub enum CompressionAlgo {
     None,
+    Lz4,
 }
 
 impl CompressionAlgo {
     pub fn from_name(value: &str) -> CacheResult<Self> {
         match value {
             "none" => Ok(Self::None),
+            "lz4" => Ok(Self::Lz4),
             _ => Err(CacheError::InvalidInput(format!(
                 "unsupported shard compression algorithm '{value}'"
             ))),

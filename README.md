@@ -153,9 +153,9 @@ DatasetRT v0.1 also intentionally supports only:
 
 - bytes-like payloads: `bytes`, `bytearray`, `memoryview`
 - primitive metadata: `bool`, `int`, `float`, `str`
-- `ShardCompression(algo="none", ratio=1.0)`
+- shard compression: `ShardCompression(algo="none", ratio=1.0)` or `ShardCompression(algo="lz4", ratio=...)`
 
-The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled for the first stable version.
+LZ4 compression is applied per payload record so random access stays direct. The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled for the first stable version.
 
 ## Documentation
 

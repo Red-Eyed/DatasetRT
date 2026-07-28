@@ -2,6 +2,13 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.4 - 2026-07-28
+
+### Added
+
+- Added optional Rust-owned write progress with committed samples/s and MB/s.
+- Added per-payload LZ4 shard compression with transparent Rust-side decompression on read.
+
 ## 0.1.3 - 2026-07-28
 
 ### Changed

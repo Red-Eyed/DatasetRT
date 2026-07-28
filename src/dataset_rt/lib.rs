@@ -5,6 +5,7 @@
 #![deny(clippy::unimplemented)]
 #![deny(clippy::unwrap_used)]
 
+mod compression;
 mod dataset;
 mod runtime;
 mod sampling;

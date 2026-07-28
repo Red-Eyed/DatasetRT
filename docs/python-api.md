@@ -60,7 +60,7 @@ Rust writes each cache into a temporary directory first and publishes it by rena
 Writer configuration is a frozen pydantic model:
 
 ```python
-CompressionAlgo = Literal["none"]
+CompressionAlgo = Literal["none", "lz4"]
 
 class ShardCompression(BaseModel):
     algo: CompressionAlgo = "none"
@@ -74,9 +74,9 @@ class WriterConfig(BaseModel):
     show_progress: bool = True
 ```
 
-Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0`.
+Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0` and `algo="lz4"` with a positive finite ratio value.
 
-The commonly named Rust `zstd` crate is a binding to the C zstd library, so it is not used for v0.1. A pure-Rust zstd implementation may be considered later once its compression path is accepted as stable enough for DatasetRT.
+LZ4 compression is applied per payload record, not to the whole shard as one stream. This keeps random sample access direct: the index locates one compressed record, and Rust decompresses that record before returning the original bytes. The commonly named Rust `zstd` crate is a binding to the C zstd library, so it is not used for v0.1. A pure-Rust zstd implementation may be considered later once its compression path is accepted as stable enough for DatasetRT.
 
 Rules:
 

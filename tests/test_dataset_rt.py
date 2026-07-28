@@ -71,6 +71,32 @@ def test_writer_manifest_records_shard_compression(tmp_path: Path) -> None:
     assert manifest["shards"][0]["uncompressed_byte_len"] == manifest["shards"][0]["byte_len"]
 
 
+def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path) -> None:
+    class CompressibleSource:
+        name = "compressible"
+
+        def __iter__(self):
+            yield CacheInput(b"a" * 10_000, {"label": "first"})
+            yield CacheInput(b"b" * 10_000, {"label": "second"})
+
+    written = write_cache(
+        CompressibleSource(),
+        tmp_path / "cache",
+        writer_config=WriterConfig(
+            shard_compression=ShardCompression(algo="lz4", ratio=2.0),
+            show_progress=False,
+        ),
+    )
+    dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42, shuffle=False))
+    samples = list(dataset)
+    manifest = json.loads((written[0] / "manifest.json").read_text())
+    shard = manifest["shards"][0]
+
+    assert [sample.data for sample in samples] == [b"a" * 10_000, b"b" * 10_000]
+    assert shard["compression"] == {"algo": "lz4", "ratio": 2.0}
+    assert shard["byte_len"] < shard["uncompressed_byte_len"]
+
+
 def test_writer_progress_is_optional(tmp_path: Path) -> None:
     assert WriterConfig().show_progress is True
 

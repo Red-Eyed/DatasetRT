@@ -64,8 +64,10 @@ Each shard manifest entry records:
 - `name`
 - `uncompressed_byte_len`
 - `byte_len`
-- `compression`: `{ "algo": "none", "ratio": 1.0 }` for v0.1
+- `compression`: `{ "algo": "none", "ratio": 1.0 }` or `{ "algo": "lz4", "ratio": ... }`
 - `sha256`
+
+Compression is applied per indexed payload record. `index.bin` offsets and byte lengths point to stored bytes in the shard, which may be compressed. Readers decompress the single addressed payload before returning sample bytes.
 
 ## Integrity
 

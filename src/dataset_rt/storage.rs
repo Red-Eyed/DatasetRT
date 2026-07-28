@@ -11,6 +11,7 @@ use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::compression::{compress_payload, decompress_payload};
 use crate::types::{
     CacheError, CacheResult, CacheSample, MetadataField, MetadataKind, MetadataValue,
     ShardCompression,
@@ -73,10 +74,14 @@ impl LoadedCache {
         let shard_path = self.path.join("shards").join(&shard.name);
         let mut file = File::open(shard_path)?;
         let mut reader = BufReader::new(&mut file);
-        let mut data = vec![0; entry.byte_len as usize];
+        let byte_len = usize::try_from(entry.byte_len).map_err(|_| {
+            CacheError::InvalidCache("payload byte length does not fit in usize".to_string())
+        })?;
+        let mut data = vec![0; byte_len];
         use std::io::Seek;
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut data)?;
+        let data = decompress_payload(&data, &shard.compression)?;
 
         let metadata = self.metadata_rows.get(sample_index).ok_or_else(|| {
             CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
@@ -106,6 +111,7 @@ struct OpenShard {
     name: String,
     writer: BufWriter<File>,
     byte_len: u64,
+    uncompressed_byte_len: u64,
     hasher: Sha256,
 }
 
@@ -145,9 +151,18 @@ impl CacheBuilder {
         metadata: BTreeMap<String, MetadataValue>,
     ) -> CacheResult<()> {
         let metadata_row = self.validate_metadata(metadata)?;
-        self.rotate_shard_if_needed(data.len() as u64)?;
+        let uncompressed_byte_len = u64::try_from(data.len()).map_err(|_| {
+            CacheError::InvalidInput("payload byte length does not fit in u64".to_string())
+        })?;
+        let stored_data = compress_payload(data, &self.shard_compression);
+        let stored_byte_len = u64::try_from(stored_data.len()).map_err(|_| {
+            CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
+        })?;
+        self.rotate_shard_if_needed(stored_byte_len)?;
 
-        let entry = self.current_shard.write_payload(&data)?;
+        let entry = self
+            .current_shard
+            .write_payload(&stored_data, uncompressed_byte_len)?;
         self.index.push(entry);
         self.metadata_rows.push(metadata_row);
         Ok(())
@@ -244,15 +259,30 @@ impl OpenShard {
             name,
             writer: BufWriter::new(file),
             byte_len: 0,
+            uncompressed_byte_len: 0,
             hasher: Sha256::new(),
         })
     }
 
-    fn write_payload(&mut self, data: &[u8]) -> CacheResult<IndexEntry> {
+    fn write_payload(
+        &mut self,
+        data: &[u8],
+        uncompressed_byte_len: u64,
+    ) -> CacheResult<IndexEntry> {
         let offset = self.byte_len;
         self.writer.write_all(data)?;
         self.hasher.update(data);
-        self.byte_len += data.len() as u64;
+        self.byte_len += u64::try_from(data.len()).map_err(|_| {
+            CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
+        })?;
+        self.uncompressed_byte_len = self
+            .uncompressed_byte_len
+            .checked_add(uncompressed_byte_len)
+            .ok_or_else(|| {
+                CacheError::InvalidInput(
+                    "shard uncompressed byte length overflowed u64".to_string(),
+                )
+            })?;
         Ok(IndexEntry {
             shard_id: self.id,
             offset,
@@ -264,7 +294,7 @@ impl OpenShard {
         self.writer.flush()?;
         Ok(ShardManifest {
             name: self.name,
-            uncompressed_byte_len: self.byte_len,
+            uncompressed_byte_len: self.uncompressed_byte_len,
             byte_len: self.byte_len,
             compression: compression.clone(),
             sha256: hex::encode(self.hasher.finalize()),

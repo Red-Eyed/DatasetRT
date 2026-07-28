@@ -31,7 +31,7 @@ Project-specific serialization must happen before values reach DatasetRT.
 Rust stores and returns these payloads as bytes without interpreting them.
 """
 
-CompressionAlgo: TypeAlias = Literal["none"]
+CompressionAlgo: TypeAlias = Literal["none", "lz4"]
 """Shard compression algorithms supported by the stable v0.1 writer."""
 
 
@@ -39,8 +39,8 @@ class ShardCompression(BaseModel):
     """Compression policy requested for payload shards.
 
     `ratio` is part of the explicit policy object so callers and manifests use
-    the same structured shape. DatasetRT v0.1 supports only `algo="none"`,
-    which Rust validates with `ratio == 1.0`.
+    the same structured shape. `ratio` is advisory metadata for compressed
+    algorithms; Rust validates `algo="none"` with `ratio == 1.0`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -49,7 +49,7 @@ class ShardCompression(BaseModel):
     """Compression algorithm to apply to each shard."""
 
     ratio: float = Field(default=1.0, gt=0.0)
-    """Expected compression ratio for this policy; v0.1 requires `1.0`."""
+    """Expected compression ratio for this policy; `none` requires `1.0`."""
 
 
 DEFAULT_SHARD_COMPRESSION = ShardCompression()
