@@ -55,9 +55,3 @@ release-macos:
 
 release-linux:
     DATASETRT_SKIP_MACOS=true {{py}} scripts/release_local.py
-
-publish:
-    {{py}} scripts/publish_pypi.py
-
-publish-resume:
-    DATASETRT_SKIP_EXISTING=true {{py}} scripts/publish_pypi.py

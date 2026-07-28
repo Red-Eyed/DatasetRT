@@ -41,23 +41,9 @@ Useful release environment variables:
 
 ## Publish
 
-Publishing is a separate explicit step:
+Publishing is handled outside the project `justfile` with your PyPI publishing flow.
 
-```bash
-just publish
-```
-
-The publish script uploads the files already present in `dist/` through `maturin upload`. Configure PyPI credentials in the local environment before running it.
-
-If publishing was interrupted and PyPI reports `File already exists`, resume with:
-
-```bash
-just publish-resume
-```
-
-`publish-resume` passes `--skip-existing` to maturin upload and continues with missing files. PyPI files are immutable: if an existing filename needs different contents, bump the project version and rebuild instead of trying to overwrite it.
-
-Set `DATASETRT_REPOSITORY_URL` to upload to a custom package repository.
+Use `pypi-publish` against the files already present in `dist/`. If PyPI reports `File already exists`, resume with your publish tool's skip-existing mode. PyPI files are immutable: if an existing filename needs different contents, bump the project version and rebuild instead of trying to overwrite it.
 
 ## Recommended Release Flow
 
