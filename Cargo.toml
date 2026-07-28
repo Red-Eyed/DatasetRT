@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Framework-independent dataset cache runtime"
 license = "MIT"
+documentation = "https://github.com/Red-Eyed/DatasetRT/tree/main/docs"
+homepage = "https://github.com/Red-Eyed/DatasetRT"
+repository = "https://github.com/Red-Eyed/DatasetRT"
 
 [lib]
 name = "_dataset_rt"

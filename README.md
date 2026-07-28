@@ -165,6 +165,11 @@ The common Rust `zstd` crate uses C bindings, so zstd compression is not enabled
 - [Determinism](docs/determinism.md)
 - [Serialization Boundary](docs/serialization.md)
 - [Development](docs/development.md)
+- [Release](docs/release.md)
+
+## Release Builds
+
+Release wheels are built locally with `uv run --python 3.11 --extra dev scripts/release_local.py`. Linux wheels use Podman manylinux containers; macOS wheels build on the local host. GitHub Actions stays checks-only.
 
 ## Status
 
