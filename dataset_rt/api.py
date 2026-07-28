@@ -72,6 +72,9 @@ class WriterConfig(BaseModel):
     shard_compression: ShardCompression = DEFAULT_SHARD_COMPRESSION
     """Compression policy for payload shards."""
 
+    show_progress: bool = True
+    """Show Rust-owned cache write progress with samples/s and MB/s."""
+
 
 class ReaderConfig(BaseModel):
     """Configuration for Rust-owned dataset reading and sampling."""
@@ -177,10 +180,7 @@ def write_cache(
     paths = _write_cache(
         sources,
         str(path),
-        writer_config.max_shard_bytes,
-        writer_config.prefetch_size,
-        writer_config.num_threads,
-        writer_config.shard_compression,
+        writer_config,
         False,
     )
     return [Path(cache_path) for cache_path in paths]
@@ -219,10 +219,7 @@ class CachedDataset:
         cache_paths = _write_cache(
             sources,
             str(path),
-            writer_config.max_shard_bytes,
-            writer_config.prefetch_size,
-            writer_config.num_threads,
-            writer_config.shard_compression,
+            writer_config,
             True,
         )
         return cls([Path(cache_path) for cache_path in cache_paths], reader_config=reader_config)

@@ -39,6 +39,7 @@ def test_write_and_read_cache(tmp_path: Path) -> None:
             num_threads=2,
             max_shard_bytes=4,
             shard_compression=ShardCompression(algo="none", ratio=1.0),
+            show_progress=False,
         ),
     )
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42))
@@ -68,6 +69,18 @@ def test_writer_manifest_records_shard_compression(tmp_path: Path) -> None:
 
     assert manifest["shards"][0]["compression"] == {"algo": "none", "ratio": 1.0}
     assert manifest["shards"][0]["uncompressed_byte_len"] == manifest["shards"][0]["byte_len"]
+
+
+def test_writer_progress_is_optional(tmp_path: Path) -> None:
+    assert WriterConfig().show_progress is True
+
+    written = write_cache(
+        TinySource(),
+        tmp_path / "cache",
+        writer_config=WriterConfig(show_progress=False),
+    )
+
+    assert len(written) == 1
 
 
 def test_write_multiple_sources_returns_cache_paths(tmp_path: Path) -> None:
@@ -110,6 +123,7 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
         num_threads = 4
         max_shard_bytes = 64 * 1024 * 1024
         shard_compression = UnsupportedCompression()
+        show_progress = False
 
     with pytest.raises(ValueError, match="unsupported shard compression"):
         write_cache(

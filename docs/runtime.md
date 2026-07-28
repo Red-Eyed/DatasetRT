@@ -52,6 +52,7 @@ Writer configuration:
 
 - `prefetch_size`: bounded Rust ingestion queue capacity.
 - `num_threads`: fixed Rust serialization worker count.
+- `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s.
 
 If Python iteration is faster than writing, Rust prefetches up to `prefetch_size` samples and then blocks the ingestion edge. This gives burst smoothing without unbounded memory growth.
 

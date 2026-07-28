@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
+use indicatif::{ProgressBar, ProgressStyle};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
@@ -20,6 +22,7 @@ struct WriterConfig {
     prefetch_size: PrefetchSize,
     num_threads: NumThreads,
     shard_compression: ShardCompression,
+    show_progress: bool,
     reuse_existing: bool,
 }
 
@@ -38,6 +41,13 @@ struct SerializedSample {
     input: WriterInput,
 }
 
+struct WriteProgress {
+    bar: Option<ProgressBar>,
+    started_at: Instant,
+    items: u64,
+    bytes: u64,
+}
+
 enum CommitMessage {
     Sample(SerializedSample),
     Abort(String),
@@ -46,19 +56,10 @@ enum CommitMessage {
 pub fn write_cache(
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
-    max_shard_bytes: u64,
-    prefetch_size: usize,
-    num_threads: usize,
-    shard_compression: Bound<'_, PyAny>,
+    writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> CacheResult<Vec<String>> {
-    let config = WriterConfig {
-        max_shard_bytes: MaxShardBytes::new(max_shard_bytes)?,
-        prefetch_size: PrefetchSize::new(prefetch_size)?,
-        num_threads: NumThreads::new(num_threads)?,
-        shard_compression: extract_shard_compression(&shard_compression)?,
-        reuse_existing,
-    };
+    let config = extract_writer_config(&writer_config, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
 
     if let Ok(source_list) = sources.cast::<PyList>() {
@@ -116,6 +117,7 @@ fn write_one_source(
 
     let temp_path = temp_cache_path_for_source(base_cache_dir, &source_name, source_index);
     prepare_cache_paths(&cache_path, &temp_path)?;
+    let progress_label = source_name.clone();
     let builder = match CacheBuilder::create(
         temp_path.clone(),
         source_name,
@@ -129,7 +131,7 @@ fn write_one_source(
         }
     };
     let iterator = PyIterator::from_object(&source).map_err(py_error)?;
-    if let Err(error) = write_with_pipeline(iterator, builder, config) {
+    if let Err(error) = write_with_pipeline(iterator, builder, &progress_label, config) {
         cleanup_temp_cache(&temp_path)?;
         return Err(error);
     }
@@ -143,11 +145,13 @@ fn write_one_source(
 fn write_with_pipeline(
     iterator: Bound<'_, PyIterator>,
     builder: CacheBuilder,
+    source_name: &str,
     config: &WriterConfig,
 ) -> CacheResult<()> {
     let (input_sender, input_receiver) = bounded(config.prefetch_size.as_usize());
     let (commit_sender, commit_receiver) = bounded(config.prefetch_size.as_usize());
-    let commit_handle = spawn_commit_thread(builder, commit_receiver);
+    let progress = WriteProgress::new(config.show_progress, source_name);
+    let commit_handle = spawn_commit_thread(builder, commit_receiver, progress);
     let worker_handles =
         spawn_serialization_workers(input_receiver, commit_sender.clone(), config.num_threads);
 
@@ -228,13 +232,15 @@ fn run_serialization_worker(
 fn spawn_commit_thread(
     builder: CacheBuilder,
     receiver: Receiver<CommitMessage>,
+    progress: WriteProgress,
 ) -> thread::JoinHandle<CacheResult<()>> {
-    thread::spawn(move || commit_serialized_samples(builder, receiver))
+    thread::spawn(move || commit_serialized_samples(builder, receiver, progress))
 }
 
 fn commit_serialized_samples(
     mut builder: CacheBuilder,
     receiver: Receiver<CommitMessage>,
+    mut progress: WriteProgress,
 ) -> CacheResult<()> {
     let mut pending = BTreeMap::new();
     let mut next_sequence = 0_u64;
@@ -243,7 +249,12 @@ fn commit_serialized_samples(
         match message {
             CommitMessage::Sample(sample) => {
                 pending.insert(sample.sequence, sample);
-                commit_ready_samples(&mut builder, &mut pending, &mut next_sequence)?;
+                commit_ready_samples(
+                    &mut builder,
+                    &mut pending,
+                    &mut next_sequence,
+                    &mut progress,
+                )?;
             }
             CommitMessage::Abort(message) => return Err(CacheError::InvalidInput(message)),
         }
@@ -254,6 +265,7 @@ fn commit_serialized_samples(
     }
 
     builder.finish()?;
+    progress.finish();
     Ok(())
 }
 
@@ -261,14 +273,67 @@ fn commit_ready_samples(
     builder: &mut CacheBuilder,
     pending: &mut BTreeMap<u64, SerializedSample>,
     next_sequence: &mut u64,
+    progress: &mut WriteProgress,
 ) -> CacheResult<()> {
     while let Some(sample) = pending.remove(next_sequence) {
+        let byte_len = sample.input.data.len();
         builder.push_sample(sample.input.data, sample.input.metadata)?;
+        progress.record_sample(byte_len);
         *next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
             CacheError::InvalidInput("sample sequence overflowed u64".to_string())
         })?;
     }
     Ok(())
+}
+
+impl WriteProgress {
+    fn new(enabled: bool, source_name: &str) -> Self {
+        let bar = enabled.then(|| create_progress_bar(source_name));
+        Self {
+            bar,
+            started_at: Instant::now(),
+            items: 0,
+            bytes: 0,
+        }
+    }
+
+    fn record_sample(&mut self, byte_len: usize) {
+        self.items = self.items.saturating_add(1);
+        let byte_len = u64::try_from(byte_len).unwrap_or(u64::MAX);
+        self.bytes = self.bytes.saturating_add(byte_len);
+
+        if let Some(bar) = &self.bar {
+            bar.inc(1);
+            bar.set_message(self.message());
+        }
+    }
+
+    fn finish(&self) {
+        if let Some(bar) = &self.bar {
+            bar.finish_with_message(self.message());
+        }
+    }
+
+    fn message(&self) -> String {
+        let elapsed_seconds = self.started_at.elapsed().as_secs_f64().max(0.001);
+        let items_per_second = self.items as f64 / elapsed_seconds;
+        let megabytes_per_second = self.bytes as f64 / 1_000_000.0 / elapsed_seconds;
+        format!(
+            "{} items | {:.1} items/s | {:.1} MB/s",
+            self.items, items_per_second, megabytes_per_second
+        )
+    }
+}
+
+fn create_progress_bar(source_name: &str) -> ProgressBar {
+    let bar = ProgressBar::new_spinner();
+    bar.set_prefix(format!("writing {source_name}"));
+    bar.enable_steady_tick(Duration::from_millis(100));
+    // Progress rendering is observability only; an invalid style must never fail cache writes.
+    if let Ok(style) = ProgressStyle::with_template("{spinner:.green} {prefix} {msg}") {
+        bar.set_style(style);
+    }
+    bar
 }
 
 fn join_workers(handles: Vec<thread::JoinHandle<CacheResult<()>>>) -> CacheResult<()> {
@@ -284,6 +349,42 @@ fn join_worker(handle: thread::JoinHandle<CacheResult<()>>) -> CacheResult<()> {
 
 fn join_commit(handle: thread::JoinHandle<CacheResult<()>>) -> CacheResult<()> {
     handle.join().map_err(|_| CacheError::WorkerFailed)?
+}
+
+fn extract_writer_config(
+    value: &Bound<'_, PyAny>,
+    reuse_existing: bool,
+) -> CacheResult<WriterConfig> {
+    let max_shard_bytes = value
+        .getattr("max_shard_bytes")
+        .map_err(py_error)?
+        .extract::<u64>()
+        .map_err(py_error)?;
+    let prefetch_size = value
+        .getattr("prefetch_size")
+        .map_err(py_error)?
+        .extract::<usize>()
+        .map_err(py_error)?;
+    let num_threads = value
+        .getattr("num_threads")
+        .map_err(py_error)?
+        .extract::<usize>()
+        .map_err(py_error)?;
+    let shard_compression = value.getattr("shard_compression").map_err(py_error)?;
+    let show_progress = value
+        .getattr("show_progress")
+        .map_err(py_error)?
+        .extract::<bool>()
+        .map_err(py_error)?;
+
+    Ok(WriterConfig {
+        max_shard_bytes: MaxShardBytes::new(max_shard_bytes)?,
+        prefetch_size: PrefetchSize::new(prefetch_size)?,
+        num_threads: NumThreads::new(num_threads)?,
+        shard_compression: extract_shard_compression(&shard_compression)?,
+        show_progress,
+        reuse_existing,
+    })
 }
 
 fn extract_shard_compression(value: &Bound<'_, PyAny>) -> CacheResult<ShardCompression> {

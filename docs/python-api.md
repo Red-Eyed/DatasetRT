@@ -37,6 +37,7 @@ paths = write_cache(
         num_threads=4,
         max_shard_bytes=...,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
+        show_progress=True,
     ),
 )
 paths = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterConfig(...))
@@ -54,6 +55,8 @@ Rust writes each cache into a temporary directory first and publishes it by rena
 
 `num_threads` controls the fixed Rust serialization worker pool.
 
+`show_progress` controls the Rust-owned write progress bar. It is enabled by default and reports committed samples/s and MB/s. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
+
 Writer configuration is a frozen pydantic model:
 
 ```python
@@ -68,6 +71,7 @@ class WriterConfig(BaseModel):
     num_threads: int = 4
     max_shard_bytes: int = 64 * 1024 * 1024
     shard_compression: ShardCompression = ShardCompression()
+    show_progress: bool = True
 ```
 
 Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0`.

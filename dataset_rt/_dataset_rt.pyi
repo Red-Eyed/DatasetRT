@@ -19,9 +19,6 @@ class CachedDataset:
 def write_cache(
     sources: object,
     base_cache_dir: str,
-    max_shard_bytes: int,
-    prefetch_size: int,
-    num_threads: int,
-    shard_compression: object,
+    writer_config: object,
     reuse_existing: bool,
 ) -> list[str]: ...

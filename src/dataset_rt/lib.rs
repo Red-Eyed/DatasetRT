@@ -19,22 +19,11 @@ use pyo3::prelude::*;
 fn write_cache(
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
-    max_shard_bytes: u64,
-    prefetch_size: usize,
-    num_threads: usize,
-    shard_compression: Bound<'_, PyAny>,
+    writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> PyResult<Vec<String>> {
-    writer::write_cache(
-        sources,
-        base_cache_dir,
-        max_shard_bytes,
-        prefetch_size,
-        num_threads,
-        shard_compression,
-        reuse_existing,
-    )
-    .map_err(types::CacheError::into_py_err)
+    writer::write_cache(sources, base_cache_dir, writer_config, reuse_existing)
+        .map_err(types::CacheError::into_py_err)
 }
 
 #[pymodule]

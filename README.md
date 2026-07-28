@@ -64,6 +64,7 @@ dataset = CachedDataset.from_cache_sources(
         prefetch_size=64,
         num_threads=4,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
+        show_progress=True,
     ),
 )
 
@@ -72,7 +73,7 @@ for sample in dataset:
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a ready-to-iterate dataset. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name_hash`.
+`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a ready-to-iterate dataset. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name_hash`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
 
 ## PyTorch
 
@@ -121,7 +122,7 @@ dataset = CachedDataset.from_cache_sources(
     [TrainImages(), SyntheticImages(), HardNegatives()],
     Path("cache"),
     reader_config=ReaderConfig(seed=123),
-    writer_config=WriterConfig(prefetch_size=128, num_threads=8),
+    writer_config=WriterConfig(prefetch_size=128, num_threads=8, show_progress=False),
 )
 ```
 
