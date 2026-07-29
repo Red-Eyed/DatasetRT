@@ -32,6 +32,7 @@ struct WriterConfig {
     num_threads: NumThreads,
     shard_compression: ShardCompression,
     show_progress: bool,
+    validate_cache: bool,
     reuse_existing: bool,
 }
 
@@ -124,7 +125,9 @@ fn write_named_source(
 ) -> CacheResult<PathBuf> {
     let cache_path = cache_path_for_source(base_cache_dir, source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
-        load_cache(cache_path.clone())?;
+        if config.validate_cache {
+            load_cache(cache_path.clone(), true)?;
+        }
         return Ok(cache_path);
     }
 
@@ -377,6 +380,11 @@ fn extract_writer_config(
         .map_err(py_error)?
         .extract::<bool>()
         .map_err(py_error)?;
+    let validate_cache = value
+        .getattr("validate_cache")
+        .map_err(py_error)?
+        .extract::<bool>()
+        .map_err(py_error)?;
 
     Ok(WriterConfig {
         max_shard_bytes: MaxShardBytes::new(max_shard_bytes)?,
@@ -384,6 +392,7 @@ fn extract_writer_config(
         num_threads: NumThreads::new(num_threads)?,
         shard_compression: extract_shard_compression(&shard_compression)?,
         show_progress,
+        validate_cache,
         reuse_existing,
     })
 }

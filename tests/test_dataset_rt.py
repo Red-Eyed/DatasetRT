@@ -141,6 +141,8 @@ def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path)
 
 def test_writer_progress_is_optional(tmp_path: Path) -> None:
     assert WriterConfig().show_progress is True
+    assert WriterConfig().validate_cache is False
+    assert ReaderConfig(seed=1).validate_cache is False
 
     written = success_paths(
         write_cache(
@@ -202,6 +204,7 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
         max_shard_bytes = 64 * 1024 * 1024
         shard_compression = UnsupportedCompression()
         show_progress = False
+        validate_cache = False
 
     with pytest.raises(ValueError, match="unsupported shard compression"):
         write_cache(

@@ -306,15 +306,17 @@ impl OpenShard {
     }
 }
 
-pub fn load_cache(path: PathBuf) -> CacheResult<LoadedCache> {
+pub fn load_cache(path: PathBuf, validate_cache: bool) -> CacheResult<LoadedCache> {
     let manifest = read_manifest(&path)?;
     validate_manifest_version(&manifest)?;
 
     let metadata_path = path.join("metadata.arrow");
     let index_path = path.join("index.bin");
-    verify_file_checksum(&metadata_path, &manifest.metadata_sha256)?;
-    verify_file_checksum(&index_path, &manifest.index_sha256)?;
-    verify_shards(&path, &manifest)?;
+    if validate_cache {
+        verify_file_checksum(&metadata_path, &manifest.metadata_sha256)?;
+        verify_file_checksum(&index_path, &manifest.index_sha256)?;
+    }
+    verify_shards(&path, &manifest, validate_cache)?;
 
     let metadata_rows = read_metadata_file(&metadata_path, &manifest.metadata_schema)?;
     let index = read_index_file(&index_path)?;
@@ -698,7 +700,7 @@ fn verify_file_checksum(path: &Path, expected: &str) -> CacheResult<()> {
     Ok(())
 }
 
-fn verify_shards(path: &Path, manifest: &Manifest) -> CacheResult<()> {
+fn verify_shards(path: &Path, manifest: &Manifest, validate_cache: bool) -> CacheResult<()> {
     for shard in &manifest.shards {
         let shard_path = path.join("shards").join(&shard.name);
         let metadata = fs::metadata(&shard_path)?;
@@ -708,7 +710,9 @@ fn verify_shards(path: &Path, manifest: &Manifest) -> CacheResult<()> {
                 shard_path.display()
             )));
         }
-        verify_file_checksum(&shard_path, &shard.sha256)?;
+        if validate_cache {
+            verify_file_checksum(&shard_path, &shard.sha256)?;
+        }
     }
     Ok(())
 }

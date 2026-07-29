@@ -53,6 +53,7 @@ Writer configuration:
 - `prefetch_size`: bounded Rust ingestion queue capacity.
 - `num_threads`: fixed Rust serialization worker count.
 - `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s for the active source, plus source-count progress and ETA for multi-source writes.
+- `validate_cache`: optional checksum validation for existing caches before writer reuse.
 
 If Python iteration is faster than writing, Rust prefetches up to `prefetch_size` queued messages and then blocks the ingestion edge. For multi-source writes, the queue spans source boundaries: Rust starts pulling the next source as soon as its begin/end markers fit in the queue instead of waiting for the previous source to publish. This gives burst smoothing without unbounded memory growth.
 
@@ -61,6 +62,10 @@ Multi-source writes also use a bounded worker-to-commit queue. Workers keep that
 ## Backpressure
 
 Queues are bounded. If downstream work cannot keep up, upstream producers block. This keeps memory usage controlled and makes execution behavior explicit.
+
+## Cache Validation
+
+Readers and writer reuse skip checksum validation by default. Dataset construction still reads manifests, metadata, indexes, and shard file lengths, but it does not hash metadata, index, or payload shard contents unless `validate_cache=True` is set on the relevant config. This keeps restart time tied to cache metadata size instead of payload size.
 
 ## Ordering
 

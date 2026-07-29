@@ -42,12 +42,20 @@ impl PyCachedDataset {
         prefetch_size: usize,
         num_workers: usize,
         shuffle: bool,
+        validate_cache: bool,
     ) -> PyResult<Self> {
-        DatasetState::load(paths, seed, prefetch_size, num_workers, shuffle)
-            .map(|state| Self {
-                inner: Arc::new(state),
-            })
-            .map_err(CacheError::into_py_err)
+        DatasetState::load(
+            paths,
+            seed,
+            prefetch_size,
+            num_workers,
+            shuffle,
+            validate_cache,
+        )
+        .map(|state| Self {
+            inner: Arc::new(state),
+        })
+        .map_err(CacheError::into_py_err)
     }
 
     fn __len__(&self) -> usize {
@@ -98,6 +106,7 @@ impl DatasetState {
         prefetch_size: usize,
         num_workers: usize,
         shuffle: bool,
+        validate_cache: bool,
     ) -> CacheResult<Self> {
         if paths.is_empty() {
             return Err(CacheError::InvalidInput(
@@ -105,7 +114,7 @@ impl DatasetState {
             ));
         }
 
-        let caches = load_caches(paths)?;
+        let caches = load_caches(paths, validate_cache)?;
         let schema = common_schema(&caches)?;
         let physical_samples = collect_physical_samples(&caches)?;
         if physical_samples.is_empty() {
@@ -292,10 +301,10 @@ impl PyDatasetIterator {
     }
 }
 
-fn load_caches(paths: Vec<String>) -> CacheResult<Vec<LoadedCache>> {
+fn load_caches(paths: Vec<String>, validate_cache: bool) -> CacheResult<Vec<LoadedCache>> {
     paths
         .into_iter()
-        .map(|path| load_cache(PathBuf::from(path)))
+        .map(|path| load_cache(PathBuf::from(path), validate_cache))
         .collect()
 }
 

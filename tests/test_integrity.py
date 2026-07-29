@@ -27,7 +27,10 @@ def write_integrity_cache(tmp_path: Path) -> Path:
 
 
 def load_cache(cache_path: Path) -> CachedDataset:
-    return CachedDataset([cache_path], reader_config=ReaderConfig(seed=1, shuffle=False))
+    return CachedDataset(
+        [cache_path],
+        reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=True),
+    )
 
 
 def read_manifest(cache_path: Path) -> dict[str, object]:
@@ -89,6 +92,20 @@ def test_metadata_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="checksum mismatch"):
         load_cache(cache_path)
+
+
+def test_checksum_validation_is_optional_for_dataset_load(tmp_path: Path) -> None:
+    cache_path = write_integrity_cache(tmp_path)
+    manifest = read_manifest(cache_path)
+    manifest["metadata_sha256"] = "0" * 64
+    write_manifest(cache_path, manifest)
+
+    dataset = CachedDataset(
+        [cache_path],
+        reader_config=ReaderConfig(seed=1, shuffle=False),
+    )
+
+    assert len(dataset) == 2
 
 
 def test_index_checksum_mismatch_is_rejected(tmp_path: Path) -> None:

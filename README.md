@@ -61,12 +61,19 @@ class Images:
 result = CachedDataset.from_cache_sources(
     Images(),
     Path("cache"),
-    reader_config=ReaderConfig(seed=42, prefetch_size=64, num_workers=4, shuffle=True),
+    reader_config=ReaderConfig(
+        seed=42,
+        prefetch_size=64,
+        num_workers=4,
+        shuffle=True,
+        validate_cache=False,
+    ),
     writer_config=WriterConfig(
         prefetch_size=64,
         num_threads=4,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
         show_progress=True,
+        validate_cache=False,
     ),
 )
 
@@ -81,7 +88,7 @@ for sample in dataset:
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
+`CachedDataset.from_cache_sources` creates missing caches, reuses existing cache directories, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs. Existing cache checksum validation is opt-in with `validate_cache=True`; by default DatasetRT avoids hashing every payload shard during restart.
 
 ## PyTorch
 

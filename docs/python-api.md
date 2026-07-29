@@ -38,6 +38,7 @@ results = write_cache(
         max_shard_bytes=...,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
         show_progress=True,
+        validate_cache=False,
     ),
 )
 results = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterConfig(...))
@@ -68,6 +69,8 @@ for result in results:
 
 `show_progress` controls Rust-owned write progress. It is enabled by default and reports committed samples/s and MB/s for the active source. For multi-source writes, it also reports completed sources with an ETA based on wall time and completed source count. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
 
+`validate_cache` controls checksum validation when the writer reuses an existing cache. It is `False` by default so `CachedDataset.from_cache_sources` does not hash every payload shard before handing paths to the dataset loader. Set it to `True` for integrity checks.
+
 Writer configuration is a frozen pydantic model:
 
 ```python
@@ -83,6 +86,7 @@ class WriterConfig(BaseModel):
     max_shard_bytes: int = 64 * 1024 * 1024
     shard_compression: ShardCompression = ShardCompression()
     show_progress: bool = True
+    validate_cache: bool = False
 ```
 
 Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0` and `algo="lz4"` with a positive finite ratio value.
@@ -95,6 +99,7 @@ Rules:
 - Source names used as subdirectories must be plain path segments.
 - `prefetch_size` must be greater than zero.
 - `num_threads` must be greater than zero.
+- `validate_cache=True` verifies existing cache checksums before reuse.
 - The source must yield at least one sample.
 - Payload data must be bytes-like.
 - Metadata schema is inferred from the first sample and validated for every sample.
@@ -105,7 +110,13 @@ Rules:
 ```python
 dataset = CachedDataset(
     [path],
-    reader_config=ReaderConfig(seed=42, prefetch_size=64, num_workers=4, shuffle=True),
+    reader_config=ReaderConfig(
+        seed=42,
+        prefetch_size=64,
+        num_workers=4,
+        shuffle=True,
+        validate_cache=False,
+    ),
 )
 ```
 
@@ -119,7 +130,10 @@ class ReaderConfig(BaseModel):
     prefetch_size: int = 64
     num_workers: int = 4
     shuffle: bool = True
+    validate_cache: bool = False
 ```
+
+`validate_cache` is `False` by default so dataset construction reads manifests, metadata, and indexes without hashing every shard payload. Set it to `True` when startup should verify metadata, index, and shard checksums before iteration.
 
 Rules:
 
@@ -127,6 +141,7 @@ Rules:
 - Multiple readers may load the same cache concurrently.
 - `prefetch_size` controls the bounded Rust reader queue.
 - `num_workers` controls the fixed Rust sample-loading worker pool.
+- `validate_cache=True` verifies metadata, index, and shard checksums during dataset construction.
 - With `shuffle=True`, each Python iterator snapshots the current weight vector.
 - With `shuffle=False`, samples are emitted once in physical cache order.
 - Changing weights after iterator construction affects future shuffled iterators, not existing ones.

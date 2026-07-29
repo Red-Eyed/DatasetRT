@@ -78,6 +78,9 @@ class WriterConfig(BaseModel):
     show_progress: bool = True
     """Show Rust-owned cache write progress with samples/s and MB/s."""
 
+    validate_cache: bool = False
+    """Validate existing caches during writer reuse before returning them."""
+
 
 class ReaderConfig(BaseModel):
     """Configuration for Rust-owned dataset reading and sampling."""
@@ -95,6 +98,9 @@ class ReaderConfig(BaseModel):
 
     shuffle: bool = True
     """Whether each epoch uses deterministic weighted shuffling."""
+
+    validate_cache: bool = False
+    """Verify cache checksums while loading dataset metadata and indexes."""
 
 
 DEFAULT_WRITER_CONFIG = WriterConfig()
@@ -288,6 +294,7 @@ class CachedDataset:
             reader_config.prefetch_size,
             reader_config.num_workers,
             reader_config.shuffle,
+            reader_config.validate_cache,
         )
 
     @classmethod

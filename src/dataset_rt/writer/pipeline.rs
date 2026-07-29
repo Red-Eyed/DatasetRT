@@ -133,7 +133,7 @@ fn ingest_one_source(
 
     let cache_path = cache_path_for_source(base_cache_dir, &source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
-        return send_existing_cache_result(ingress, source_index, source_name, cache_path);
+        return send_existing_cache_result(ingress, config, source_index, source_name, cache_path);
     }
 
     let temp_path = super::temp_cache_path_for_source(base_cache_dir, &source_name, source_index);
@@ -170,15 +170,28 @@ fn ingest_one_source(
 
 fn send_existing_cache_result(
     ingress: &mut PipelineIngress<'_>,
+    config: &WriterConfig,
     source_index: usize,
     source_name: String,
     cache_path: PathBuf,
 ) -> CacheResult<()> {
-    let result = match load_cache(cache_path.clone()) {
+    let result = existing_cache_result(config, source_name, cache_path);
+    ingress.send_source_result(source_index, result)
+}
+
+fn existing_cache_result(
+    config: &WriterConfig,
+    source_name: String,
+    cache_path: PathBuf,
+) -> CacheWriteRecord {
+    if !config.validate_cache {
+        return success_write_result(source_name, cache_path);
+    }
+
+    match load_cache(cache_path.clone(), true) {
         Ok(_) => success_write_result(source_name, cache_path),
         Err(error) => error_write_result(source_name, error),
-    };
-    ingress.send_source_result(source_index, result)
+    }
 }
 
 fn ingest_source_samples(
