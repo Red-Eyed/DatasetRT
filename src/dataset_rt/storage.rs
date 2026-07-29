@@ -17,8 +17,9 @@ use crate::types::{
     ShardCompression,
 };
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const INDEX_ROW_BYTES: usize = 24;
+const RECORD_METADATA_LEN_BYTES: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Manifest {
@@ -77,15 +78,17 @@ impl LoadedCache {
         let byte_len = usize::try_from(entry.byte_len).map_err(|_| {
             CacheError::InvalidCache("payload byte length does not fit in usize".to_string())
         })?;
-        let mut data = vec![0; byte_len];
+        let mut record = vec![0; byte_len];
         use std::io::Seek;
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
-        reader.read_exact(&mut data)?;
-        let data = decompress_payload(&data, &shard.compression)?;
-
+        reader.read_exact(&mut record)?;
         let metadata = self.metadata_rows.get(sample_index).ok_or_else(|| {
             CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
         })?;
+        let (embedded_metadata, stored_payload) =
+            split_sample_record(&record, &self.manifest.metadata_schema)?;
+        validate_redundant_metadata(metadata, &embedded_metadata, sample_index)?;
+        let data = decompress_payload(stored_payload, &shard.compression)?;
 
         Ok(CacheSample {
             data,
@@ -154,15 +157,16 @@ impl CacheBuilder {
         let uncompressed_byte_len = u64::try_from(data.len()).map_err(|_| {
             CacheError::InvalidInput("payload byte length does not fit in u64".to_string())
         })?;
-        let stored_data = compress_payload(data, &self.shard_compression);
-        let stored_byte_len = u64::try_from(stored_data.len()).map_err(|_| {
+        let stored_payload = compress_payload(data, &self.shard_compression);
+        let record = encode_sample_record(&stored_payload, &self.schema, &metadata_row)?;
+        let stored_byte_len = u64::try_from(record.len()).map_err(|_| {
             CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
         })?;
         self.rotate_shard_if_needed(stored_byte_len)?;
 
         let entry = self
             .current_shard
-            .write_payload(&stored_data, uncompressed_byte_len)?;
+            .write_payload(&record, uncompressed_byte_len)?;
         self.index.push(entry);
         self.metadata_rows.push(metadata_row);
         Ok(())
@@ -533,6 +537,102 @@ fn metadata_cell(row: &[MetadataValue], column_index: usize) -> CacheResult<&Met
         .ok_or_else(|| CacheError::InvalidInput("metadata column is out of range".to_string()))
 }
 
+fn encode_sample_record(
+    stored_payload: &[u8],
+    schema: &[MetadataField],
+    metadata_row: &[MetadataValue],
+) -> CacheResult<Vec<u8>> {
+    let metadata_object = metadata_row_to_object(schema, metadata_row)?;
+    let metadata_json = serde_json::to_vec(&metadata_object)?;
+    let metadata_len = u64::try_from(metadata_json.len()).map_err(|_| {
+        CacheError::InvalidInput("metadata record length does not fit in u64".to_string())
+    })?;
+    let mut record =
+        Vec::with_capacity(RECORD_METADATA_LEN_BYTES + metadata_json.len() + stored_payload.len());
+    record.extend_from_slice(&metadata_len.to_le_bytes());
+    record.extend_from_slice(&metadata_json);
+    record.extend_from_slice(stored_payload);
+    Ok(record)
+}
+
+fn split_sample_record<'a>(
+    record: &'a [u8],
+    schema: &[MetadataField],
+) -> CacheResult<(Vec<MetadataValue>, &'a [u8])> {
+    let metadata_len = read_u64(record_range(record, 0, RECORD_METADATA_LEN_BYTES)?)?;
+    let metadata_len = usize::try_from(metadata_len).map_err(|_| {
+        CacheError::InvalidCache("metadata record length does not fit in usize".to_string())
+    })?;
+    let payload_start = RECORD_METADATA_LEN_BYTES
+        .checked_add(metadata_len)
+        .ok_or_else(|| CacheError::InvalidCache("metadata record length overflowed".to_string()))?;
+    let metadata_json = record_range(record, RECORD_METADATA_LEN_BYTES, payload_start)?;
+    let metadata_object = serde_json::from_slice(metadata_json)?;
+    let metadata = metadata_object_to_row(schema, metadata_object)?;
+    let stored_payload = record.get(payload_start..).ok_or_else(|| {
+        CacheError::InvalidCache("payload record is missing stored payload".to_string())
+    })?;
+    Ok((metadata, stored_payload))
+}
+
+fn metadata_row_to_object(
+    schema: &[MetadataField],
+    row: &[MetadataValue],
+) -> CacheResult<BTreeMap<String, MetadataValue>> {
+    if row.len() != schema.len() {
+        return Err(CacheError::InvalidInput(
+            "metadata row length does not match schema".to_string(),
+        ));
+    }
+
+    schema
+        .iter()
+        .zip(row.iter())
+        .map(|(field, value)| Ok((field.name.clone(), value.clone())))
+        .collect()
+}
+
+fn metadata_object_to_row(
+    schema: &[MetadataField],
+    metadata: BTreeMap<String, MetadataValue>,
+) -> CacheResult<Vec<MetadataValue>> {
+    if metadata.len() != schema.len() {
+        return Err(CacheError::InvalidCache(
+            "embedded metadata keys do not match schema".to_string(),
+        ));
+    }
+
+    schema
+        .iter()
+        .map(|field| match metadata.get(&field.name) {
+            Some(value) if value.kind() == field.kind => Ok(value.clone()),
+            Some(value) => Err(CacheError::InvalidCache(format!(
+                "embedded metadata field '{}' expected {}, got {}",
+                field.name,
+                field.kind,
+                value.kind()
+            ))),
+            None => Err(CacheError::InvalidCache(format!(
+                "embedded metadata field '{}' is missing",
+                field.name
+            ))),
+        })
+        .collect()
+}
+
+fn validate_redundant_metadata(
+    metadata: &[MetadataValue],
+    embedded_metadata: &[MetadataValue],
+    sample_index: usize,
+) -> CacheResult<()> {
+    if metadata != embedded_metadata {
+        return Err(CacheError::InvalidCache(format!(
+            "embedded metadata does not match metadata.arrow for sample {sample_index}"
+        )));
+    }
+    Ok(())
+}
+
 fn write_index_file(path: &Path, index: &[IndexEntry]) -> CacheResult<String> {
     let index_path = path.join("index.bin");
     let mut file = BufWriter::new(File::create(&index_path)?);
@@ -571,9 +671,13 @@ fn read_index_entry(bytes: &[u8]) -> CacheResult<IndexEntry> {
 }
 
 fn index_field(bytes: &[u8], start: usize, end: usize) -> CacheResult<&[u8]> {
+    record_range(bytes, start, end)
+}
+
+fn record_range(bytes: &[u8], start: usize, end: usize) -> CacheResult<&[u8]> {
     bytes
         .get(start..end)
-        .ok_or_else(|| CacheError::InvalidCache("invalid index row".to_string()))
+        .ok_or_else(|| CacheError::InvalidCache("invalid binary record".to_string()))
 }
 
 fn read_u64(bytes: &[u8]) -> CacheResult<u64> {

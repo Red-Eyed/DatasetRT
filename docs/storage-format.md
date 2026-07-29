@@ -32,6 +32,8 @@ If `manifest.json` is missing, the cache is incomplete and must not be read.
 
 `metadata.arrow` stores one row per physical sample. Metadata is separate from payload bytes so sampling and filtering can inspect metadata without opening payload shards.
 
+The same metadata is also embedded redundantly in each shard record. That copy is for debugging, visualization, and sample-level inspection when iterating through raw shard records. Readers compare the embedded metadata with `metadata.arrow` when materializing a sample and reject mismatches.
+
 Metadata values are primitive Arrow-compatible values:
 
 - Boolean.
@@ -55,7 +57,13 @@ All integer fields are little-endian unsigned 64-bit values.
 
 ## Shards
 
-Shard files contain concatenated payload byte slices. Payloads are not self-delimiting; the index is the authority for locating them.
+Shard files contain concatenated sample records. The index is the authority for locating each record.
+
+Each indexed record stores:
+
+- Metadata JSON byte length as a little-endian unsigned 64-bit value.
+- Metadata JSON object.
+- Stored payload bytes.
 
 Shard rotation is controlled by a validated `max_shard_bytes` configuration value. A single sample may exceed the target shard size; it is still written atomically.
 
@@ -67,7 +75,7 @@ Each shard manifest entry records:
 - `compression`: `{ "algo": "none", "ratio": 1.0 }` or `{ "algo": "lz4", "ratio": ... }`
 - `sha256`
 
-Compression is applied per indexed payload record. `index.bin` offsets and byte lengths point to stored bytes in the shard, which may be compressed. Readers decompress the single addressed payload before returning sample bytes.
+Compression is applied per indexed payload, after the redundant metadata envelope. `index.bin` offsets and byte lengths point to full sample records in the shard. Readers parse the metadata envelope, validate it against `metadata.arrow`, and then decompress the single addressed payload before returning sample bytes.
 
 ## Integrity
 
@@ -79,5 +87,6 @@ Writers calculate SHA-256 checksums while committing files. Readers verify:
 - Shard lengths match the manifest.
 - SHA-256 checksums match the manifest.
 - Index and metadata checksums match the manifest.
+- Embedded shard metadata matches `metadata.arrow` when a sample is read.
 
 Reader validation happens before iteration starts.

@@ -68,7 +68,25 @@ def test_writer_manifest_records_shard_compression(tmp_path: Path) -> None:
     manifest = json.loads((written[0] / "manifest.json").read_text())
 
     assert manifest["shards"][0]["compression"] == {"algo": "none", "ratio": 1.0}
-    assert manifest["shards"][0]["uncompressed_byte_len"] == manifest["shards"][0]["byte_len"]
+    assert manifest["shards"][0]["byte_len"] > manifest["shards"][0]["uncompressed_byte_len"]
+
+
+def test_shard_records_embed_metadata_for_debugging(tmp_path: Path) -> None:
+    written = write_cache(
+        TinySource(),
+        tmp_path / "cache",
+        writer_config=WriterConfig(show_progress=False),
+    )
+    cache_path = written[0]
+    manifest = json.loads((cache_path / "manifest.json").read_text())
+    index = (cache_path / "index.bin").read_bytes()
+    shard = (cache_path / "shards" / manifest["shards"][0]["name"]).read_bytes()
+    first_record = shard[: int.from_bytes(index[16:24], "little")]
+    metadata_len = int.from_bytes(first_record[:8], "little")
+    embedded_metadata = json.loads(first_record[8 : 8 + metadata_len])
+
+    assert manifest["format_version"] == 2
+    assert embedded_metadata == {"index": 0, "kept": True, "label": "a", "score": 1.5}
 
 
 def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path) -> None:

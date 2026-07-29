@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -31,6 +32,33 @@ def read_manifest(cache_path: Path) -> dict[str, object]:
 
 def write_manifest(cache_path: Path, manifest: dict[str, object]) -> None:
     (cache_path / "manifest.json").write_text(json.dumps(manifest))
+
+
+def read_u64(bytes_: bytes) -> int:
+    return int.from_bytes(bytes_, "little")
+
+
+def replace_first_embedded_metadata(cache_path: Path, metadata: dict[str, object]) -> None:
+    manifest = read_manifest(cache_path)
+    index = (cache_path / "index.bin").read_bytes()
+    shard_id = read_u64(index[:8])
+    offset = read_u64(index[8:16])
+    byte_len = read_u64(index[16:24])
+    shards = manifest["shards"]
+    assert isinstance(shards, list)
+    shard = shards[shard_id]
+    assert isinstance(shard, dict)
+    shard_path = cache_path / "shards" / str(shard["name"])
+    shard_bytes = bytearray(shard_path.read_bytes())
+    record = bytes(shard_bytes[offset : offset + byte_len])
+    metadata_len = read_u64(record[:8])
+    encoded_metadata = json.dumps(metadata, separators=(",", ":"), sort_keys=True).encode()
+
+    assert len(encoded_metadata) == metadata_len
+    shard_bytes[offset + 8 : offset + 8 + metadata_len] = encoded_metadata
+    shard_path.write_bytes(shard_bytes)
+    shard["sha256"] = hashlib.sha256(shard_bytes).hexdigest()
+    write_manifest(cache_path, manifest)
 
 
 def test_missing_manifest_is_rejected(tmp_path: Path) -> None:
@@ -94,3 +122,11 @@ def test_manifest_sample_count_mismatch_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="row count does not match manifest"):
         load_cache(cache_path)
+
+
+def test_embedded_metadata_mismatch_is_rejected_during_iteration(tmp_path: Path) -> None:
+    cache_path = write_integrity_cache(tmp_path)
+    replace_first_embedded_metadata(cache_path, {"index": 9, "split": "train"})
+
+    with pytest.raises(ValueError, match="embedded metadata does not match"):
+        list(load_cache(cache_path))

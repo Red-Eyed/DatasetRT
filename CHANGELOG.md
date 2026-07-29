@@ -2,6 +2,13 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.5 - 2026-07-29
+
+### Changed
+
+- Bumped the cache storage format to v2 and embedded each sample's metadata redundantly in its shard record for debugging, visualization, and raw record inspection.
+- Readers now validate embedded shard metadata against `metadata.arrow` when materializing a sample.
+
 ## 0.1.4 - 2026-07-28
 
 ### Added

@@ -141,7 +141,7 @@ cache/
             000001.bin
 ```
 
-Metadata is stored separately from payload bytes. This keeps sampling, filtering, auditing, and weight editing independent of domain payload decoding.
+Metadata is stored separately from payload bytes. This keeps sampling, filtering, auditing, and weight editing independent of domain payload decoding. Each shard record also embeds the same metadata redundantly so raw record inspection and visualization can show sample context without joining back through Arrow.
 
 ## What DatasetRT Does Not Do
 
