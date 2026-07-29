@@ -2,6 +2,13 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.8 - 2026-07-29
+
+### Fixed
+
+- Writer Ctrl-C handling now preserves `KeyboardInterrupt` and `SystemExit` instead of converting them into per-source cache write errors.
+- Long writer ingestion waits now poll Python signals so interrupted writes stop promptly and clean up temporary cache directories.
+
 ## 0.1.7 - 2026-07-29
 
 ### Changed
