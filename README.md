@@ -81,7 +81,7 @@ for sample in dataset:
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
+`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
 
 ## PyTorch
 

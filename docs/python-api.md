@@ -66,7 +66,7 @@ for result in results:
 
 `num_threads` controls the fixed Rust serialization worker pool.
 
-`show_progress` controls the Rust-owned write progress bar. It is enabled by default and reports committed samples/s and MB/s. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
+`show_progress` controls Rust-owned write progress. It is enabled by default and reports committed samples/s and MB/s for the active source. For multi-source writes, it also reports completed sources with an ETA based on wall time and completed source count. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
 
 Writer configuration is a frozen pydantic model:
 

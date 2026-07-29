@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
@@ -46,6 +46,15 @@ struct WriteProgress {
     started_at: Instant,
     items: u64,
     bytes: u64,
+    clear_on_finish: bool,
+}
+
+struct SourceListProgress {
+    multi: Option<MultiProgress>,
+    bar: Option<ProgressBar>,
+    started_at: Instant,
+    completed: u64,
+    total: u64,
 }
 
 enum CommitMessage {
@@ -71,6 +80,7 @@ pub fn write_cache(
         &base_cache_dir,
         0,
         &config,
+        None,
     )?])
 }
 
@@ -81,11 +91,29 @@ fn write_source_list(
 ) -> CacheResult<Vec<(String, String, String)>> {
     ensure_unique_source_paths(sources, base_cache_dir)?;
 
-    sources
-        .iter()
-        .enumerate()
-        .map(|(index, source)| write_one_source_result(source, base_cache_dir, index, config))
-        .collect::<CacheResult<Vec<_>>>()
+    let mut progress = SourceListProgress::new(config.show_progress, sources.len());
+    let mut results = Vec::with_capacity(sources.len());
+
+    for (index, source) in sources.iter().enumerate() {
+        let result = match write_one_source_result(
+            source,
+            base_cache_dir,
+            index,
+            config,
+            progress.multi_progress(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                progress.abandon();
+                return Err(error);
+            }
+        };
+        results.push(result);
+        progress.record_source();
+    }
+
+    progress.finish();
+    Ok(results)
 }
 
 fn ensure_unique_source_paths(
@@ -116,6 +144,7 @@ fn write_one_source_result(
     base_cache_dir: &Path,
     source_index: usize,
     config: &WriterConfig,
+    multi_progress: Option<&MultiProgress>,
 ) -> CacheResult<(String, String, String)> {
     let source_name = match extract_source_name(&source) {
         Ok(source_name) => source_name,
@@ -129,7 +158,14 @@ fn write_one_source_result(
         Err(error) => return Ok(error_write_result(source_label(source_index), error)),
     };
 
-    match write_named_source(source, base_cache_dir, source_index, config, &source_name) {
+    match write_named_source(
+        source,
+        base_cache_dir,
+        source_index,
+        config,
+        &source_name,
+        multi_progress,
+    ) {
         Ok(path) => Ok(success_write_result(source_name, path)),
         // Preserve Ctrl-C/SystemExit so Python callers can stop the whole write immediately.
         Err(CacheError::KeyboardInterrupt(message)) => Err(CacheError::KeyboardInterrupt(message)),
@@ -144,6 +180,7 @@ fn write_named_source(
     source_index: usize,
     config: &WriterConfig,
     source_name: &str,
+    multi_progress: Option<&MultiProgress>,
 ) -> CacheResult<PathBuf> {
     let cache_path = cache_path_for_source(base_cache_dir, source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
@@ -166,7 +203,8 @@ fn write_named_source(
         }
     };
     let iterator = PyIterator::from_object(&source).map_err(py_error)?;
-    if let Err(error) = write_with_pipeline(iterator, builder, source_name, config) {
+    if let Err(error) = write_with_pipeline(iterator, builder, source_name, config, multi_progress)
+    {
         cleanup_temp_cache(&temp_path)?;
         return Err(error);
     }
@@ -194,10 +232,11 @@ fn write_with_pipeline(
     builder: CacheBuilder,
     source_name: &str,
     config: &WriterConfig,
+    multi_progress: Option<&MultiProgress>,
 ) -> CacheResult<()> {
     let (input_sender, input_receiver) = bounded(config.prefetch_size.as_usize());
     let (commit_sender, commit_receiver) = bounded(config.prefetch_size.as_usize());
-    let progress = WriteProgress::new(config.show_progress, source_name);
+    let progress = WriteProgress::new(config.show_progress, source_name, multi_progress);
     let commit_handle = spawn_commit_thread(builder, commit_receiver, progress);
     let worker_handles =
         spawn_serialization_workers(input_receiver, commit_sender.clone(), config.num_threads);
@@ -355,13 +394,15 @@ fn commit_ready_samples(
 }
 
 impl WriteProgress {
-    fn new(enabled: bool, source_name: &str) -> Self {
-        let bar = enabled.then(|| create_progress_bar(source_name));
+    fn new(enabled: bool, source_name: &str, multi_progress: Option<&MultiProgress>) -> Self {
+        let clear_on_finish = multi_progress.is_some();
+        let bar = enabled.then(|| create_progress_bar(source_name, multi_progress));
         Self {
             bar,
             started_at: Instant::now(),
             items: 0,
             bytes: 0,
+            clear_on_finish,
         }
     }
 
@@ -378,7 +419,11 @@ impl WriteProgress {
 
     fn finish(&self) {
         if let Some(bar) = &self.bar {
-            bar.finish_with_message(self.message());
+            if self.clear_on_finish {
+                bar.finish_and_clear();
+            } else {
+                bar.finish_with_message(self.message());
+            }
         }
     }
 
@@ -393,8 +438,87 @@ impl WriteProgress {
     }
 }
 
-fn create_progress_bar(source_name: &str) -> ProgressBar {
-    let bar = ProgressBar::new_spinner();
+impl SourceListProgress {
+    fn new(enabled: bool, total: usize) -> Self {
+        let total = u64::try_from(total).unwrap_or(u64::MAX);
+        let multi = enabled.then(MultiProgress::new);
+        let bar = multi
+            .as_ref()
+            .map(|multi| create_source_list_progress_bar(multi, total));
+        let progress = Self {
+            multi,
+            bar,
+            started_at: Instant::now(),
+            completed: 0,
+            total,
+        };
+        progress.refresh();
+        progress
+    }
+
+    fn multi_progress(&self) -> Option<&MultiProgress> {
+        self.multi.as_ref()
+    }
+
+    fn record_source(&mut self) {
+        self.completed = self.completed.saturating_add(1);
+        if let Some(bar) = &self.bar {
+            bar.inc(1);
+        }
+        self.refresh();
+    }
+
+    fn finish(&self) {
+        if let Some(bar) = &self.bar {
+            bar.finish_with_message(self.message());
+        }
+    }
+
+    fn abandon(&self) {
+        if let Some(bar) = &self.bar {
+            bar.abandon_with_message(self.message());
+        }
+    }
+
+    fn refresh(&self) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(self.message());
+            bar.tick();
+        }
+    }
+
+    fn message(&self) -> String {
+        if self.completed == 0 {
+            return "ETA --".to_string();
+        }
+        let elapsed_seconds = self.started_at.elapsed().as_secs_f64().max(0.001);
+        let sources_per_second = self.completed as f64 / elapsed_seconds;
+        let remaining = self.total.saturating_sub(self.completed) as f64;
+        let eta = Duration::from_secs_f64(remaining / sources_per_second);
+        format!(
+            "{:.1} sources/s | ETA {}",
+            sources_per_second,
+            format_eta(eta)
+        )
+    }
+}
+
+fn create_source_list_progress_bar(multi_progress: &MultiProgress, total: u64) -> ProgressBar {
+    let bar = multi_progress.add(ProgressBar::new(total));
+    bar.set_prefix("sources");
+    if let Ok(style) =
+        ProgressStyle::with_template("{wide_bar:.cyan/blue} {prefix} {pos}/{len} {msg}")
+    {
+        bar.set_style(style.progress_chars("=>-"));
+    }
+    bar
+}
+
+fn create_progress_bar(source_name: &str, multi_progress: Option<&MultiProgress>) -> ProgressBar {
+    let bar = match multi_progress {
+        Some(multi_progress) => multi_progress.add(ProgressBar::new_spinner()),
+        None => ProgressBar::new_spinner(),
+    };
     bar.set_prefix(format!("writing {source_name}"));
     bar.enable_steady_tick(Duration::from_millis(100));
     // Progress rendering is observability only; an invalid style must never fail cache writes.
@@ -402,6 +526,17 @@ fn create_progress_bar(source_name: &str) -> ProgressBar {
         bar.set_style(style);
     }
     bar
+}
+
+fn format_eta(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h {:02}m", seconds / 3_600, seconds % 3_600 / 60)
 }
 
 fn join_workers(handles: Vec<thread::JoinHandle<CacheResult<()>>>) -> CacheResult<()> {
