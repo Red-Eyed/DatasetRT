@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_ipc::reader::FileReader;
@@ -109,6 +110,32 @@ pub struct CacheBuilder {
     current_shard: OpenShard,
 }
 
+/// Timing data returned by one sample write.
+///
+/// Storage returns plain measurements instead of writing profiler output
+/// itself; the writer layer decides whether and where to publish them.
+#[derive(Default)]
+pub struct PushSampleStats {
+    pub metadata_validate: Duration,
+    pub compression: Duration,
+    pub record_encode: Duration,
+    pub disk_write: Duration,
+    pub uncompressed_bytes: u64,
+    pub stored_bytes: u64,
+}
+
+/// Timing data returned by final cache materialization.
+///
+/// These stages are grouped around durable side effects: shard flush,
+/// metadata/index files, and the manifest publication marker.
+#[derive(Default)]
+pub struct FinishStats {
+    pub shard_flush: Duration,
+    pub metadata: Duration,
+    pub index: Duration,
+    pub manifest: Duration,
+}
+
 struct OpenShard {
     id: u64,
     name: String,
@@ -152,38 +179,59 @@ impl CacheBuilder {
         &mut self,
         data: Vec<u8>,
         metadata: BTreeMap<String, MetadataValue>,
-    ) -> CacheResult<()> {
+    ) -> CacheResult<PushSampleStats> {
+        let metadata_started_at = Instant::now();
         let metadata_row = self.validate_metadata(metadata)?;
+        let metadata_validate = metadata_started_at.elapsed();
         let uncompressed_byte_len = u64::try_from(data.len()).map_err(|_| {
             CacheError::InvalidInput("payload byte length does not fit in u64".to_string())
         })?;
+        let compression_started_at = Instant::now();
         let stored_payload = compress_payload(data, &self.shard_compression);
+        let compression = compression_started_at.elapsed();
+        let record_started_at = Instant::now();
         let record = encode_sample_record(&stored_payload, &self.schema, &metadata_row)?;
+        let record_encode = record_started_at.elapsed();
         let stored_byte_len = u64::try_from(record.len()).map_err(|_| {
             CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
         })?;
         self.rotate_shard_if_needed(stored_byte_len)?;
 
+        let disk_started_at = Instant::now();
         let entry = self
             .current_shard
             .write_payload(&record, uncompressed_byte_len)?;
+        let disk_write = disk_started_at.elapsed();
         self.index.push(entry);
         self.metadata_rows.push(metadata_row);
-        Ok(())
+        Ok(PushSampleStats {
+            metadata_validate,
+            compression,
+            record_encode,
+            disk_write,
+            uncompressed_bytes: uncompressed_byte_len,
+            stored_bytes: stored_byte_len,
+        })
     }
 
-    pub fn finish(mut self) -> CacheResult<Manifest> {
+    pub fn finish(mut self) -> CacheResult<(Manifest, FinishStats)> {
         if self.index.is_empty() {
             return Err(CacheError::InvalidInput(
                 "cache source yielded no samples".to_string(),
             ));
         }
 
+        let shard_started_at = Instant::now();
         let final_shard = self.current_shard.finish(&self.shard_compression)?;
+        let shard_flush = shard_started_at.elapsed();
         self.shards.push(final_shard);
 
+        let metadata_started_at = Instant::now();
         let metadata_sha256 = write_metadata_file(&self.path, &self.schema, &self.metadata_rows)?;
+        let metadata = metadata_started_at.elapsed();
+        let index_started_at = Instant::now();
         let index_sha256 = write_index_file(&self.path, &self.index)?;
+        let index = index_started_at.elapsed();
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
             source_name: self.source_name,
@@ -194,8 +242,18 @@ impl CacheBuilder {
             shards: self.shards,
         };
         // The manifest is the publication marker: readers reject caches until it exists.
+        let manifest_started_at = Instant::now();
         write_manifest(&self.path, &manifest)?;
-        Ok(manifest)
+        let manifest_time = manifest_started_at.elapsed();
+        Ok((
+            manifest,
+            FinishStats {
+                shard_flush,
+                metadata,
+                index,
+                manifest: manifest_time,
+            },
+        ))
     }
 
     fn rotate_shard_if_needed(&mut self, next_payload_len: u64) -> CacheResult<()> {

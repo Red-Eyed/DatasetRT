@@ -87,11 +87,18 @@ class WriterConfig(BaseModel):
     shard_compression: ShardCompression = ShardCompression()
     show_progress: bool = True
     validate_cache: bool = False
+    profiler: WriterProfilerConfig = WriterProfilerConfig()
+
+class WriterProfilerConfig(BaseModel):
+    enabled: bool = False
+    path: Path = Path("dataset_rt_profile.json")
 ```
 
 Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0` and `algo="lz4"` with a positive finite ratio value.
 
 LZ4 compression is applied per payload record, not to the whole shard as one stream. This keeps random sample access direct: the index locates one compressed record, and Rust decompresses that record before returning the original bytes. The commonly named Rust `zstd` crate is a binding to the C zstd library, so it is not used for v0.1. A pure-Rust zstd implementation may be considered later once its compression path is accepted as stable enough for DatasetRT.
+
+Set `profiler=WriterProfilerConfig(enabled=True, path=Path("profile.json"))` to write a structured timing summary after the write returns, including handled failures such as Ctrl-C. The summary separates Python iterator time (`python_next`), Python-to-Rust extraction (`python_extract`), queue backpressure (`ingress_wait`), Rust metadata/record work, compression, disk writes, finish steps, and publish time.
 
 Rules:
 

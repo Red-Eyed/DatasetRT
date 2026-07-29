@@ -20,6 +20,7 @@ from dataset_rt import (
     ReaderConfig,
     ShardCompression,
     WriterConfig,
+    WriterProfilerConfig,
     write_cache,
 )
 
@@ -153,6 +154,80 @@ def test_writer_progress_is_optional(tmp_path: Path) -> None:
     )
 
     assert len(written) == 1
+
+
+def test_writer_profiler_is_disabled_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    written = success_paths(
+        write_cache(
+            TinySource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(show_progress=False),
+        )
+    )
+
+    assert len(written) == 1
+    assert not (tmp_path / "dataset_rt_profile.json").exists()
+
+
+def test_writer_profiler_records_success_summary(tmp_path: Path) -> None:
+    profile_path = tmp_path / "profile.json"
+
+    written = success_paths(
+        write_cache(
+            TinySource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(
+                show_progress=False,
+                profiler=WriterProfilerConfig(enabled=True, path=profile_path),
+            ),
+        )
+    )
+    profile = json.loads(profile_path.read_text())
+    tiny_profile = profile["sources"][0]
+    stages = {stage["name"]: stage for stage in tiny_profile["stages"]}
+
+    assert len(written) == 1
+    assert profile["format_version"] == 1
+    assert tiny_profile["source_name"] == "tiny"
+    assert stages["python_next"]["calls"] == 4
+    assert stages["python_extract"]["bytes"] == 10
+    assert stages["compression"]["calls"] == 3
+    assert stages["disk_write"]["calls"] == 3
+    assert stages["finish_manifest"]["calls"] == 1
+    assert stages["publish"]["calls"] == 1
+
+
+def test_writer_profiler_flushes_on_keyboard_interrupt(tmp_path: Path) -> None:
+    class InterruptedSource:
+        name = "interrupted_profile"
+
+        def __iter__(self):
+            yield CacheInput(b"first", {"label": "ok"})
+            raise KeyboardInterrupt("stop")
+
+    profile_path = tmp_path / "interrupted-profile.json"
+
+    with pytest.raises(KeyboardInterrupt):
+        write_cache(
+            InterruptedSource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(
+                show_progress=False,
+                profiler=WriterProfilerConfig(enabled=True, path=profile_path),
+            ),
+        )
+
+    profile = json.loads(profile_path.read_text())
+    interrupted_profile = profile["sources"][0]
+    stages = {stage["name"]: stage for stage in interrupted_profile["stages"]}
+
+    assert interrupted_profile["source_name"] == "interrupted_profile"
+    assert stages["python_next"]["calls"] >= 1
+    assert stages["python_extract"]["bytes"] == 5
 
 
 def test_write_multiple_sources_returns_cache_paths(tmp_path: Path) -> None:

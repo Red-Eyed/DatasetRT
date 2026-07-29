@@ -58,6 +58,26 @@ class ShardCompression(BaseModel):
 DEFAULT_SHARD_COMPRESSION = ShardCompression()
 
 
+class WriterProfilerConfig(BaseModel):
+    """Optional writer profiler output.
+
+    Profiling is disabled by default. When enabled, Rust writes a structured
+    JSON summary at `path` after successful writes and handled failures such as
+    Ctrl-C.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    """Whether Rust should collect and write writer-stage timing stats."""
+
+    path: Path = Path("dataset_rt_profile.json")
+    """JSON summary path used when profiling is enabled."""
+
+
+DEFAULT_WRITER_PROFILER_CONFIG = WriterProfilerConfig()
+
+
 class WriterConfig(BaseModel):
     """Configuration for Rust-owned cache writing."""
 
@@ -80,6 +100,9 @@ class WriterConfig(BaseModel):
 
     validate_cache: bool = False
     """Validate existing caches during writer reuse before returning them."""
+
+    profiler: WriterProfilerConfig = DEFAULT_WRITER_PROFILER_CONFIG
+    """Optional writer-stage profiler output."""
 
 
 class ReaderConfig(BaseModel):

@@ -13,6 +13,7 @@ from dataset_rt.api import (
     ShardCompression,
     SizedTorchIterableDataset,
     WriterConfig,
+    WriterProfilerConfig,
     write_cache,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "ShardCompression",
     "SizedTorchIterableDataset",
     "WriterConfig",
+    "WriterProfilerConfig",
     "write_cache",
 ]

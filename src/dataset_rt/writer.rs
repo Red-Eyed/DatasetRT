@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
 use indicatif::MultiProgress;
@@ -10,7 +10,7 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
 
-use crate::storage::{load_cache, CacheBuilder};
+use crate::storage::{load_cache, CacheBuilder, FinishStats, PushSampleStats};
 use crate::types::{
     CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumThreads,
     PrefetchSize, ShardCompression,
@@ -22,7 +22,11 @@ mod progress;
 #[path = "writer/pipeline.rs"]
 mod pipeline;
 
+#[path = "writer/profiler.rs"]
+mod profiler;
+
 use pipeline::write_source_list;
+use profiler::{ProfileStage, WriterProfiler, WriterProfilerConfig};
 use progress::WriteProgress;
 
 #[derive(Clone)]
@@ -34,6 +38,7 @@ struct WriterConfig {
     show_progress: bool,
     validate_cache: bool,
     reuse_existing: bool,
+    profiler: WriterProfilerConfig,
 }
 
 struct QueuedSample {
@@ -66,18 +71,16 @@ pub fn write_cache(
 ) -> CacheResult<Vec<(String, String, String)>> {
     let config = extract_writer_config(&writer_config, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
+    let profiler = WriterProfiler::new(&config.profiler);
 
-    if let Ok(source_list) = sources.cast::<PyList>() {
-        return write_source_list(source_list, &base_cache_dir, &config);
-    }
+    let result = if let Ok(source_list) = sources.cast::<PyList>() {
+        write_source_list(source_list, &base_cache_dir, &config, profiler.clone())
+    } else {
+        write_one_source_result(sources, &base_cache_dir, 0, &config, None, profiler.clone())
+            .map(|record| vec![record])
+    };
 
-    Ok(vec![write_one_source_result(
-        sources,
-        &base_cache_dir,
-        0,
-        &config,
-        None,
-    )?])
+    finish_with_profile(result, &profiler)
 }
 
 fn write_one_source_result(
@@ -86,6 +89,7 @@ fn write_one_source_result(
     source_index: usize,
     config: &WriterConfig,
     multi_progress: Option<&MultiProgress>,
+    profiler: WriterProfiler,
 ) -> CacheResult<(String, String, String)> {
     let source_name = match extract_source_name(&source) {
         Ok(source_name) => source_name,
@@ -106,6 +110,7 @@ fn write_one_source_result(
         config,
         &source_name,
         multi_progress,
+        profiler,
     ) {
         Ok(path) => Ok(success_write_result(source_name, path)),
         // Preserve Ctrl-C/SystemExit so Python callers can stop the whole write immediately.
@@ -122,6 +127,7 @@ fn write_named_source(
     config: &WriterConfig,
     source_name: &str,
     multi_progress: Option<&MultiProgress>,
+    profiler: WriterProfiler,
 ) -> CacheResult<PathBuf> {
     let cache_path = cache_path_for_source(base_cache_dir, source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
@@ -146,15 +152,32 @@ fn write_named_source(
         }
     };
     let iterator = PyIterator::from_object(&source).map_err(py_error)?;
-    if let Err(error) = write_with_pipeline(iterator, builder, source_name, config, multi_progress)
-    {
+    if let Err(error) = write_with_pipeline(
+        iterator,
+        builder,
+        source_name,
+        config,
+        multi_progress,
+        profiler.clone(),
+    ) {
         cleanup_temp_cache(&temp_path)?;
         return Err(error);
     }
+    let publish_started_at = Instant::now();
     if let Err(error) = publish_cache(&temp_path, &cache_path) {
+        profiler.record(
+            source_name,
+            ProfileStage::Publish,
+            publish_started_at.elapsed(),
+        );
         cleanup_temp_cache(&temp_path)?;
         return Err(error);
     }
+    profiler.record(
+        source_name,
+        ProfileStage::Publish,
+        publish_started_at.elapsed(),
+    );
     Ok(cache_path)
 }
 
@@ -170,6 +193,23 @@ fn error_write_message(source_name: String, message: String) -> (String, String,
     ("error".to_string(), source_name, message)
 }
 
+fn finish_with_profile<T>(result: CacheResult<T>, profiler: &WriterProfiler) -> CacheResult<T> {
+    let profile_result = profiler.finish();
+    match result {
+        Ok(value) => {
+            profile_result?;
+            Ok(value)
+        }
+        Err(error) => {
+            // Preserve the writer failure or Python control-flow exception.
+            // Profiling is diagnostic, so a failed best-effort flush must not
+            // hide Ctrl-C, SystemExit, or the original cache-writing error.
+            let _ = profile_result;
+            Err(error)
+        }
+    }
+}
+
 fn source_label(source_index: usize) -> String {
     format!("source[{source_index}]")
 }
@@ -180,15 +220,28 @@ fn write_with_pipeline(
     source_name: &str,
     config: &WriterConfig,
     multi_progress: Option<&MultiProgress>,
+    profiler: WriterProfiler,
 ) -> CacheResult<()> {
     let (input_sender, input_receiver) = bounded(config.prefetch_size.as_usize());
     let (commit_sender, commit_receiver) = bounded(config.prefetch_size.as_usize());
     let progress = WriteProgress::new(config.show_progress, source_name, multi_progress);
-    let commit_handle = spawn_commit_thread(builder, commit_receiver, progress);
+    let commit_handle = spawn_commit_thread(
+        builder,
+        commit_receiver,
+        progress,
+        source_name.to_string(),
+        profiler.clone(),
+    );
     let worker_handles =
         spawn_serialization_workers(input_receiver, commit_sender.clone(), config.num_threads);
 
-    let ingestion_result = ingest_python_samples(iterator, &input_sender, &commit_sender);
+    let ingestion_result = ingest_python_samples(
+        iterator,
+        &input_sender,
+        &commit_sender,
+        source_name,
+        &profiler,
+    );
     drop(input_sender);
     drop(commit_sender);
 
@@ -204,15 +257,29 @@ fn ingest_python_samples(
     mut iterator: Bound<'_, PyIterator>,
     sender: &Sender<QueuedSample>,
     abort_sender: &Sender<CommitMessage>,
+    source_name: &str,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     let mut sequence = 0_u64;
     loop {
         // Rust can spend a long time ingesting samples; poll Python signals explicitly.
         iterator.py().check_signals().map_err(py_error)?;
+        let next_started_at = Instant::now();
         let Some(item) = iterator.next() else {
+            profiler.record(
+                source_name,
+                ProfileStage::PythonNext,
+                next_started_at.elapsed(),
+            );
             return Ok(());
         };
+        profiler.record(
+            source_name,
+            ProfileStage::PythonNext,
+            next_started_at.elapsed(),
+        );
         let current_sequence = sequence;
+        let extract_started_at = Instant::now();
         let item = match item
             .map_err(py_error)
             .and_then(|item| extract_cache_input(&item))
@@ -223,6 +290,13 @@ fn ingest_python_samples(
                 return Err(error);
             }
         };
+        profiler.record_bytes(
+            source_name,
+            ProfileStage::PythonExtract,
+            extract_started_at.elapsed(),
+            u64::try_from(item.data.len()).unwrap_or(u64::MAX),
+        );
+        let send_started_at = Instant::now();
         send_queued_sample(
             sender,
             QueuedSample {
@@ -230,6 +304,11 @@ fn ingest_python_samples(
                 input: item,
             },
         )?;
+        profiler.record(
+            source_name,
+            ProfileStage::IngressWait,
+            send_started_at.elapsed(),
+        );
         sequence = sequence.checked_add(1).ok_or_else(|| {
             CacheError::InvalidInput("sample sequence overflowed u64".to_string())
         })?;
@@ -248,6 +327,39 @@ fn send_queued_sample(sender: &Sender<QueuedSample>, mut sample: QueuedSample) -
             Err(SendTimeoutError::Disconnected(_)) => return Err(CacheError::WorkerFailed),
         }
     }
+}
+
+fn record_push_sample_stats(profiler: &WriterProfiler, source_name: &str, stats: &PushSampleStats) {
+    profiler.record(
+        source_name,
+        ProfileStage::MetadataValidate,
+        stats.metadata_validate,
+    );
+    profiler.record_bytes(
+        source_name,
+        ProfileStage::Compression,
+        stats.compression,
+        stats.uncompressed_bytes,
+    );
+    profiler.record_bytes(
+        source_name,
+        ProfileStage::RecordEncode,
+        stats.record_encode,
+        stats.stored_bytes,
+    );
+    profiler.record_bytes(
+        source_name,
+        ProfileStage::DiskWrite,
+        stats.disk_write,
+        stats.stored_bytes,
+    );
+}
+
+fn record_finish_stats(profiler: &WriterProfiler, source_name: &str, stats: FinishStats) {
+    profiler.record(source_name, ProfileStage::ShardFlush, stats.shard_flush);
+    profiler.record(source_name, ProfileStage::FinishMetadata, stats.metadata);
+    profiler.record(source_name, ProfileStage::FinishIndex, stats.index);
+    profiler.record(source_name, ProfileStage::FinishManifest, stats.manifest);
 }
 
 fn spawn_serialization_workers(
@@ -287,14 +399,20 @@ fn spawn_commit_thread(
     builder: CacheBuilder,
     receiver: Receiver<CommitMessage>,
     progress: WriteProgress,
+    source_name: String,
+    profiler: WriterProfiler,
 ) -> thread::JoinHandle<CacheResult<()>> {
-    thread::spawn(move || commit_serialized_samples(builder, receiver, progress))
+    thread::spawn(move || {
+        commit_serialized_samples(builder, receiver, progress, &source_name, &profiler)
+    })
 }
 
 fn commit_serialized_samples(
     mut builder: CacheBuilder,
     receiver: Receiver<CommitMessage>,
     mut progress: WriteProgress,
+    source_name: &str,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     let mut pending = BTreeMap::new();
     let mut next_sequence = 0_u64;
@@ -308,6 +426,8 @@ fn commit_serialized_samples(
                     &mut pending,
                     &mut next_sequence,
                     &mut progress,
+                    source_name,
+                    profiler,
                 )?;
             }
             CommitMessage::Abort(message) => return Err(CacheError::InvalidInput(message)),
@@ -318,7 +438,8 @@ fn commit_serialized_samples(
         return Err(CacheError::WorkerFailed);
     }
 
-    builder.finish()?;
+    let (_, stats) = builder.finish()?;
+    record_finish_stats(profiler, source_name, stats);
     progress.finish();
     Ok(())
 }
@@ -328,10 +449,13 @@ fn commit_ready_samples(
     pending: &mut BTreeMap<u64, SerializedSample>,
     next_sequence: &mut u64,
     progress: &mut WriteProgress,
+    source_name: &str,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     while let Some(sample) = pending.remove(next_sequence) {
         let byte_len = sample.input.data.len();
-        builder.push_sample(sample.input.data, sample.input.metadata)?;
+        let stats = builder.push_sample(sample.input.data, sample.input.metadata)?;
+        record_push_sample_stats(profiler, source_name, &stats);
         progress.record_sample(byte_len);
         *next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
             CacheError::InvalidInput("sample sequence overflowed u64".to_string())
@@ -394,6 +518,31 @@ fn extract_writer_config(
         show_progress,
         validate_cache,
         reuse_existing,
+        profiler: extract_writer_profiler_config(value)?,
+    })
+}
+
+fn extract_writer_profiler_config(value: &Bound<'_, PyAny>) -> CacheResult<WriterProfilerConfig> {
+    let profiler = match value.getattr("profiler") {
+        Ok(profiler) => profiler,
+        Err(_) => return Ok(WriterProfilerConfig::disabled()),
+    };
+    let enabled = profiler
+        .getattr("enabled")
+        .map_err(py_error)?
+        .extract::<bool>()
+        .map_err(py_error)?;
+    let path = profiler
+        .getattr("path")
+        .map_err(py_error)?
+        .str()
+        .map_err(py_error)?
+        .to_str()
+        .map_err(py_error)?
+        .to_string();
+    Ok(WriterProfilerConfig {
+        enabled,
+        path: PathBuf::from(path),
     })
 }
 

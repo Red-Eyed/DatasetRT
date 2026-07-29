@@ -12,7 +12,8 @@ use super::progress::{SourceListProgress, WriteProgress};
 use super::{
     cache_path_for_source, cleanup_temp_cache, error_write_message, error_write_result,
     extract_cache_input, extract_source_name, join_workers, prepare_cache_paths, publish_cache,
-    py_error, source_label, success_write_result, CacheWriteRecord, WriterConfig, WriterInput,
+    py_error, record_finish_stats, record_push_sample_stats, source_label, success_write_result,
+    CacheWriteRecord, ProfileStage, WriterConfig, WriterInput, WriterProfiler,
 };
 use crate::storage::{load_cache, CacheBuilder};
 use crate::types::{CacheError, CacheResult};
@@ -46,18 +47,25 @@ pub(super) fn write_source_list(
     sources: &Bound<'_, PyList>,
     base_cache_dir: &Path,
     config: &WriterConfig,
+    profiler: WriterProfiler,
 ) -> CacheResult<Vec<CacheWriteRecord>> {
     ensure_unique_source_paths(sources, base_cache_dir)?;
 
     let (input_sender, input_receiver) = bounded(config.prefetch_size.as_usize());
     let (output_sender, output_receiver) = bounded(config.prefetch_size.as_usize());
     let progress = SourceListProgress::new(config.show_progress, sources.len());
-    let commit_handle =
-        spawn_batch_commit_thread(output_receiver, config.clone(), progress, sources.len());
+    let commit_handle = spawn_batch_commit_thread(
+        output_receiver,
+        config.clone(),
+        progress,
+        sources.len(),
+        profiler.clone(),
+    );
     let worker_handles =
         spawn_pipeline_workers(input_receiver, output_sender.clone(), config.num_threads);
 
-    let ingestion_result = ingest_source_list(sources, base_cache_dir, config, &input_sender);
+    let ingestion_result =
+        ingest_source_list(sources, base_cache_dir, config, &input_sender, &profiler);
     drop(input_sender);
     drop(output_sender);
 
@@ -97,12 +105,20 @@ fn ingest_source_list(
     base_cache_dir: &Path,
     config: &WriterConfig,
     sender: &Sender<QueuedPipelineMessage>,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     let mut ingress = PipelineIngress::new(sender);
 
     for (index, source) in sources.iter().enumerate() {
         source.py().check_signals().map_err(py_error)?;
-        ingest_one_source(source, base_cache_dir, index, config, &mut ingress)?;
+        ingest_one_source(
+            source,
+            base_cache_dir,
+            index,
+            config,
+            &mut ingress,
+            profiler,
+        )?;
     }
 
     Ok(())
@@ -114,6 +130,7 @@ fn ingest_one_source(
     source_index: usize,
     config: &WriterConfig,
     ingress: &mut PipelineIngress<'_>,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     let source_name = match extract_source_name(&source) {
         Ok(source_name) => source_name,
@@ -143,7 +160,7 @@ fn ingest_one_source(
 
     let start = SourceWriteStart {
         source_index,
-        source_name,
+        source_name: source_name.clone(),
         cache_path,
         temp_path,
     };
@@ -160,7 +177,7 @@ fn ingest_one_source(
         Err(error) => return ingress.send_abort_source(error.to_string()),
     };
 
-    match ingest_source_samples(iterator, ingress) {
+    match ingest_source_samples(iterator, ingress, &source_name, profiler) {
         Ok(()) => ingress.send_end_source(),
         Err(CacheError::KeyboardInterrupt(message)) => Err(CacheError::KeyboardInterrupt(message)),
         Err(CacheError::SystemExit(message)) => Err(CacheError::SystemExit(message)),
@@ -197,16 +214,42 @@ fn existing_cache_result(
 fn ingest_source_samples(
     mut iterator: Bound<'_, PyIterator>,
     ingress: &mut PipelineIngress<'_>,
+    source_name: &str,
+    profiler: &WriterProfiler,
 ) -> CacheResult<()> {
     loop {
         iterator.py().check_signals().map_err(py_error)?;
+        let next_started_at = std::time::Instant::now();
         let Some(item) = iterator.next() else {
+            profiler.record(
+                source_name,
+                ProfileStage::PythonNext,
+                next_started_at.elapsed(),
+            );
             return Ok(());
         };
+        profiler.record(
+            source_name,
+            ProfileStage::PythonNext,
+            next_started_at.elapsed(),
+        );
+        let extract_started_at = std::time::Instant::now();
         let input = item
             .map_err(py_error)
             .and_then(|item| extract_cache_input(&item))?;
+        profiler.record_bytes(
+            source_name,
+            ProfileStage::PythonExtract,
+            extract_started_at.elapsed(),
+            u64::try_from(input.data.len()).unwrap_or(u64::MAX),
+        );
+        let send_started_at = std::time::Instant::now();
         ingress.send_sample(input)?;
+        profiler.record(
+            source_name,
+            ProfileStage::IngressWait,
+            send_started_at.elapsed(),
+        );
     }
 }
 
@@ -311,8 +354,11 @@ fn spawn_batch_commit_thread(
     config: WriterConfig,
     progress: SourceListProgress,
     total_sources: usize,
+    profiler: WriterProfiler,
 ) -> thread::JoinHandle<CacheResult<Vec<Option<CacheWriteRecord>>>> {
-    thread::spawn(move || commit_pipeline_messages(receiver, config, progress, total_sources))
+    thread::spawn(move || {
+        commit_pipeline_messages(receiver, config, progress, total_sources, profiler)
+    })
 }
 
 fn commit_pipeline_messages(
@@ -320,8 +366,9 @@ fn commit_pipeline_messages(
     config: WriterConfig,
     progress: SourceListProgress,
     total_sources: usize,
+    profiler: WriterProfiler,
 ) -> CacheResult<Vec<Option<CacheWriteRecord>>> {
-    let mut processor = PipelineCommitter::new(config, progress, total_sources);
+    let mut processor = PipelineCommitter::new(config, progress, total_sources, profiler);
     let mut pending = BTreeMap::new();
     let mut next_sequence = 0_u64;
 
@@ -342,15 +389,22 @@ fn commit_pipeline_messages(
 struct PipelineCommitter {
     config: WriterConfig,
     progress: SourceListProgress,
+    profiler: WriterProfiler,
     results: Vec<Option<CacheWriteRecord>>,
     active: Option<ActiveSourceWrite>,
 }
 
 impl PipelineCommitter {
-    fn new(config: WriterConfig, progress: SourceListProgress, total_sources: usize) -> Self {
+    fn new(
+        config: WriterConfig,
+        progress: SourceListProgress,
+        total_sources: usize,
+        profiler: WriterProfiler,
+    ) -> Self {
         Self {
             config,
             progress,
+            profiler,
             results: vec![None; total_sources],
             active: None,
         }
@@ -403,6 +457,7 @@ impl PipelineCommitter {
             start,
             &self.config,
             self.progress.multi_progress(),
+            self.profiler.clone(),
         ));
         Ok(())
     }
@@ -443,6 +498,7 @@ struct ActiveSourceWrite {
     start: SourceWriteStart,
     builder: Option<CacheBuilder>,
     progress: WriteProgress,
+    profiler: WriterProfiler,
     failure: Option<String>,
 }
 
@@ -451,6 +507,7 @@ impl ActiveSourceWrite {
         start: SourceWriteStart,
         config: &WriterConfig,
         multi_progress: Option<&MultiProgress>,
+        profiler: WriterProfiler,
     ) -> Self {
         let progress = WriteProgress::new(config.show_progress, &start.source_name, multi_progress);
         let builder = CacheBuilder::create(
@@ -464,6 +521,7 @@ impl ActiveSourceWrite {
                 start,
                 builder: Some(builder),
                 progress,
+                profiler,
                 failure: None,
             },
             Err(error) => {
@@ -471,6 +529,7 @@ impl ActiveSourceWrite {
                     start,
                     builder: None,
                     progress,
+                    profiler,
                     failure: Some(error.to_string()),
                 };
                 active.cleanup_temp_cache();
@@ -493,10 +552,14 @@ impl ActiveSourceWrite {
         };
 
         let byte_len = input.data.len();
-        if let Err(error) = builder.push_sample(input.data, input.metadata) {
-            self.mark_failed(error);
-            return;
-        }
+        let stats = match builder.push_sample(input.data, input.metadata) {
+            Ok(stats) => stats,
+            Err(error) => {
+                self.mark_failed(error);
+                return;
+            }
+        };
+        record_push_sample_stats(&self.profiler, &self.start.source_name, &stats);
         self.progress.record_sample(byte_len);
     }
 
@@ -510,16 +573,31 @@ impl ActiveSourceWrite {
             return self.error_result();
         };
 
-        if let Err(error) = builder.finish() {
-            self.mark_failed(error);
-            return self.error_result();
-        }
+        let finish_stats = match builder.finish() {
+            Ok((_, stats)) => stats,
+            Err(error) => {
+                self.mark_failed(error);
+                return self.error_result();
+            }
+        };
+        record_finish_stats(&self.profiler, &self.start.source_name, finish_stats);
         self.progress.finish();
 
+        let publish_started_at = std::time::Instant::now();
         if let Err(error) = publish_cache(&self.start.temp_path, &self.start.cache_path) {
+            self.profiler.record(
+                &self.start.source_name,
+                ProfileStage::Publish,
+                publish_started_at.elapsed(),
+            );
             self.mark_failed(error);
             return self.error_result();
         }
+        self.profiler.record(
+            &self.start.source_name,
+            ProfileStage::Publish,
+            publish_started_at.elapsed(),
+        );
 
         success_write_result(self.start.source_name, self.start.cache_path)
     }

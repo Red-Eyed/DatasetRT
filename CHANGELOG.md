@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.12 - 2026-07-29
+
+### Added
+
+- Added `WriterProfilerConfig` for optional JSON writer timing summaries.
+- Writer profiling now separates Python iterator time, Python-to-Rust extraction, queue backpressure, compression, disk writes, finish steps, and cache publish time.
+- Enabled best-effort profiler summary flushing for handled writer failures, including Ctrl-C/`KeyboardInterrupt`.
+
 ## 0.1.11 - 2026-07-29
 
 ### Changed
