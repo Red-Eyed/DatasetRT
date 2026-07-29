@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.6 - 2026-07-29
+
+### Changed
+
+- Cache directories now use the plain `CacheSource.name` instead of a hashed suffix.
+- Writers now stage cache builds under `base_cache_dir/tmp` and publish with an atomic rename after a successful write.
+- Multi-source writes now reject duplicate generated cache paths before writing any cache.
+
 ## 0.1.5 - 2026-07-29
 
 ### Changed
