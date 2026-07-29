@@ -54,7 +54,9 @@ Writer configuration:
 - `num_threads`: fixed Rust serialization worker count.
 - `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s for the active source, plus source-count progress and ETA for multi-source writes.
 
-If Python iteration is faster than writing, Rust prefetches up to `prefetch_size` samples and then blocks the ingestion edge. This gives burst smoothing without unbounded memory growth.
+If Python iteration is faster than writing, Rust prefetches up to `prefetch_size` queued messages and then blocks the ingestion edge. For multi-source writes, the queue spans source boundaries: Rust starts pulling the next source as soon as its begin/end markers fit in the queue instead of waiting for the previous source to publish. This gives burst smoothing without unbounded memory growth.
+
+Multi-source writes also use a bounded worker-to-commit queue. Workers keep that output queue full until commit catches up, while cache commit and publish remain sequential for deterministic manifests and result ordering.
 
 ## Backpressure
 

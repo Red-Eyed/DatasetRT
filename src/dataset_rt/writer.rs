@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::MultiProgress;
 use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
@@ -15,6 +15,15 @@ use crate::types::{
     CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumThreads,
     PrefetchSize, ShardCompression,
 };
+
+#[path = "writer/progress.rs"]
+mod progress;
+
+#[path = "writer/pipeline.rs"]
+mod pipeline;
+
+use pipeline::write_source_list;
+use progress::WriteProgress;
 
 #[derive(Clone)]
 struct WriterConfig {
@@ -41,26 +50,12 @@ struct SerializedSample {
     input: WriterInput,
 }
 
-struct WriteProgress {
-    bar: Option<ProgressBar>,
-    started_at: Instant,
-    items: u64,
-    bytes: u64,
-    clear_on_finish: bool,
-}
-
-struct SourceListProgress {
-    multi: Option<MultiProgress>,
-    bar: Option<ProgressBar>,
-    started_at: Instant,
-    completed: u64,
-    total: u64,
-}
-
 enum CommitMessage {
     Sample(SerializedSample),
     Abort(String),
 }
+
+type CacheWriteRecord = (String, String, String);
 
 pub fn write_cache(
     sources: Bound<'_, PyAny>,
@@ -82,61 +77,6 @@ pub fn write_cache(
         &config,
         None,
     )?])
-}
-
-fn write_source_list(
-    sources: &Bound<'_, PyList>,
-    base_cache_dir: &Path,
-    config: &WriterConfig,
-) -> CacheResult<Vec<(String, String, String)>> {
-    ensure_unique_source_paths(sources, base_cache_dir)?;
-
-    let mut progress = SourceListProgress::new(config.show_progress, sources.len());
-    let mut results = Vec::with_capacity(sources.len());
-
-    for (index, source) in sources.iter().enumerate() {
-        let result = match write_one_source_result(
-            source,
-            base_cache_dir,
-            index,
-            config,
-            progress.multi_progress(),
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                progress.abandon();
-                return Err(error);
-            }
-        };
-        results.push(result);
-        progress.record_source();
-    }
-
-    progress.finish();
-    Ok(results)
-}
-
-fn ensure_unique_source_paths(
-    sources: &Bound<'_, PyList>,
-    base_cache_dir: &Path,
-) -> CacheResult<()> {
-    let mut seen_paths = BTreeSet::new();
-
-    for (index, source) in sources.iter().enumerate() {
-        let source_name = match extract_source_name(&source) {
-            Ok(source_name) => source_name,
-            Err(_) => continue,
-        };
-        let cache_path = cache_path_for_source(base_cache_dir, &source_name, index);
-        if !seen_paths.insert(cache_path.clone()) {
-            return Err(CacheError::InvalidInput(format!(
-                "duplicate generated cache path: {}",
-                cache_path.display()
-            )));
-        }
-    }
-
-    Ok(())
 }
 
 fn write_one_source_result(
@@ -220,7 +160,11 @@ fn success_write_result(source_name: String, path: PathBuf) -> (String, String, 
 }
 
 fn error_write_result(source_name: String, error: CacheError) -> (String, String, String) {
-    ("error".to_string(), source_name, error.to_string())
+    error_write_message(source_name, error.to_string())
+}
+
+fn error_write_message(source_name: String, message: String) -> (String, String, String) {
+    ("error".to_string(), source_name, message)
 }
 
 fn source_label(source_index: usize) -> String {
@@ -391,152 +335,6 @@ fn commit_ready_samples(
         })?;
     }
     Ok(())
-}
-
-impl WriteProgress {
-    fn new(enabled: bool, source_name: &str, multi_progress: Option<&MultiProgress>) -> Self {
-        let clear_on_finish = multi_progress.is_some();
-        let bar = enabled.then(|| create_progress_bar(source_name, multi_progress));
-        Self {
-            bar,
-            started_at: Instant::now(),
-            items: 0,
-            bytes: 0,
-            clear_on_finish,
-        }
-    }
-
-    fn record_sample(&mut self, byte_len: usize) {
-        self.items = self.items.saturating_add(1);
-        let byte_len = u64::try_from(byte_len).unwrap_or(u64::MAX);
-        self.bytes = self.bytes.saturating_add(byte_len);
-
-        if let Some(bar) = &self.bar {
-            bar.inc(1);
-            bar.set_message(self.message());
-        }
-    }
-
-    fn finish(&self) {
-        if let Some(bar) = &self.bar {
-            if self.clear_on_finish {
-                bar.finish_and_clear();
-            } else {
-                bar.finish_with_message(self.message());
-            }
-        }
-    }
-
-    fn message(&self) -> String {
-        let elapsed_seconds = self.started_at.elapsed().as_secs_f64().max(0.001);
-        let items_per_second = self.items as f64 / elapsed_seconds;
-        let megabytes_per_second = self.bytes as f64 / 1_000_000.0 / elapsed_seconds;
-        format!(
-            "{} items | {:.1} items/s | {:.1} MB/s",
-            self.items, items_per_second, megabytes_per_second
-        )
-    }
-}
-
-impl SourceListProgress {
-    fn new(enabled: bool, total: usize) -> Self {
-        let total = u64::try_from(total).unwrap_or(u64::MAX);
-        let multi = enabled.then(MultiProgress::new);
-        let bar = multi
-            .as_ref()
-            .map(|multi| create_source_list_progress_bar(multi, total));
-        let progress = Self {
-            multi,
-            bar,
-            started_at: Instant::now(),
-            completed: 0,
-            total,
-        };
-        progress.refresh();
-        progress
-    }
-
-    fn multi_progress(&self) -> Option<&MultiProgress> {
-        self.multi.as_ref()
-    }
-
-    fn record_source(&mut self) {
-        self.completed = self.completed.saturating_add(1);
-        if let Some(bar) = &self.bar {
-            bar.inc(1);
-        }
-        self.refresh();
-    }
-
-    fn finish(&self) {
-        if let Some(bar) = &self.bar {
-            bar.finish_with_message(self.message());
-        }
-    }
-
-    fn abandon(&self) {
-        if let Some(bar) = &self.bar {
-            bar.abandon_with_message(self.message());
-        }
-    }
-
-    fn refresh(&self) {
-        if let Some(bar) = &self.bar {
-            bar.set_message(self.message());
-            bar.tick();
-        }
-    }
-
-    fn message(&self) -> String {
-        if self.completed == 0 {
-            return "ETA --".to_string();
-        }
-        let elapsed_seconds = self.started_at.elapsed().as_secs_f64().max(0.001);
-        let sources_per_second = self.completed as f64 / elapsed_seconds;
-        let remaining = self.total.saturating_sub(self.completed) as f64;
-        let eta = Duration::from_secs_f64(remaining / sources_per_second);
-        format!(
-            "{:.1} sources/s | ETA {}",
-            sources_per_second,
-            format_eta(eta)
-        )
-    }
-}
-
-fn create_source_list_progress_bar(multi_progress: &MultiProgress, total: u64) -> ProgressBar {
-    let bar = multi_progress.add(ProgressBar::new(total));
-    bar.set_prefix("sources");
-    if let Ok(style) =
-        ProgressStyle::with_template("{wide_bar:.cyan/blue} {prefix} {pos}/{len} {msg}")
-    {
-        bar.set_style(style.progress_chars("=>-"));
-    }
-    bar
-}
-
-fn create_progress_bar(source_name: &str, multi_progress: Option<&MultiProgress>) -> ProgressBar {
-    let bar = match multi_progress {
-        Some(multi_progress) => multi_progress.add(ProgressBar::new_spinner()),
-        None => ProgressBar::new_spinner(),
-    };
-    bar.set_prefix(format!("writing {source_name}"));
-    bar.enable_steady_tick(Duration::from_millis(100));
-    // Progress rendering is observability only; an invalid style must never fail cache writes.
-    if let Ok(style) = ProgressStyle::with_template("{spinner:.green} {prefix} {msg}") {
-        bar.set_style(style);
-    }
-    bar
-}
-
-fn format_eta(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    if seconds < 3_600 {
-        return format!("{}m {:02}s", seconds / 60, seconds % 60);
-    }
-    format!("{}h {:02}m", seconds / 3_600, seconds % 3_600 / 60)
 }
 
 fn join_workers(handles: Vec<thread::JoinHandle<CacheResult<()>>>) -> CacheResult<()> {

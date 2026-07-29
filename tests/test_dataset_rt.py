@@ -212,6 +212,9 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
 
 
 def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) -> None:
+    class LaterSource(TinySource):
+        name = "later"
+
     class BadSource:
         name = "bad"
 
@@ -220,11 +223,12 @@ def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) 
 
     root = tmp_path / "caches"
 
-    results = write_cache([TinySource(), BadSource()], root)
+    results = write_cache([TinySource(), BadSource(), LaterSource()], root)
 
     assert results == [
         CacheWriteSuccess("tiny", root / "tiny"),
         CacheWriteError("bad", "data must be bytes-like"),
+        CacheWriteSuccess("later", root / "later"),
     ]
     assert not (root / "bad").exists()
     assert not (root / "tmp" / "bad").exists()

@@ -62,7 +62,7 @@ for result in results:
             print(source_name, message)
 ```
 
-`prefetch_size` controls the bounded Rust ingestion queue. If Python iteration is faster than writing, Rust pulls ahead until this queue is full, then applies backpressure.
+`prefetch_size` controls the bounded Rust ingestion queue. If Python iteration is faster than writing, Rust pulls ahead until this queue is full, then applies backpressure. For multi-source writes, that queue spans source boundaries so Python ingestion can continue into later sources while earlier sources are being committed and published.
 
 `num_threads` controls the fixed Rust serialization worker pool.
 
