@@ -143,7 +143,7 @@ class CacheSource(Protocol):
     """Synchronous source protocol consumed by the Rust cache writer."""
 
     name: str
-    """Plain source name used by Rust when generating `base_cache_dir/name_hash`."""
+    """Plain source name used by Rust when generating `base_cache_dir/name`."""
 
     def __iter__(self) -> Iterator[CacheInput]:
         """Yield cache inputs synchronously.
@@ -164,7 +164,7 @@ def write_cache(
 
     Args:
         sources: A single `CacheSource` or a list of sources.
-        path: Base cache directory. Rust creates one `name_hash` cache
+        path: Base cache directory. Rust creates one `name` cache
             directory per source below this directory.
         writer_config: Writer behavior owned and validated by Rust.
 

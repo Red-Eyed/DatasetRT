@@ -47,9 +47,9 @@ paths = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterCo
 
 `path` is always the base cache directory. Python passes this through to Rust as `base_cache_dir`.
 
-Each source is written by Rust under `base_cache_dir / name_hash`. The returned list preserves source order and contains the exact cache directories that were created.
+Each source is written by Rust under `base_cache_dir / name`. The returned list preserves source order and contains the exact cache directories that were created.
 
-Rust writes each cache into a temporary directory first and publishes it by renaming only after the manifest is complete. If one source in a multi-source write fails, caches created earlier in that same call are cleaned up before the error is returned.
+Rust writes each cache into a temporary directory under `base_cache_dir / tmp` first and publishes it by renaming only after the manifest is complete. If one source in a multi-source write fails, caches created earlier in that same call are cleaned up before the error is returned.
 
 `prefetch_size` controls the bounded Rust ingestion queue. If Python iteration is faster than writing, Rust pulls ahead until this queue is full, then applies backpressure.
 

@@ -8,7 +8,6 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
-use sha2::{Digest, Sha256};
 
 use crate::storage::{load_cache, CacheBuilder};
 use crate::types::{
@@ -75,6 +74,8 @@ fn write_source_list(
     base_cache_dir: &Path,
     config: &WriterConfig,
 ) -> CacheResult<Vec<String>> {
+    ensure_unique_source_paths(sources, base_cache_dir)?;
+
     let mut written = Vec::with_capacity(sources.len());
     let mut seen_paths = BTreeSet::new();
 
@@ -100,6 +101,26 @@ fn write_source_list(
         .iter()
         .map(|path| path_to_string(path))
         .collect::<Vec<_>>())
+}
+
+fn ensure_unique_source_paths(
+    sources: &Bound<'_, PyList>,
+    base_cache_dir: &Path,
+) -> CacheResult<()> {
+    let mut seen_paths = BTreeSet::new();
+
+    for (index, source) in sources.iter().enumerate() {
+        let source_name = extract_source_name(&source)?;
+        let cache_path = cache_path_for_source(base_cache_dir, &source_name, index);
+        if !seen_paths.insert(cache_path.clone()) {
+            return Err(CacheError::InvalidInput(format!(
+                "duplicate generated cache path: {}",
+                cache_path.display()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn write_one_source(
@@ -430,27 +451,20 @@ fn validate_source_name(name: &str) -> CacheResult<()> {
     Ok(())
 }
 
-fn cache_path_for_source(base_cache_dir: &Path, source_name: &str, source_index: usize) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(source_index.to_le_bytes());
-    hasher.update(source_name.as_bytes());
-    let digest = hex::encode(hasher.finalize());
-    let short_digest = digest.chars().take(12).collect::<String>();
-    base_cache_dir.join(format!("{source_name}_{short_digest}"))
+fn cache_path_for_source(
+    base_cache_dir: &Path,
+    source_name: &str,
+    _source_index: usize,
+) -> PathBuf {
+    base_cache_dir.join(source_name)
 }
 
 fn temp_cache_path_for_source(
     base_cache_dir: &Path,
     source_name: &str,
-    source_index: usize,
+    _source_index: usize,
 ) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tmp");
-    hasher.update(source_index.to_le_bytes());
-    hasher.update(source_name.as_bytes());
-    let digest = hex::encode(hasher.finalize());
-    let short_digest = digest.chars().take(12).collect::<String>();
-    base_cache_dir.join(format!(".{source_name}_{short_digest}.tmp"))
+    base_cache_dir.join("tmp").join(source_name)
 }
 
 fn prepare_cache_paths(cache_path: &Path, temp_path: &Path) -> CacheResult<()> {
@@ -461,10 +475,7 @@ fn prepare_cache_paths(cache_path: &Path, temp_path: &Path) -> CacheResult<()> {
         )));
     }
     if temp_path.exists() {
-        return Err(CacheError::InvalidInput(format!(
-            "temporary cache path already exists: {}",
-            temp_path.display()
-        )));
+        fs::remove_dir_all(temp_path)?;
     }
     Ok(())
 }

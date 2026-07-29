@@ -46,7 +46,8 @@ def test_write_and_read_cache(tmp_path: Path) -> None:
 
     assert len(written) == 1
     assert written[0].parent == base_cache_dir
-    assert written[0].name.startswith("tiny_")
+    assert written[0].name == "tiny"
+    assert not (base_cache_dir / "tmp" / "tiny").exists()
     assert len(dataset) == 3
     samples = list(dataset)
 
@@ -137,9 +138,17 @@ def test_write_multiple_sources_returns_cache_paths(tmp_path: Path) -> None:
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42))
 
     assert [path.parent for path in written] == [root, root]
-    assert written[0].name.startswith("tiny_")
-    assert written[1].name.startswith("other_")
+    assert [path.name for path in written] == ["tiny", "other"]
     assert len(dataset) == 6
+
+
+def test_multi_source_write_rejects_duplicate_names_before_writing(tmp_path: Path) -> None:
+    root = tmp_path / "caches"
+
+    with pytest.raises(ValueError, match="duplicate generated cache path"):
+        write_cache([TinySource(), TinySource()], root)
+
+    assert not root.exists()
 
 
 def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
@@ -189,7 +198,9 @@ def test_multi_source_write_cleans_up_on_failure(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bytes-like"):
         write_cache([TinySource(), BadSource()], root)
 
-    assert not list(root.glob("*"))
+    assert not (root / "tiny").exists()
+    assert not (root / "bad").exists()
+    assert not (root / "tmp" / "bad").exists()
 
 
 def test_dataset_restarts_deterministically(tmp_path: Path) -> None:

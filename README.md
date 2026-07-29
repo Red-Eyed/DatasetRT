@@ -73,7 +73,7 @@ for sample in dataset:
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a ready-to-iterate dataset. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name_hash`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
+`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a ready-to-iterate dataset. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
 
 ## PyTorch
 
@@ -132,7 +132,7 @@ If one source fails during a multi-source write, DatasetRT cleans up caches crea
 
 ```text
 cache/
-    train_images_<hash>/
+    train_images/
         manifest.json
         metadata.arrow
         index.bin
