@@ -2,6 +2,13 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.7 - 2026-07-29
+
+### Changed
+
+- `write_cache` now returns per-source `CacheWriteSuccess` or `CacheWriteError` results instead of failing the whole batch on source-level errors.
+- `CachedDataset.from_cache_sources` now returns a matchable dataset result containing all source outcomes, so partial source failures can be logged while successful caches are still loaded.
+
 ## 0.1.6 - 2026-07-29
 
 ### Changed
