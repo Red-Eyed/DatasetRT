@@ -250,6 +250,24 @@ def test_empty_source_is_reported_as_write_error(tmp_path: Path) -> None:
     assert not (root / "tmp" / "empty").exists()
 
 
+def test_keyboard_interrupt_is_not_reported_as_write_error(tmp_path: Path) -> None:
+    class InterruptedSource:
+        name = "interrupted"
+
+        def __iter__(self):
+            raise KeyboardInterrupt
+            yield CacheInput(b"never", {"label": "interrupted"})
+
+    root = tmp_path / "caches"
+
+    with pytest.raises(KeyboardInterrupt):
+        write_cache([TinySource(), InterruptedSource()], root)
+
+    assert (root / "tiny").exists()
+    assert not (root / "interrupted").exists()
+    assert not (root / "tmp" / "interrupted").exists()
+
+
 def test_dataset_restarts_deterministically(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 

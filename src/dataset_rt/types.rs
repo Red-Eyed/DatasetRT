@@ -1,4 +1,4 @@
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PySystemExit, PyValueError};
 use pyo3::PyErr;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -18,6 +18,10 @@ pub enum CacheError {
     Arrow(#[from] arrow_schema::ArrowError),
     #[error("Python error: {0}")]
     Python(String),
+    #[error("{0}")]
+    KeyboardInterrupt(String),
+    #[error("{0}")]
+    SystemExit(String),
     #[error("runtime worker failed")]
     WorkerFailed,
 }
@@ -28,6 +32,8 @@ impl CacheError {
             Self::InvalidInput(message) | Self::InvalidCache(message) => {
                 PyValueError::new_err(message)
             }
+            Self::KeyboardInterrupt(message) => PyKeyboardInterrupt::new_err(message),
+            Self::SystemExit(message) => PySystemExit::new_err(message),
             Self::Io(_) | Self::Json(_) | Self::Arrow(_) | Self::Python(_) | Self::WorkerFailed => {
                 PyRuntimeError::new_err(self.to_string())
             }

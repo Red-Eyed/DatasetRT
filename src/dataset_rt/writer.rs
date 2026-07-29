@@ -4,8 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
+use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
 
@@ -70,7 +71,7 @@ pub fn write_cache(
         &base_cache_dir,
         0,
         &config,
-    )])
+    )?])
 }
 
 fn write_source_list(
@@ -80,11 +81,11 @@ fn write_source_list(
 ) -> CacheResult<Vec<(String, String, String)>> {
     ensure_unique_source_paths(sources, base_cache_dir)?;
 
-    Ok(sources
+    sources
         .iter()
         .enumerate()
         .map(|(index, source)| write_one_source_result(source, base_cache_dir, index, config))
-        .collect())
+        .collect::<CacheResult<Vec<_>>>()
 }
 
 fn ensure_unique_source_paths(
@@ -115,15 +116,25 @@ fn write_one_source_result(
     base_cache_dir: &Path,
     source_index: usize,
     config: &WriterConfig,
-) -> (String, String, String) {
+) -> CacheResult<(String, String, String)> {
     let source_name = match extract_source_name(&source) {
         Ok(source_name) => source_name,
-        Err(error) => return error_write_result(source_label(source_index), error),
+        // User interrupts are process-level control flow, not per-source data errors.
+        Err(CacheError::KeyboardInterrupt(message)) => {
+            return Err(CacheError::KeyboardInterrupt(message));
+        }
+        Err(CacheError::SystemExit(message)) => {
+            return Err(CacheError::SystemExit(message));
+        }
+        Err(error) => return Ok(error_write_result(source_label(source_index), error)),
     };
 
     match write_named_source(source, base_cache_dir, source_index, config, &source_name) {
-        Ok(path) => success_write_result(source_name, path),
-        Err(error) => error_write_result(source_name, error),
+        Ok(path) => Ok(success_write_result(source_name, path)),
+        // Preserve Ctrl-C/SystemExit so Python callers can stop the whole write immediately.
+        Err(CacheError::KeyboardInterrupt(message)) => Err(CacheError::KeyboardInterrupt(message)),
+        Err(CacheError::SystemExit(message)) => Err(CacheError::SystemExit(message)),
+        Err(error) => Ok(error_write_result(source_name, error)),
     }
 }
 
@@ -204,14 +215,18 @@ fn write_with_pipeline(
 }
 
 fn ingest_python_samples(
-    iterator: Bound<'_, PyIterator>,
+    mut iterator: Bound<'_, PyIterator>,
     sender: &Sender<QueuedSample>,
     abort_sender: &Sender<CommitMessage>,
 ) -> CacheResult<()> {
-    for (sequence, item) in iterator.enumerate() {
-        let sequence = u64::try_from(sequence).map_err(|_| {
-            CacheError::InvalidInput("sample sequence does not fit in u64".to_string())
-        })?;
+    let mut sequence = 0_u64;
+    loop {
+        // Rust can spend a long time ingesting samples; poll Python signals explicitly.
+        iterator.py().check_signals().map_err(py_error)?;
+        let Some(item) = iterator.next() else {
+            return Ok(());
+        };
+        let current_sequence = sequence;
         let item = match item
             .map_err(py_error)
             .and_then(|item| extract_cache_input(&item))
@@ -222,14 +237,31 @@ fn ingest_python_samples(
                 return Err(error);
             }
         };
-        sender
-            .send(QueuedSample {
-                sequence,
+        send_queued_sample(
+            sender,
+            QueuedSample {
+                sequence: current_sequence,
                 input: item,
-            })
-            .map_err(|_| CacheError::WorkerFailed)?;
+            },
+        )?;
+        sequence = sequence.checked_add(1).ok_or_else(|| {
+            CacheError::InvalidInput("sample sequence overflowed u64".to_string())
+        })?;
     }
-    Ok(())
+}
+
+fn send_queued_sample(sender: &Sender<QueuedSample>, mut sample: QueuedSample) -> CacheResult<()> {
+    loop {
+        match sender.send_timeout(sample, Duration::from_millis(100)) {
+            Ok(()) => return Ok(()),
+            Err(SendTimeoutError::Timeout(returned_sample)) => {
+                // A full bounded queue can block ingestion; keep Ctrl-C responsive while waiting.
+                Python::attach(|py| py.check_signals()).map_err(py_error)?;
+                sample = returned_sample;
+            }
+            Err(SendTimeoutError::Disconnected(_)) => return Err(CacheError::WorkerFailed),
+        }
+    }
 }
 
 fn spawn_serialization_workers(
@@ -572,5 +604,13 @@ fn extract_metadata_value(value: &Bound<'_, PyAny>) -> CacheResult<MetadataValue
 }
 
 fn py_error(error: PyErr) -> CacheError {
-    CacheError::Python(error.to_string())
+    let message = error.to_string();
+    // These exceptions should keep their Python control-flow semantics.
+    if Python::attach(|py| error.is_instance_of::<PyKeyboardInterrupt>(py)) {
+        return CacheError::KeyboardInterrupt(message);
+    }
+    if Python::attach(|py| error.is_instance_of::<PySystemExit>(py)) {
+        return CacheError::SystemExit(message);
+    }
+    CacheError::Python(message)
 }
