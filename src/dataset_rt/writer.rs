@@ -57,7 +57,7 @@ pub fn write_cache(
     base_cache_dir: String,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
-) -> CacheResult<Vec<String>> {
+) -> CacheResult<Vec<(String, String, String)>> {
     let config = extract_writer_config(&writer_config, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
 
@@ -65,42 +65,26 @@ pub fn write_cache(
         return write_source_list(source_list, &base_cache_dir, &config);
     }
 
-    let path = write_one_source(sources, &base_cache_dir, 0, &config)?;
-    Ok(vec![path_to_string(&path)])
+    Ok(vec![write_one_source_result(
+        sources,
+        &base_cache_dir,
+        0,
+        &config,
+    )])
 }
 
 fn write_source_list(
     sources: &Bound<'_, PyList>,
     base_cache_dir: &Path,
     config: &WriterConfig,
-) -> CacheResult<Vec<String>> {
+) -> CacheResult<Vec<(String, String, String)>> {
     ensure_unique_source_paths(sources, base_cache_dir)?;
 
-    let mut written = Vec::with_capacity(sources.len());
-    let mut seen_paths = BTreeSet::new();
-
-    for (index, source) in sources.iter().enumerate() {
-        let path = match write_one_source(source, base_cache_dir, index, config) {
-            Ok(path) => path,
-            Err(error) => {
-                cleanup_published_caches(&written)?;
-                return Err(error);
-            }
-        };
-        if !seen_paths.insert(path.clone()) {
-            cleanup_published_caches(&written)?;
-            return Err(CacheError::InvalidInput(format!(
-                "duplicate generated cache path: {}",
-                path.display()
-            )));
-        }
-        written.push(path);
-    }
-
-    Ok(written
+    Ok(sources
         .iter()
-        .map(|path| path_to_string(path))
-        .collect::<Vec<_>>())
+        .enumerate()
+        .map(|(index, source)| write_one_source_result(source, base_cache_dir, index, config))
+        .collect())
 }
 
 fn ensure_unique_source_paths(
@@ -110,7 +94,10 @@ fn ensure_unique_source_paths(
     let mut seen_paths = BTreeSet::new();
 
     for (index, source) in sources.iter().enumerate() {
-        let source_name = extract_source_name(&source)?;
+        let source_name = match extract_source_name(&source) {
+            Ok(source_name) => source_name,
+            Err(_) => continue,
+        };
         let cache_path = cache_path_for_source(base_cache_dir, &source_name, index);
         if !seen_paths.insert(cache_path.clone()) {
             return Err(CacheError::InvalidInput(format!(
@@ -123,25 +110,41 @@ fn ensure_unique_source_paths(
     Ok(())
 }
 
-fn write_one_source(
+fn write_one_source_result(
     source: Bound<'_, PyAny>,
     base_cache_dir: &Path,
     source_index: usize,
     config: &WriterConfig,
+) -> (String, String, String) {
+    let source_name = match extract_source_name(&source) {
+        Ok(source_name) => source_name,
+        Err(error) => return error_write_result(source_label(source_index), error),
+    };
+
+    match write_named_source(source, base_cache_dir, source_index, config, &source_name) {
+        Ok(path) => success_write_result(source_name, path),
+        Err(error) => error_write_result(source_name, error),
+    }
+}
+
+fn write_named_source(
+    source: Bound<'_, PyAny>,
+    base_cache_dir: &Path,
+    source_index: usize,
+    config: &WriterConfig,
+    source_name: &str,
 ) -> CacheResult<PathBuf> {
-    let source_name = extract_source_name(&source)?;
-    let cache_path = cache_path_for_source(base_cache_dir, &source_name, source_index);
+    let cache_path = cache_path_for_source(base_cache_dir, source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
         load_cache(cache_path.clone())?;
         return Ok(cache_path);
     }
 
-    let temp_path = temp_cache_path_for_source(base_cache_dir, &source_name, source_index);
+    let temp_path = temp_cache_path_for_source(base_cache_dir, source_name, source_index);
     prepare_cache_paths(&cache_path, &temp_path)?;
-    let progress_label = source_name.clone();
     let builder = match CacheBuilder::create(
         temp_path.clone(),
-        source_name,
+        source_name.to_string(),
         config.max_shard_bytes.as_u64(),
         config.shard_compression.clone(),
     ) {
@@ -152,7 +155,7 @@ fn write_one_source(
         }
     };
     let iterator = PyIterator::from_object(&source).map_err(py_error)?;
-    if let Err(error) = write_with_pipeline(iterator, builder, &progress_label, config) {
+    if let Err(error) = write_with_pipeline(iterator, builder, source_name, config) {
         cleanup_temp_cache(&temp_path)?;
         return Err(error);
     }
@@ -161,6 +164,18 @@ fn write_one_source(
         return Err(error);
     }
     Ok(cache_path)
+}
+
+fn success_write_result(source_name: String, path: PathBuf) -> (String, String, String) {
+    ("success".to_string(), source_name, path_to_string(&path))
+}
+
+fn error_write_result(source_name: String, error: CacheError) -> (String, String, String) {
+    ("error".to_string(), source_name, error.to_string())
+}
+
+fn source_label(source_index: usize) -> String {
+    format!("source[{source_index}]")
 }
 
 fn write_with_pipeline(
@@ -483,15 +498,6 @@ fn prepare_cache_paths(cache_path: &Path, temp_path: &Path) -> CacheResult<()> {
 fn cleanup_temp_cache(temp_path: &Path) -> CacheResult<()> {
     if temp_path.exists() {
         fs::remove_dir_all(temp_path)?;
-    }
-    Ok(())
-}
-
-fn cleanup_published_caches(paths: &[PathBuf]) -> CacheResult<()> {
-    for path in paths {
-        if path.exists() {
-            fs::remove_dir_all(path)?;
-        }
     }
     Ok(())
 }

@@ -1,8 +1,8 @@
 """Public Python API for DatasetRT.
 
 The Python layer is intentionally thin. It defines ergonomic types, forwards
-cache construction and dataset state to Rust, and converts returned paths or
-rows into familiar Python objects.
+cache construction and dataset state to Rust, and converts returned outcomes
+or rows into familiar Python objects.
 """
 
 from __future__ import annotations
@@ -10,13 +10,16 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeAlias, cast
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import write_cache as _write_cache
+
+if TYPE_CHECKING:
+    from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
 
 MetadataValue: TypeAlias = bool | int | float | str
 """Primitive metadata value accepted by the Rust cache writer."""
@@ -127,6 +130,30 @@ class CachedSample(NamedTuple):
     """Physical sample row within the source cache."""
 
 
+class CacheWriteSuccess(NamedTuple):
+    """Successful per-source cache write result."""
+
+    source_name: str
+    """Source name used to derive the cache path."""
+
+    path: Path
+    """Published cache directory."""
+
+
+class CacheWriteError(NamedTuple):
+    """Failed per-source cache write result."""
+
+    source_name: str
+    """Source name, or a source index label if the name could not be read."""
+
+    message: str
+    """Human-readable reason the source was not written."""
+
+
+CacheWriteResult: TypeAlias = CacheWriteSuccess | CacheWriteError
+"""Per-source cache write outcome returned by `write_cache`."""
+
+
 class SizedTorchIterableDataset(Protocol):
     """Sized PyTorch iterable view returned by `to_torch_iterable_dataset`."""
 
@@ -159,7 +186,7 @@ def write_cache(
     path: str | Path,
     *,
     writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
-) -> list[Path]:
+) -> list[CacheWriteResult]:
     """Write one or more immutable caches below `path`.
 
     Args:
@@ -169,21 +196,58 @@ def write_cache(
         writer_config: Writer behavior owned and validated by Rust.
 
     Returns:
-        Exact cache directories published by Rust, in source order.
+        Per-source success or error results in source order.
 
     Raises:
-        ValueError: If Rust rejects configuration, source names, payloads,
-            metadata, or cache paths.
-        RuntimeError: If an I/O, manifest, worker, or Python bridge error
-            occurs while constructing the cache.
+        ValueError: If Rust rejects batch-level configuration or duplicate
+            generated cache paths before writing starts.
     """
-    paths = _write_cache(
+    results = _write_cache(
         sources,
         str(path),
         writer_config,
         False,
     )
-    return [Path(cache_path) for cache_path in paths]
+    return [_cache_write_result(result) for result in results]
+
+
+def _cache_write_result(result: _RawCacheWriteResult) -> CacheWriteResult:
+    status, source_name, detail = result
+    match status:
+        case "success":
+            return CacheWriteSuccess(source_name, Path(detail))
+        case "error":
+            return CacheWriteError(source_name, detail)
+        case _:
+            raise ValueError(f"unknown cache write result status: {status}")
+
+
+def _successful_cache_paths(results: Sequence[CacheWriteResult]) -> list[Path]:
+    errors = [error for result in results if (error := _cache_write_error(result)) is not None]
+    if errors:
+        raise ValueError(_format_cache_write_errors(errors))
+    return [path for result in results if (path := _cache_write_success_path(result)) is not None]
+
+
+def _cache_write_error(result: CacheWriteResult) -> CacheWriteError | None:
+    match result:
+        case CacheWriteError() as error:
+            return error
+        case CacheWriteSuccess():
+            return None
+
+
+def _cache_write_success_path(result: CacheWriteResult) -> Path | None:
+    match result:
+        case CacheWriteSuccess(path=path):
+            return path
+        case CacheWriteError():
+            return None
+
+
+def _format_cache_write_errors(errors: Sequence[CacheWriteError]) -> str:
+    details = "; ".join(f"{error.source_name}: {error.message}" for error in errors)
+    return f"cache write failed for {len(errors)} source(s): {details}"
 
 
 class CachedDataset:
@@ -216,13 +280,14 @@ class CachedDataset:
         caches, and writes for missing caches. Invalid existing caches raise
         instead of being silently overwritten.
         """
-        cache_paths = _write_cache(
+        results = _write_cache(
             sources,
             str(path),
             writer_config,
             True,
         )
-        return cls([Path(cache_path) for cache_path in cache_paths], reader_config=reader_config)
+        cache_paths = _successful_cache_paths([_cache_write_result(result) for result in results])
+        return cls(cache_paths, reader_config=reader_config)
 
     def __iter__(self) -> Iterator[CachedSample]:
         """Create an iterator from the current Rust-side sampling state.

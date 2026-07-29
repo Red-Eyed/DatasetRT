@@ -29,7 +29,7 @@ A `CacheSource` is a synchronous Python iterable. Python does not create threads
 ## write_cache
 
 ```python
-paths = write_cache(
+results = write_cache(
     source,
     base_cache_dir,
     writer_config=WriterConfig(
@@ -40,16 +40,27 @@ paths = write_cache(
         show_progress=True,
     ),
 )
-paths = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterConfig(...))
+results = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterConfig(...))
 ```
 
-`write_cache` creates immutable caches and returns the paths that were written.
+`write_cache` creates immutable caches and returns one result per source.
 
 `path` is always the base cache directory. Python passes this through to Rust as `base_cache_dir`.
 
-Each source is written by Rust under `base_cache_dir / name`. The returned list preserves source order and contains the exact cache directories that were created.
+Each source is written by Rust under `base_cache_dir / name`. The returned list preserves source order and contains either `CacheWriteSuccess(source_name, path)` or `CacheWriteError(source_name, message)`.
 
-Rust writes each cache into a temporary directory under `base_cache_dir / tmp` first and publishes it by renaming only after the manifest is complete. If one source in a multi-source write fails, caches created earlier in that same call are cleaned up before the error is returned.
+Rust writes each cache into a temporary directory under `base_cache_dir / tmp` first and publishes it by renaming only after the manifest is complete. If one source in a multi-source write fails, its temporary cache is cleaned up and the remaining sources still run.
+
+Per-source failures do not stop the rest of the write. For example, an empty source returns `CacheWriteError(source_name="empty", message="cache source yielded no samples")` while other sources can still return `CacheWriteSuccess`.
+
+```python
+for result in results:
+    match result:
+        case CacheWriteSuccess(source_name, path):
+            print(source_name, path)
+        case CacheWriteError(source_name, message):
+            print(source_name, message)
+```
 
 `prefetch_size` controls the bounded Rust ingestion queue. If Python iteration is faster than writing, Rust pulls ahead until this queue is full, then applies backpressure.
 

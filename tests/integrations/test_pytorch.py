@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dataset_rt import CachedDataset, CacheInput, ReaderConfig, write_cache
+from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, ReaderConfig, write_cache
 
 torch = pytest.importorskip("torch")
 
@@ -37,7 +37,12 @@ def tensor_from_bytes(data: bytes):
 
 
 def test_dataset_rt_streams_into_pytorch_iterable_dataset(tmp_path: Path) -> None:
-    cache_paths = write_cache(TensorSource(), tmp_path / "cache")
+    results = write_cache(TensorSource(), tmp_path / "cache")
+    match results[0]:
+        case CacheWriteSuccess(path=path):
+            cache_paths = [path]
+        case result:
+            raise AssertionError(result)
     dataset = CachedDataset(
         cache_paths,
         reader_config=ReaderConfig(seed=3, prefetch_size=2, num_workers=2, shuffle=False),

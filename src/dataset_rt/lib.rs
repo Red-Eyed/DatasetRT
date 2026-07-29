@@ -22,7 +22,7 @@ fn write_cache(
     base_cache_dir: String,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
-) -> PyResult<Vec<String>> {
+) -> PyResult<Vec<(String, String, String)>> {
     writer::write_cache(sources, base_cache_dir, writer_config, reuse_existing)
         .map_err(types::CacheError::into_py_err)
 }

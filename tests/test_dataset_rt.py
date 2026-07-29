@@ -12,6 +12,9 @@ from pydantic import ValidationError
 from dataset_rt import (
     CachedDataset,
     CacheInput,
+    CacheWriteError,
+    CacheWriteResult,
+    CacheWriteSuccess,
     ReaderConfig,
     ShardCompression,
     WriterConfig,
@@ -28,10 +31,21 @@ class TinySource:
         yield CacheInput(memoryview(b"two"), {"label": "c", "index": 2, "score": 3.5, "kept": True})
 
 
+def success_paths(results: list[CacheWriteResult]) -> list[Path]:
+    paths: list[Path] = []
+    for result in results:
+        match result:
+            case CacheWriteSuccess(path=path):
+                paths.append(path)
+            case CacheWriteError(source_name=source_name, message=message):
+                raise AssertionError(f"{source_name}: {message}")
+    return paths
+
+
 def test_write_and_read_cache(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
-    written = write_cache(
+    results = write_cache(
         TinySource(),
         base_cache_dir,
         writer_config=WriterConfig(
@@ -42,9 +56,10 @@ def test_write_and_read_cache(tmp_path: Path) -> None:
             show_progress=False,
         ),
     )
+    written = success_paths(results)
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42))
 
-    assert len(written) == 1
+    assert results == [CacheWriteSuccess("tiny", base_cache_dir / "tiny")]
     assert written[0].parent == base_cache_dir
     assert written[0].name == "tiny"
     assert not (base_cache_dir / "tmp" / "tiny").exists()
@@ -58,12 +73,14 @@ def test_write_and_read_cache(tmp_path: Path) -> None:
 
 
 def test_writer_manifest_records_shard_compression(tmp_path: Path) -> None:
-    written = write_cache(
-        TinySource(),
-        tmp_path / "cache",
-        writer_config=WriterConfig(
-            shard_compression=ShardCompression(algo="none", ratio=1.0),
-        ),
+    written = success_paths(
+        write_cache(
+            TinySource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(
+                shard_compression=ShardCompression(algo="none", ratio=1.0),
+            ),
+        )
     )
 
     manifest = json.loads((written[0] / "manifest.json").read_text())
@@ -73,10 +90,12 @@ def test_writer_manifest_records_shard_compression(tmp_path: Path) -> None:
 
 
 def test_shard_records_embed_metadata_for_debugging(tmp_path: Path) -> None:
-    written = write_cache(
-        TinySource(),
-        tmp_path / "cache",
-        writer_config=WriterConfig(show_progress=False),
+    written = success_paths(
+        write_cache(
+            TinySource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(show_progress=False),
+        )
     )
     cache_path = written[0]
     manifest = json.loads((cache_path / "manifest.json").read_text())
@@ -98,13 +117,15 @@ def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path)
             yield CacheInput(b"a" * 10_000, {"label": "first"})
             yield CacheInput(b"b" * 10_000, {"label": "second"})
 
-    written = write_cache(
-        CompressibleSource(),
-        tmp_path / "cache",
-        writer_config=WriterConfig(
-            shard_compression=ShardCompression(algo="lz4", ratio=2.0),
-            show_progress=False,
-        ),
+    written = success_paths(
+        write_cache(
+            CompressibleSource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(
+                shard_compression=ShardCompression(algo="lz4", ratio=2.0),
+                show_progress=False,
+            ),
+        )
     )
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42, shuffle=False))
     samples = list(dataset)
@@ -119,10 +140,12 @@ def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path)
 def test_writer_progress_is_optional(tmp_path: Path) -> None:
     assert WriterConfig().show_progress is True
 
-    written = write_cache(
-        TinySource(),
-        tmp_path / "cache",
-        writer_config=WriterConfig(show_progress=False),
+    written = success_paths(
+        write_cache(
+            TinySource(),
+            tmp_path / "cache",
+            writer_config=WriterConfig(show_progress=False),
+        )
     )
 
     assert len(written) == 1
@@ -134,7 +157,7 @@ def test_write_multiple_sources_returns_cache_paths(tmp_path: Path) -> None:
 
     root = tmp_path / "caches"
 
-    written = write_cache([TinySource(), OtherSource()], root)
+    written = success_paths(write_cache([TinySource(), OtherSource()], root))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=42))
 
     assert [path.parent for path in written] == [root, root]
@@ -186,7 +209,7 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
         )
 
 
-def test_multi_source_write_cleans_up_on_failure(tmp_path: Path) -> None:
+def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) -> None:
     class BadSource:
         name = "bad"
 
@@ -195,18 +218,40 @@ def test_multi_source_write_cleans_up_on_failure(tmp_path: Path) -> None:
 
     root = tmp_path / "caches"
 
-    with pytest.raises(ValueError, match="bytes-like"):
-        write_cache([TinySource(), BadSource()], root)
+    results = write_cache([TinySource(), BadSource()], root)
 
-    assert not (root / "tiny").exists()
+    assert results == [
+        CacheWriteSuccess("tiny", root / "tiny"),
+        CacheWriteError("bad", "data must be bytes-like"),
+    ]
     assert not (root / "bad").exists()
     assert not (root / "tmp" / "bad").exists()
+
+
+def test_empty_source_is_reported_as_write_error(tmp_path: Path) -> None:
+    class EmptySource:
+        name = "empty"
+
+        def __iter__(self):
+            return
+            yield CacheInput(b"never", {"label": "empty"})
+
+    root = tmp_path / "caches"
+
+    results = write_cache([TinySource(), EmptySource()], root)
+
+    assert results == [
+        CacheWriteSuccess("tiny", root / "tiny"),
+        CacheWriteError("empty", "cache source yielded no samples"),
+    ]
+    assert not (root / "empty").exists()
+    assert not (root / "tmp" / "empty").exists()
 
 
 def test_dataset_restarts_deterministically(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
-    written = write_cache(TinySource(), base_cache_dir)
+    written = success_paths(write_cache(TinySource(), base_cache_dir))
 
     first = [
         sample.sample_id for sample in CachedDataset(written, reader_config=ReaderConfig(seed=7))
@@ -219,7 +264,7 @@ def test_dataset_restarts_deterministically(tmp_path: Path) -> None:
 
 
 def test_reader_config_controls_workers_prefetch_and_shuffle(tmp_path: Path) -> None:
-    written = write_cache(TinySource(), tmp_path / "cache")
+    written = success_paths(write_cache(TinySource(), tmp_path / "cache"))
     reader_config = ReaderConfig(seed=7, prefetch_size=2, num_workers=2, shuffle=False)
 
     dataset = CachedDataset(written, reader_config=reader_config)
@@ -236,7 +281,7 @@ def test_reader_config_validation() -> None:
 
 
 def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    written = write_cache(TinySource(), tmp_path / "cache")
+    written = success_paths(write_cache(TinySource(), tmp_path / "cache"))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
     original_import = builtins.__import__
 
@@ -254,7 +299,7 @@ def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_weights_are_polars_table_with_metadata(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
-    written = write_cache(TinySource(), base_cache_dir)
+    written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
 
     weights = dataset.weight_table()
@@ -267,7 +312,7 @@ def test_weights_are_polars_table_with_metadata(tmp_path: Path) -> None:
 def test_set_weight_table_accepts_reordered_polars_table(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
-    written = write_cache(TinySource(), base_cache_dir)
+    written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
 
     weights = dataset.weight_table()
@@ -284,7 +329,7 @@ def test_set_weight_table_accepts_reordered_polars_table(tmp_path: Path) -> None
 def test_weight_validation_happens_in_rust(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
-    written = write_cache(TinySource(), base_cache_dir)
+    written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
     weights = dataset.weight_table()
 
@@ -321,3 +366,19 @@ def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
 
     assert second.cache_paths == first.cache_paths
     assert len(second) == 3
+
+
+def test_from_cache_sources_summarizes_write_errors(tmp_path: Path) -> None:
+    class EmptySource:
+        name = "empty"
+
+        def __iter__(self):
+            return
+            yield CacheInput(b"never", {"label": "empty"})
+
+    with pytest.raises(ValueError, match="empty: cache source yielded no samples"):
+        CachedDataset.from_cache_sources(
+            [TinySource(), EmptySource()],
+            tmp_path / "cache",
+            reader_config=ReaderConfig(seed=42),
+        )

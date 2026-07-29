@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dataset_rt import CachedDataset, CacheInput, ReaderConfig, write_cache
+from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, ReaderConfig, write_cache
 
 
 class IntegritySource:
@@ -18,8 +18,12 @@ class IntegritySource:
 
 
 def write_integrity_cache(tmp_path: Path) -> Path:
-    paths = write_cache(IntegritySource(), tmp_path / "cache")
-    return paths[0]
+    results = write_cache(IntegritySource(), tmp_path / "cache")
+    match results[0]:
+        case CacheWriteSuccess(path=path):
+            return path
+        case result:
+            raise AssertionError(result)
 
 
 def load_cache(cache_path: Path) -> CachedDataset:

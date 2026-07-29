@@ -1,6 +1,12 @@
 from collections.abc import Iterator, Sequence
+from typing import NamedTuple
 
 MetadataValue = bool | int | float | str
+
+class CacheWriteRecord(NamedTuple):
+    status: str
+    source_name: str
+    detail: str
 
 class CachedDataset:
     def __init__(
@@ -21,4 +27,4 @@ def write_cache(
     base_cache_dir: str,
     writer_config: object,
     reuse_existing: bool,
-) -> list[str]: ...
+) -> list[CacheWriteRecord]: ...
