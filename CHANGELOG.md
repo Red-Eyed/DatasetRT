@@ -2,6 +2,21 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.11 - 2026-07-29
+
+### Changed
+
+- Cache checksum validation is now opt-in with `WriterConfig(validate_cache=True)` and `ReaderConfig(validate_cache=True)`.
+- Default dataset construction still reads manifests, metadata, indexes, and shard file lengths, but no longer hashes every payload shard during restart.
+
+## 0.1.10 - 2026-07-29
+
+### Changed
+
+- Multi-source cache writes now reuse one bounded writer pipeline across the whole source list.
+- Python ingestion now continues across source boundaries until the configured queue is full, while cache commit and publish remain sequential.
+- Writer progress rendering was split into focused Rust modules to keep writer internals easier to read.
+
 ## 0.1.9 - 2026-07-29
 
 ### Added
