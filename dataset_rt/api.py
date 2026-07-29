@@ -154,6 +154,30 @@ CacheWriteResult: TypeAlias = CacheWriteSuccess | CacheWriteError
 """Per-source cache write outcome returned by `write_cache`."""
 
 
+class CacheSourcesDatasetSuccess(NamedTuple):
+    """Dataset creation result when at least one source produced a cache."""
+
+    dataset: CachedDataset
+    """Dataset loaded from all successful cache writes."""
+
+    results: list[CacheWriteResult]
+    """Per-source write outcomes, including failures."""
+
+
+class CacheSourcesDatasetError(NamedTuple):
+    """Dataset creation result when no source produced a cache."""
+
+    results: list[CacheWriteResult]
+    """Per-source write outcomes explaining why no dataset was loaded."""
+
+    message: str
+    """Human-readable summary of the failed dataset creation."""
+
+
+CacheSourcesDatasetResult: TypeAlias = CacheSourcesDatasetSuccess | CacheSourcesDatasetError
+"""Best-effort result returned by `CachedDataset.from_cache_sources`."""
+
+
 class SizedTorchIterableDataset(Protocol):
     """Sized PyTorch iterable view returned by `to_torch_iterable_dataset`."""
 
@@ -223,31 +247,32 @@ def _cache_write_result(result: _RawCacheWriteResult) -> CacheWriteResult:
 
 
 def _successful_cache_paths(results: Sequence[CacheWriteResult]) -> list[Path]:
-    errors = [error for result in results if (error := _cache_write_error(result)) is not None]
-    if errors:
-        raise ValueError(_format_cache_write_errors(errors))
-    return [path for result in results if (path := _cache_write_success_path(result)) is not None]
+    paths = []
+    for result in results:
+        match result:
+            case CacheWriteSuccess(path=path):
+                paths.append(path)
+            case CacheWriteError():
+                continue
+    return paths
 
 
-def _cache_write_error(result: CacheWriteResult) -> CacheWriteError | None:
-    match result:
-        case CacheWriteError() as error:
-            return error
-        case CacheWriteSuccess():
-            return None
+def _cache_sources_dataset_error(results: list[CacheWriteResult]) -> CacheSourcesDatasetError:
+    return CacheSourcesDatasetError(results, _format_cache_sources_dataset_error(results))
 
 
-def _cache_write_success_path(result: CacheWriteResult) -> Path | None:
-    match result:
-        case CacheWriteSuccess(path=path):
-            return path
-        case CacheWriteError():
-            return None
-
-
-def _format_cache_write_errors(errors: Sequence[CacheWriteError]) -> str:
-    details = "; ".join(f"{error.source_name}: {error.message}" for error in errors)
-    return f"cache write failed for {len(errors)} source(s): {details}"
+def _format_cache_sources_dataset_error(results: Sequence[CacheWriteResult]) -> str:
+    messages = []
+    for result in results:
+        match result:
+            case CacheWriteError(source_name=source_name, message=message):
+                messages.append(f"{source_name}: {message}")
+            case CacheWriteSuccess():
+                continue
+    if not messages:
+        return "no cache sources were provided"
+    details = "; ".join(messages)
+    return f"no caches were written: {details}"
 
 
 class CachedDataset:
@@ -273,21 +298,28 @@ class CachedDataset:
         *,
         reader_config: ReaderConfig,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
-    ) -> CachedDataset:
+    ) -> CacheSourcesDatasetResult:
         """Create missing caches from sources, reuse valid existing caches, and load them.
 
         Rust owns cache path generation, existence checks, validation of existing
         caches, and writes for missing caches. Invalid existing caches raise
-        instead of being silently overwritten.
+        instead of being silently overwritten. Per-source write failures are
+        returned in the result instead of being raised.
         """
-        results = _write_cache(
-            sources,
-            str(path),
-            writer_config,
-            True,
-        )
-        cache_paths = _successful_cache_paths([_cache_write_result(result) for result in results])
-        return cls(cache_paths, reader_config=reader_config)
+        results = [
+            _cache_write_result(result)
+            for result in _write_cache(
+                sources,
+                str(path),
+                writer_config,
+                True,
+            )
+        ]
+        cache_paths = _successful_cache_paths(results)
+        if not cache_paths:
+            return _cache_sources_dataset_error(results)
+        dataset = cls(cache_paths, reader_config=reader_config)
+        return CacheSourcesDatasetSuccess(dataset, results)
 
     def __iter__(self) -> Iterator[CachedSample]:
         """Create an iterator from the current Rust-side sampling state.

@@ -38,6 +38,8 @@ import polars as pl
 
 from dataset_rt import (
     CacheInput,
+    CacheSourcesDatasetError,
+    CacheSourcesDatasetSuccess,
     CachedDataset,
     ReaderConfig,
     ShardCompression,
@@ -56,7 +58,7 @@ class Images:
             )
 
 
-dataset = CachedDataset.from_cache_sources(
+result = CachedDataset.from_cache_sources(
     Images(),
     Path("cache"),
     reader_config=ReaderConfig(seed=42, prefetch_size=64, num_workers=4, shuffle=True),
@@ -68,12 +70,18 @@ dataset = CachedDataset.from_cache_sources(
     ),
 )
 
+match result:
+    case CacheSourcesDatasetSuccess(dataset, results):
+        pass
+    case CacheSourcesDatasetError(results, message):
+        raise RuntimeError(message)
+
 for sample in dataset:
     image = decode_image(sample.data)  # domain decoding stays in Python
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a ready-to-iterate dataset. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
+`CachedDataset.from_cache_sources` creates missing caches, reuses valid existing caches, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s by default; pass `WriterConfig(show_progress=False)` for quiet jobs.
 
 ## PyTorch
 
@@ -118,7 +126,7 @@ Rust validates that every physical `(cache_id, sample_id)` appears exactly once 
 ## Multiple Sources
 
 ```python
-dataset = CachedDataset.from_cache_sources(
+result = CachedDataset.from_cache_sources(
     [TrainImages(), SyntheticImages(), HardNegatives()],
     Path("cache"),
     reader_config=ReaderConfig(seed=123),
@@ -126,7 +134,7 @@ dataset = CachedDataset.from_cache_sources(
 )
 ```
 
-If one source fails during a multi-source write, DatasetRT cleans up caches created earlier in that call. A loaded dataset means every cache was validated from its manifest.
+If one source fails during a multi-source write, DatasetRT reports that source as `CacheWriteError` and keeps going. `CacheSourcesDatasetSuccess.results` tells you which sources were loaded and which were missing or malformed. A loaded dataset means every successful cache was validated from its manifest.
 
 ## Storage Layout
 

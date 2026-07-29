@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from dataset_rt import (
     CachedDataset,
     CacheInput,
+    CacheSourcesDatasetError,
+    CacheSourcesDatasetSuccess,
     CacheWriteError,
     CacheWriteResult,
     CacheWriteSuccess,
@@ -351,24 +353,35 @@ def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
     reader_config = ReaderConfig(seed=42)
     writer_config = WriterConfig()
 
-    first = CachedDataset.from_cache_sources(
+    first_result = CachedDataset.from_cache_sources(
         TinySource(),
         tmp_path / "cache",
         reader_config=reader_config,
         writer_config=writer_config,
     )
-    second = CachedDataset.from_cache_sources(
+    second_result = CachedDataset.from_cache_sources(
         ExplodingSource(),
         tmp_path / "cache",
         reader_config=reader_config,
         writer_config=writer_config,
     )
 
+    match first_result:
+        case CacheSourcesDatasetSuccess(dataset=first):
+            pass
+        case result:
+            raise AssertionError(result)
+    match second_result:
+        case CacheSourcesDatasetSuccess(dataset=second):
+            pass
+        case result:
+            raise AssertionError(result)
+
     assert second.cache_paths == first.cache_paths
     assert len(second) == 3
 
 
-def test_from_cache_sources_summarizes_write_errors(tmp_path: Path) -> None:
+def test_from_cache_sources_returns_dataset_with_write_errors(tmp_path: Path) -> None:
     class EmptySource:
         name = "empty"
 
@@ -376,9 +389,40 @@ def test_from_cache_sources_summarizes_write_errors(tmp_path: Path) -> None:
             return
             yield CacheInput(b"never", {"label": "empty"})
 
-    with pytest.raises(ValueError, match="empty: cache source yielded no samples"):
-        CachedDataset.from_cache_sources(
-            [TinySource(), EmptySource()],
-            tmp_path / "cache",
-            reader_config=ReaderConfig(seed=42),
-        )
+    result = CachedDataset.from_cache_sources(
+        [TinySource(), EmptySource()],
+        tmp_path / "cache",
+        reader_config=ReaderConfig(seed=42),
+    )
+
+    match result:
+        case CacheSourcesDatasetSuccess(dataset=dataset, results=results):
+            assert len(dataset) == 3
+            assert results == [
+                CacheWriteSuccess("tiny", tmp_path / "cache" / "tiny"),
+                CacheWriteError("empty", "cache source yielded no samples"),
+            ]
+        case result:
+            raise AssertionError(result)
+
+
+def test_from_cache_sources_returns_error_when_no_cache_was_written(tmp_path: Path) -> None:
+    class EmptySource:
+        name = "empty"
+
+        def __iter__(self):
+            return
+            yield CacheInput(b"never", {"label": "empty"})
+
+    result = CachedDataset.from_cache_sources(
+        EmptySource(),
+        tmp_path / "cache",
+        reader_config=ReaderConfig(seed=42),
+    )
+
+    match result:
+        case CacheSourcesDatasetError(results=results, message=message):
+            assert results == [CacheWriteError("empty", "cache source yielded no samples")]
+            assert message == "no caches were written: empty: cache source yielded no samples"
+        case result:
+            raise AssertionError(result)

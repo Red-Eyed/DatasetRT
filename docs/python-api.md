@@ -134,15 +134,21 @@ Rules:
 ## CachedDataset.from_cache_sources
 
 ```python
-dataset = CachedDataset.from_cache_sources(
+result = CachedDataset.from_cache_sources(
     [source_a, source_b],
     base_cache_dir,
     reader_config=ReaderConfig(seed=42),
     writer_config=WriterConfig(),
 )
+
+match result:
+    case CacheSourcesDatasetSuccess(dataset, results):
+        ...
+    case CacheSourcesDatasetError(results, message):
+        ...
 ```
 
-The factory asks Rust to generate cache paths, reuse valid existing caches, create missing caches, and then load the returned paths. Existing invalid caches raise instead of being overwritten.
+The factory asks Rust to generate cache paths, reuse valid existing caches, create missing caches, and then load every successful cache path. It returns `CacheSourcesDatasetSuccess(dataset, results)` when at least one cache was loaded, or `CacheSourcesDatasetError(results, message)` when no cache could be loaded. The `results` list preserves every per-source `CacheWriteSuccess` or `CacheWriteError`, so callers can see what was missing or malformed.
 
 ## Weight Table
 
