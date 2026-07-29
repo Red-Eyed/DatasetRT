@@ -2,6 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.1.9 - 2026-07-29
+
+### Added
+
+- Multi-source cache writes now show a source-level progress bar with completed source count, source throughput, and ETA when `show_progress=True`.
+
 ## 0.1.8 - 2026-07-29
 
 ### Fixed
