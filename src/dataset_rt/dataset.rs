@@ -5,12 +5,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
 use crate::runtime::{EpochPlan, RuntimeIterator};
+use crate::samples_metadata::{
+    build_samples_metadata_ipc, extract_samples_metadata_ipc, WeightState,
+};
 use crate::sampling::EpochSampler;
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
-use crate::weight_table::{build_weight_table_ipc, extract_weight_table_ipc, WeightState};
 
 #[pyclass(name = "CachedDataset")]
 pub struct PyCachedDataset {
@@ -74,20 +76,20 @@ impl PyCachedDataset {
         })
     }
 
-    /// Return an Arrow IPC weight table built by Rust from cache metadata and weights.
-    fn weight_table_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    /// Return Arrow IPC samples metadata built by Rust from cache metadata and weights.
+    fn samples_metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let ipc = self
             .inner
-            .weight_table_ipc()
+            .samples_metadata_ipc()
             .map_err(CacheError::into_py_err)?;
         Ok(PyBytes::new(py, &ipc))
     }
 
-    /// Replace weights from a columnar Arrow IPC payload containing identity and weight columns.
-    fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
+    /// Replace weights from samples metadata IPC containing identity and weight columns.
+    fn set_samples_metadata_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
         let weights = self
             .inner
-            .extract_weight_table_ipc(ipc.as_bytes())
+            .extract_samples_metadata_ipc(ipc.as_bytes())
             .map_err(CacheError::into_py_err)?;
         let mut guard = self
             .inner
@@ -96,6 +98,16 @@ impl PyCachedDataset {
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
         guard.weights = WeightState::Custom(weights);
         Ok(())
+    }
+
+    /// Compatibility alias for callers using the previous native method name.
+    fn weight_table_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.samples_metadata_ipc(py)
+    }
+
+    /// Compatibility alias for callers using the previous native method name.
+    fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
+        self.set_samples_metadata_ipc(ipc)
     }
 }
 
@@ -170,9 +182,9 @@ impl DatasetState {
     }
 
     /// Build one Arrow IPC table containing identity, metadata, and current weights.
-    fn weight_table_ipc(&self) -> CacheResult<Vec<u8>> {
+    fn samples_metadata_ipc(&self) -> CacheResult<Vec<u8>> {
         let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-        build_weight_table_ipc(
+        build_samples_metadata_ipc(
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),
             &self.schema,
@@ -181,8 +193,8 @@ impl DatasetState {
     }
 
     /// Parse a columnar weight update and validate that it covers the dataset exactly once.
-    fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
-        extract_weight_table_ipc(
+    fn extract_samples_metadata_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
+        extract_samples_metadata_ipc(
             ipc,
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),

@@ -25,7 +25,7 @@ Rust owns:
 - deterministic weighted sampling
 - iterator state
 - bounded reader/writer prefetch and worker pools
-- weight table validation
+- samples metadata validation
 
 Python stays thin and ergonomic. It describes your source data and receives bytes plus metadata back.
 
@@ -105,21 +105,21 @@ for sample in loader:
 
 The adapter does not decode payloads or add a Torch dependency to DatasetRT. It yields `CachedSample` values and reports `len(torch_dataset)`.
 
-## Metadata-Aware Weights
+## Samples Metadata
 
-Weights are not a loose list that can drift out of alignment. DatasetRT exposes them as a Polars table with sample identity and metadata:
+Weights are not a loose list that can drift out of alignment. DatasetRT exposes dataset-level samples metadata as a Polars table with stable identity columns, stored metadata, and editable weights:
 
 ```python
-weights = dataset.weight_table()
+metadata = dataset.samples_metadata()
 
-rare = weights.with_columns(
+rare = metadata.with_columns(
     pl.when(pl.col("label") == "rare_class")
     .then(5.0)
     .otherwise(1.0)
     .alias("weight")
 )
 
-dataset.set_weight_table(rare)
+dataset.set_samples_metadata(rare)
 ```
 
 The table contains:
@@ -192,4 +192,4 @@ Wheels use Python's stable ABI (`cp310-abi3`) and support Python 3.10 through 3.
 
 ## Status
 
-DatasetRT is at foundational v0.1 architecture. The core cache lifecycle, immutable storage, metadata, deterministic weighted sampling, Rust-owned reader/writer prefetching, and Polars weight table are in place.
+DatasetRT is at foundational v0.1 architecture. The core cache lifecycle, immutable storage, metadata, deterministic weighted sampling, Rust-owned reader/writer prefetching, and Polars samples metadata table are in place.

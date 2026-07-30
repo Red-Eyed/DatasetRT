@@ -7,7 +7,7 @@ DatasetRT is implemented as a Python package backed by a Rust extension module.
 - Rust stable.
 - PyO3.
 - maturin.
-- Polars for the public Python weight table.
+- Polars for the public Python samples metadata table.
 - Python package metadata in `pyproject.toml`.
 
 The local development interpreter is pinned with `.python-version`. The current project default is CPython 3.11 because it has mature wheels for the Python dependencies used in the test environment.

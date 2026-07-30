@@ -30,20 +30,20 @@ enum WeightSlice<'a> {
     Custom(&'a [f64]),
 }
 
-/// Build one Arrow IPC table containing identity, metadata, and current weights.
-pub fn build_weight_table_ipc(
+/// Build one Arrow IPC samples metadata table containing identity, metadata, and weights.
+pub fn build_samples_metadata_ipc(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     schema: &[MetadataField],
     weights: &WeightState,
 ) -> CacheResult<Vec<u8>> {
-    let arrow_schema = weight_table_schema(schema);
-    let batches = weight_table_batches(caches, cache_offsets, schema, &arrow_schema, weights)?;
+    let arrow_schema = samples_metadata_schema(schema);
+    let batches = samples_metadata_batches(caches, cache_offsets, schema, &arrow_schema, weights)?;
     write_record_batches_ipc(&arrow_schema, &batches)
 }
 
 /// Parse a columnar weight update and validate that it covers the dataset exactly once.
-pub fn extract_weight_table_ipc(
+pub fn extract_samples_metadata_ipc(
     ipc: &[u8],
     caches: &[LoadedCache],
     cache_offsets: &[usize],
@@ -57,18 +57,18 @@ pub fn extract_weight_table_ipc(
     for batch in reader {
         let batch = batch?;
         row_count = row_count.checked_add(batch.num_rows()).ok_or_else(|| {
-            CacheError::InvalidInput("weight table row count overflowed usize".to_string())
+            CacheError::InvalidInput("samples metadata row count overflowed usize".to_string())
         })?;
         apply_weight_batch(&batch, caches, cache_offsets, &mut weights, &mut seen)?;
     }
 
-    validate_complete_weight_table(row_count, total_samples, &seen)?;
+    validate_complete_samples_metadata(row_count, total_samples, &seen)?;
     validate_weights(&weights, total_samples)?;
     Ok(weights)
 }
 
 /// Build Arrow batches for every cache without expanding metadata cells into Rust objects.
-fn weight_table_batches(
+fn samples_metadata_batches(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     metadata_schema: &[MetadataField],
@@ -85,7 +85,7 @@ fn weight_table_batches(
             let row_count = metadata_batch.num_rows();
             let physical_offset = physical_offset(cache_offset, sample_start)?;
             let weights = weight_slice(weights, physical_offset, row_count)?;
-            output_batches.push(weight_table_batch(
+            output_batches.push(samples_metadata_batch(
                 cache_index,
                 sample_start,
                 arrow_schema,
@@ -102,13 +102,13 @@ fn weight_table_batches(
     Ok(output_batches)
 }
 
-/// Return the stable public weight table schema used by Rust IPC exports.
-fn weight_table_schema(schema: &[MetadataField]) -> Arc<Schema> {
-    Arc::new(Schema::new(weight_table_fields(schema)))
+/// Return the stable public samples metadata schema used by Rust IPC exports.
+fn samples_metadata_schema(schema: &[MetadataField]) -> Arc<Schema> {
+    Arc::new(Schema::new(samples_metadata_fields(schema)))
 }
 
-/// Build the public weight-table fields in stable column order.
-fn weight_table_fields(schema: &[MetadataField]) -> Vec<Field> {
+/// Build the public samples metadata fields in stable column order.
+fn samples_metadata_fields(schema: &[MetadataField]) -> Vec<Field> {
     let mut fields = Vec::with_capacity(schema.len() + 3);
     fields.push(Field::new("cache_id", DataType::UInt64, false));
     fields.push(Field::new("sample_id", DataType::UInt64, false));
@@ -176,7 +176,7 @@ fn weight_slice(weights: &WeightState, offset: usize, len: usize) -> CacheResult
 }
 
 /// Build one output batch by reusing metadata arrays and adding identity plus weight columns.
-fn weight_table_batch(
+fn samples_metadata_batch(
     cache_index: usize,
     sample_start: usize,
     arrow_schema: &Arc<Schema>,
@@ -326,7 +326,7 @@ fn apply_weight_update(
         .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
     if already_seen {
         return Err(CacheError::InvalidInput(format!(
-            "duplicate weight row for cache_id={} sample_id={}",
+            "duplicate samples metadata row for cache_id={} sample_id={}",
             update.cache_id, update.sample_id
         )));
     }
@@ -354,12 +354,12 @@ fn physical_index(
         .map_err(|_| CacheError::InvalidInput("sample_id does not fit in usize".to_string()))?;
     let cache = caches.get(cache_index).ok_or_else(|| {
         CacheError::InvalidInput(format!(
-            "unknown weight row identity cache_id={cache_id} sample_id={sample_id}"
+            "unknown samples metadata row identity cache_id={cache_id} sample_id={sample_id}"
         ))
     })?;
     if sample_index >= cache.sample_count() {
         return Err(CacheError::InvalidInput(format!(
-            "unknown weight row identity cache_id={cache_id} sample_id={sample_id}"
+            "unknown samples metadata row identity cache_id={cache_id} sample_id={sample_id}"
         )));
     }
     let offset = cache_offsets
@@ -371,20 +371,20 @@ fn physical_index(
     })
 }
 
-/// Ensure a weight table has exactly one accepted row for every physical sample.
-fn validate_complete_weight_table(
+/// Ensure samples metadata has exactly one accepted row for every physical sample.
+fn validate_complete_samples_metadata(
     row_count: usize,
     expected_rows: usize,
     seen: &[bool],
 ) -> CacheResult<()> {
     if row_count != expected_rows {
         return Err(CacheError::InvalidInput(format!(
-            "expected {expected_rows} weight rows, got {row_count}"
+            "expected {expected_rows} samples metadata rows, got {row_count}"
         )));
     }
     if seen.iter().any(|value| !value) {
         return Err(CacheError::InvalidInput(
-            "weight table must include every physical sample exactly once".to_string(),
+            "samples metadata must include every physical sample exactly once".to_string(),
         ));
     }
     Ok(())
@@ -392,9 +392,9 @@ fn validate_complete_weight_table(
 
 /// Fetch a required Arrow column by name with a user-facing validation error.
 fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> CacheResult<&'a ArrayRef> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| CacheError::InvalidInput(format!("weight table missing '{name}' column")))
+    batch.column_by_name(name).ok_or_else(|| {
+        CacheError::InvalidInput(format!("samples metadata missing '{name}' column"))
+    })
 }
 
 /// Read a non-null integer identity cell from an Arrow column as `u64`.
@@ -413,7 +413,7 @@ fn read_u64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult
         return non_negative_i64_as_u64(i64::from(values.value(row_index)), name);
     }
     Err(CacheError::InvalidInput(format!(
-        "weight table column '{name}' must be an integer"
+        "samples metadata column '{name}' must be an integer"
     )))
 }
 
@@ -439,7 +439,7 @@ fn read_f64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult
         return Ok(f64::from(values.value(row_index)));
     }
     Err(CacheError::InvalidInput(format!(
-        "weight table column '{name}' must be numeric"
+        "samples metadata column '{name}' must be numeric"
     )))
 }
 
@@ -447,7 +447,7 @@ fn read_f64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult
 fn reject_null_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<()> {
     if column.is_null(row_index) {
         return Err(CacheError::InvalidInput(format!(
-            "weight table column '{name}' contains null"
+            "samples metadata column '{name}' contains null"
         )));
     }
     Ok(())
@@ -456,6 +456,8 @@ fn reject_null_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheRes
 /// Convert signed identity values only when they are representable cache/sample IDs.
 fn non_negative_i64_as_u64(value: i64, name: &str) -> CacheResult<u64> {
     u64::try_from(value).map_err(|_| {
-        CacheError::InvalidInput(format!("weight table column '{name}' must be non-negative"))
+        CacheError::InvalidInput(format!(
+            "samples metadata column '{name}' must be non-negative"
+        ))
     })
 }

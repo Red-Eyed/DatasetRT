@@ -15,7 +15,7 @@ Core vocabulary:
 - **Manifest**: The publication marker for a complete cache. Readers reject caches without a valid manifest.
 - **Metadata**: Primitive sample-level values stored columnarly in `metadata.arrow` and redundantly embedded in each shard record.
 - **Physical sample**: A concrete `(cache_id, sample_id)` pair. `cache_id` is the position of the cache path passed to `CachedDataset`; `sample_id` is the row within that cache.
-- **Weight table**: A Polars table with `cache_id`, `sample_id`, metadata columns, and `weight`. Rust owns the authoritative weight vector and validates all updates.
+- **Samples metadata table**: A Polars table with `cache_id`, `sample_id`, metadata columns, and `weight`. Rust owns the authoritative weight vector and validates all updates.
 - **Epoch plan**: The ordered list of physical samples emitted by an iterator. With `shuffle=True`, it is deterministic weighted multinomial sampling with replacement for the dataset seed, epoch, and weight vector; it is not a permutation.
 - **Shard**: A binary file containing concatenated sample records. The index maps each sample to a shard id, offset, and byte length.
 - **Stored payload**: The bytes stored in the shard after optional per-record compression. DatasetRT does not decode images, tensors, or domain records.
@@ -25,7 +25,7 @@ Important external tools:
 - **PyO3**: Rust bindings for exposing the native runtime as the `dataset_rt._dataset_rt` Python extension.
 - **maturin**: Builds and installs the mixed Rust/Python package during development and release.
 - **Polars**: Columnar DataFrame engine used by the Python API for metadata-aware weight editing.
-- **Apache Arrow IPC**: Columnar file format used for `metadata.arrow` and in-memory weight table transfer.
+- **Apache Arrow IPC**: Columnar file format used for `metadata.arrow` and in-memory samples metadata transfer.
 - **crossbeam-channel**: Bounded Rust channels used for reader/writer backpressure.
 - **indicatif**: Progress bar rendering for cache writes.
 - **lz4_flex**: Per-record LZ4 compression for random-access payload reads.
@@ -129,7 +129,7 @@ Data flow:
 2. Rust validates metadata schema, compresses payloads if configured, writes shard records, writes Arrow metadata and binary index, then publishes manifest.
 3. `CachedDataset` loads manifests and indexes, validates cache shape, and initializes Rust dataset state.
 4. Iteration creates an epoch plan, schedules bounded read tasks, reads addressed shard records, decompresses payload bytes, and returns `CachedSample` to Python.
-5. `weight_table()` exposes metadata and weights through Polars; `set_weight_table()` returns only identity and weight data to Rust for validation.
+5. `samples_metadata()` exposes metadata and weights through Polars; `set_samples_metadata()` returns only identity and weight data to Rust for validation.
 
 ## Checklist For Every Change
 
@@ -162,7 +162,7 @@ When changing sampling or weights:
 
 - Keep weight validation in Rust.
 - Preserve `shuffle=True` semantics as weighted multinomial sampling with replacement. A sample may appear multiple times in one epoch, and another sample may be absent.
-- For weight table updates, validate exact coverage: every physical sample appears once, no duplicates, no unknown identities.
+- For samples metadata updates, validate exact coverage: every physical sample appears once, no duplicates, no unknown identities.
 - Keep weights positive and finite.
 - Add determinism tests for same seed/epoch/weights.
 - Avoid Python row iteration for full-table updates.

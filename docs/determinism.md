@@ -27,7 +27,7 @@ cache_id | sample_id | <metadata columns...> | weight
 
 The metadata columns make it natural to create weighted subsets in Python, while Rust remains the authority for applying the result.
 
-When `set_weight_table` is called, Rust validates:
+When `set_samples_metadata` is called, Rust validates:
 
 - Every physical `(cache_id, sample_id)` appears exactly once.
 - No unknown physical identity appears.

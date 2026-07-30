@@ -8,10 +8,10 @@
 mod compression;
 mod dataset;
 mod runtime;
+mod samples_metadata;
 mod sampling;
 mod storage;
 mod types;
-mod weight_table;
 mod writer;
 
 use dataset::PyCachedDataset;

@@ -172,14 +172,14 @@ match result:
 
 The factory asks Rust to generate cache paths, reuse valid existing caches, create missing caches, and then load every successful cache path. It returns `CacheSourcesDatasetSuccess(dataset, results)` when at least one cache was loaded, or `CacheSourcesDatasetError(results, message)` when no cache could be loaded. The `results` list preserves every per-source `CacheWriteSuccess` or `CacheWriteError`, so callers can see what was missing or malformed.
 
-## Weight Table
+## Samples Metadata
 
 ```python
-weights = dataset.weight_table()
-dataset.set_weight_table(weights)
+metadata = dataset.samples_metadata()
+dataset.set_samples_metadata(metadata)
 ```
 
-Weights are represented as a Polars `DataFrame`, not as a bare vector. The table is designed to be filtered and edited by metadata:
+Weights are represented inside a Polars samples metadata `DataFrame`, not as a bare vector. The table is designed to be filtered and edited by metadata:
 
 ```text
 cache_id | sample_id | <metadata columns...> | weight
@@ -192,18 +192,20 @@ Required columns:
 - Metadata columns: one column per metadata field stored in the cache.
 - `weight`: positive finite float, default `1.0`.
 
-`weight_table` returns a copy. Mutating the Polars frame has no effect until it is passed to `set_weight_table`.
+`samples_metadata` returns a copy. Mutating the Polars frame has no effect until it is passed to `set_samples_metadata`.
 
-`set_weight_table` accepts a Polars `DataFrame`. Rust reads and validates the authoritative identity and weight columns:
+`set_samples_metadata` accepts a Polars `DataFrame`. Rust reads and validates the authoritative identity and weight columns:
 
 - Every physical sample must appear exactly once.
 - Unknown `(cache_id, sample_id)` pairs are rejected.
 - Duplicate `(cache_id, sample_id)` pairs are rejected.
 - Every weight must be finite and positive.
 
-Rows may be reordered by Polars operations before calling `set_weight_table`; Rust maps by `(cache_id, sample_id)`, not by row position.
+Rows may be reordered by Polars operations before calling `set_samples_metadata`; Rust maps by `(cache_id, sample_id)`, not by row position.
 
 Metadata columns are included for ergonomic filtering and auditing. They are not trusted for sample identity; `cache_id` and `sample_id` are the identity fields.
+
+`weight_table` and `set_weight_table` remain as deprecated compatibility aliases for the same operations.
 
 ## Iteration
 

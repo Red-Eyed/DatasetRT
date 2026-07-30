@@ -7,10 +7,12 @@ or rows into familiar Python objects.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+import warnings
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import wraps
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, ParamSpec, Protocol, TypeAlias, TypeVar, cast
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +22,24 @@ from dataset_rt._dataset_rt import write_cache as _write_cache
 
 if TYPE_CHECKING:
     from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _deprecated(message: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Decorate compatibility APIs so callers get a runtime migration warning."""
+
+    def decorate(function: Callable[_P, _R]) -> Callable[_P, _R]:
+        @wraps(function)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
 
 MetadataValue: TypeAlias = bool | int | float | str
 """Primitive metadata value accepted by the Rust cache writer."""
@@ -396,23 +416,33 @@ class CachedDataset:
 
         return DatasetRTTorchIterableDataset()
 
-    def weight_table(self) -> pl.DataFrame:
-        """Return an editable Polars weight table.
+    def samples_metadata(self) -> pl.DataFrame:
+        """Return editable dataset-level sample metadata as a Polars table.
 
         The table contains `cache_id`, `sample_id`, all metadata columns, and
-        `weight`. Mutating the returned frame has no effect until it is passed
-        to `set_weight_table`.
+        `weight`. Mutating the returned frame has no effect until it is passed to
+        `set_samples_metadata`.
         """
-        return pl.read_ipc(self._inner.weight_table_ipc())
+        return pl.read_ipc(self._inner.samples_metadata_ipc())
 
-    def set_weight_table(self, weights: pl.DataFrame) -> None:
+    def set_samples_metadata(self, metadata: pl.DataFrame) -> None:
         """Replace Rust-owned sampling weights from a Polars table.
 
         Rust validates that every physical `(cache_id, sample_id)` appears
         exactly once and that each weight is positive and finite.
         """
-        weight_columns = weights.select(["cache_id", "sample_id", "weight"])
+        weight_columns = metadata.select(["cache_id", "sample_id", "weight"])
         buffer = weight_columns.write_ipc(None)
         if buffer is None:
             raise RuntimeError("Polars did not return an in-memory IPC buffer")
-        self._inner.set_weight_table_ipc(buffer.getvalue())
+        self._inner.set_samples_metadata_ipc(buffer.getvalue())
+
+    @_deprecated("CachedDataset.weight_table() is deprecated; use samples_metadata().")
+    def weight_table(self) -> pl.DataFrame:
+        """Return the editable samples metadata table for compatibility callers."""
+        return self.samples_metadata()
+
+    @_deprecated("CachedDataset.set_weight_table() is deprecated; use set_samples_metadata().")
+    def set_weight_table(self, weights: pl.DataFrame) -> None:
+        """Replace sampling weights from a samples metadata table for compatibility callers."""
+        self.set_samples_metadata(weights)

@@ -398,34 +398,60 @@ def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.Monkey
         dataset.to_torch_iterable_dataset()
 
 
-def test_weights_are_polars_table_with_metadata(tmp_path: Path) -> None:
+def test_samples_metadata_is_polars_table_with_metadata(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
     written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
 
-    weights = dataset.weight_table()
+    metadata = dataset.samples_metadata()
 
-    assert isinstance(weights, pl.DataFrame)
-    assert weights.columns == ["cache_id", "sample_id", "index", "kept", "label", "score", "weight"]
-    assert weights["weight"].to_list() == [1.0, 1.0, 1.0]
+    assert isinstance(metadata, pl.DataFrame)
+    assert metadata.columns == [
+        "cache_id",
+        "sample_id",
+        "index",
+        "kept",
+        "label",
+        "score",
+        "weight",
+    ]
+    assert metadata["weight"].to_list() == [1.0, 1.0, 1.0]
 
 
-def test_set_weight_table_accepts_reordered_polars_table(tmp_path: Path) -> None:
+def test_set_samples_metadata_accepts_reordered_polars_table(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
     written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
 
-    weights = dataset.weight_table()
-    updated = weights.with_columns(
+    metadata = dataset.samples_metadata()
+    updated = metadata.with_columns(
         pl.when(pl.col("label") == "b").then(10.0).otherwise(1.0).alias("weight")
     ).sort("sample_id", descending=True)
-    dataset.set_weight_table(updated)
+    dataset.set_samples_metadata(updated)
 
-    round_trip = dataset.weight_table().sort("sample_id")
+    round_trip = dataset.samples_metadata().sort("sample_id")
 
     assert round_trip["weight"].to_list() == [1.0, 10.0, 1.0]
+
+
+def test_deprecated_weight_table_aliases_still_work(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(write_cache(TinySource(), base_cache_dir))
+    dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
+
+    with pytest.warns(DeprecationWarning, match="samples_metadata"):
+        metadata = dataset.weight_table()
+
+    updated = metadata.with_columns(
+        pl.when(pl.col("label") == "b").then(10.0).otherwise(1.0).alias("weight")
+    )
+    with pytest.warns(DeprecationWarning, match="set_samples_metadata"):
+        dataset.set_weight_table(updated)
+
+    assert dataset.samples_metadata().sort("sample_id")["weight"].to_list() == [1.0, 10.0, 1.0]
 
 
 def test_weight_validation_happens_in_rust(tmp_path: Path) -> None:
@@ -433,13 +459,13 @@ def test_weight_validation_happens_in_rust(tmp_path: Path) -> None:
 
     written = success_paths(write_cache(TinySource(), base_cache_dir))
     dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
-    weights = dataset.weight_table()
+    metadata = dataset.samples_metadata()
 
-    with pytest.raises(ValueError, match="expected 3 weight rows"):
-        dataset.set_weight_table(weights.head(1))
+    with pytest.raises(ValueError, match="expected 3 samples metadata rows"):
+        dataset.set_samples_metadata(metadata.head(1))
 
     with pytest.raises(ValueError, match="positive and finite"):
-        dataset.set_weight_table(weights.with_columns(pl.lit(0.0).alias("weight")))
+        dataset.set_samples_metadata(metadata.with_columns(pl.lit(0.0).alias("weight")))
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
