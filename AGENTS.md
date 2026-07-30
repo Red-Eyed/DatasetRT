@@ -149,6 +149,7 @@ Before editing code, answer these questions in the plan:
 - Does it handle 10K cache directories and million-row metadata tables without Python object expansion?
 - Are all public Python conveniences backed by Rust-side validation before mutating authoritative state?
 - Are error cases returned as typed `CacheError` values rather than panics or unchecked indexing?
+- Does every new function or method have a short docstring/doc comment that states its production invariant or boundary responsibility?
 
 When changing storage format:
 
@@ -186,6 +187,7 @@ When changing Python API:
 - Keep Python as orchestration and ergonomics, not authoritative runtime state.
 - Prefer Polars expressions and Arrow/typed buffers over Python row loops.
 - Keep `Path` at API edges and pass strings only where the Rust extension requires them.
+- Add docstrings to new Python functions and doc comments to new Rust functions. The text should explain the invariant or boundary, not restate the implementation.
 - Update `_dataset_rt.pyi` whenever the PyO3 surface changes.
 - Rebuild with `just develop` or `just test-python` before trusting Python tests.
 

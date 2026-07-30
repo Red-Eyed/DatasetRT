@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
 use crate::runtime::{EpochPlan, RuntimeIterator};
-use crate::sampling::{plan_epoch, validate_weights};
+use crate::sampling::{validate_weights, EpochSampler};
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
@@ -84,6 +84,7 @@ impl PyCachedDataset {
         })
     }
 
+    /// Report whether the Rust dataset has accepted a non-uniform weight vector.
     fn has_custom_weights(&self) -> PyResult<bool> {
         let guard = self
             .inner
@@ -93,6 +94,7 @@ impl PyCachedDataset {
         Ok(matches!(guard.weights, WeightState::Custom(_)))
     }
 
+    /// Return the current weight vector only for callers that must attach it to a table.
     fn get_weights(&self) -> PyResult<Vec<f64>> {
         let guard = self
             .inner
@@ -104,6 +106,7 @@ impl PyCachedDataset {
             .map_err(CacheError::into_py_err)
     }
 
+    /// Replace weights from a columnar Arrow IPC payload containing identity and weight columns.
     fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
         let weights = self
             .inner
@@ -161,7 +164,7 @@ impl DatasetState {
 
     fn start_iterator(&self) -> CacheResult<RuntimeIterator> {
         let plan = if self.shuffle {
-            EpochPlan::Planned(self.shuffled_plan()?)
+            self.shuffled_plan()?
         } else {
             EpochPlan::PhysicalOrder {
                 len: self.total_samples,
@@ -176,17 +179,20 @@ impl DatasetState {
         ))
     }
 
-    fn shuffled_plan(&self) -> CacheResult<Vec<usize>> {
-        let (weights, epoch) = {
-            let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-            let snapshot = self.weight_values(&guard.weights)?;
-            let epoch = guard.next_epoch;
-            guard.next_epoch += 1;
-            (snapshot, epoch)
+    /// Snapshot the current weight state and construct a replacement-sampling epoch plan.
+    fn shuffled_plan(&self) -> CacheResult<EpochPlan> {
+        let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        let epoch = guard.next_epoch;
+        guard.next_epoch += 1;
+
+        let sampler = match &guard.weights {
+            WeightState::Uniform => EpochSampler::uniform(self.total_samples, self.seed, epoch)?,
+            WeightState::Custom(weights) => EpochSampler::weighted(weights, self.seed, epoch)?,
         };
-        plan_epoch(&weights, self.seed, epoch)
+        Ok(EpochPlan::Shuffled(Box::new(sampler)))
     }
 
+    /// Materialize weights only for API paths that explicitly need a full vector.
     fn weight_values(&self, weights: &WeightState) -> CacheResult<Vec<f64>> {
         match weights {
             WeightState::Uniform => Ok(vec![1.0; self.total_samples]),
@@ -196,7 +202,7 @@ impl DatasetState {
             }
         }
     }
-
+    /// Parse a columnar weight update and validate that it covers the dataset exactly once.
     fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
         let mut weights = vec![0.0; self.total_samples];
         let mut seen = vec![false; self.total_samples];
@@ -229,6 +235,7 @@ struct WeightUpdate {
     weight: f64,
 }
 
+/// Apply one Arrow record batch of weight updates without converting rows through Python.
 fn apply_weight_batch(
     batch: &RecordBatch,
     caches: &[LoadedCache],
@@ -252,6 +259,7 @@ fn apply_weight_batch(
     Ok(())
 }
 
+/// Store one validated weight update at its physical offset and reject duplicate identities.
 fn apply_weight_update(
     update: WeightUpdate,
     caches: &[LoadedCache],
@@ -281,6 +289,7 @@ fn apply_weight_update(
     Ok(())
 }
 
+/// Convert a `(cache_id, sample_id)` identity into the compact physical index space.
 fn physical_index(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
@@ -310,6 +319,7 @@ fn physical_index(
     })
 }
 
+/// Build prefix offsets that map each cache to its first physical sample index.
 fn cache_offsets(caches: &[LoadedCache]) -> CacheResult<Vec<usize>> {
     let mut offsets = Vec::with_capacity(caches.len());
     let mut next_offset = 0_usize;
@@ -324,6 +334,7 @@ fn cache_offsets(caches: &[LoadedCache]) -> CacheResult<Vec<usize>> {
     Ok(offsets)
 }
 
+/// Ensure a weight table has exactly one accepted row for every physical sample.
 fn validate_complete_weight_table(
     row_count: usize,
     expected_rows: usize,
@@ -342,12 +353,14 @@ fn validate_complete_weight_table(
     Ok(())
 }
 
+/// Fetch a required Arrow column by name with a user-facing validation error.
 fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> CacheResult<&'a ArrayRef> {
     batch
         .column_by_name(name)
         .ok_or_else(|| CacheError::InvalidInput(format!("weight table missing '{name}' column")))
 }
 
+/// Read a non-null integer identity cell from an Arrow column as `u64`.
 fn read_u64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<u64> {
     reject_null_cell(column, row_index, name)?;
     if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
@@ -367,6 +380,7 @@ fn read_u64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult
     )))
 }
 
+/// Read a non-null numeric weight cell from an Arrow column as `f64`.
 fn read_f64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<f64> {
     reject_null_cell(column, row_index, name)?;
     if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
@@ -392,6 +406,7 @@ fn read_f64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult
     )))
 }
 
+/// Reject null identity or weight cells before type-specific extraction.
 fn reject_null_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<()> {
     if column.is_null(row_index) {
         return Err(CacheError::InvalidInput(format!(
@@ -401,6 +416,7 @@ fn reject_null_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheRes
     Ok(())
 }
 
+/// Convert signed identity values only when they are representable cache/sample IDs.
 fn non_negative_i64_as_u64(value: i64, name: &str) -> CacheResult<u64> {
     u64::try_from(value).map_err(|_| {
         CacheError::InvalidInput(format!("weight table column '{name}' must be non-negative"))
@@ -467,6 +483,7 @@ fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
     Ok(first.manifest.metadata_schema.clone())
 }
 
+/// Build compact dataset identity state from loaded cache sample counts.
 fn collect_cache_offsets(caches: &[LoadedCache]) -> CacheResult<(Vec<usize>, usize)> {
     let offsets = cache_offsets(caches)?;
     let total = caches.iter().try_fold(0_usize, |total, cache| {

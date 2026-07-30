@@ -4,6 +4,7 @@ use std::thread;
 
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 
+use crate::sampling::EpochSampler;
 use crate::storage::LoadedCache;
 use crate::types::{
     CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
@@ -21,14 +22,15 @@ struct LoadedResult {
 
 pub enum EpochPlan {
     PhysicalOrder { len: usize },
-    Planned(Vec<usize>),
+    Shuffled(Box<EpochSampler>),
 }
 
 impl EpochPlan {
+    /// Return the number of samples the plan will emit without materializing physical order.
     fn len(&self) -> usize {
         match self {
             Self::PhysicalOrder { len } => *len,
-            Self::Planned(plan) => plan.len(),
+            Self::Shuffled(sampler) => sampler.len(),
         }
     }
 }
@@ -138,10 +140,11 @@ fn spawn_scheduler(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || match plan {
         EpochPlan::PhysicalOrder { len } => schedule_physical_order(task_sender, len, cancel),
-        EpochPlan::Planned(plan) => schedule_planned_order(task_sender, plan, cancel),
+        EpochPlan::Shuffled(sampler) => schedule_shuffled_order(task_sender, *sampler, cancel),
     })
 }
 
+/// Schedule physical-order reads directly from the range of sample indexes.
 fn schedule_physical_order(task_sender: Sender<PlannedTask>, len: usize, cancel: Receiver<()>) {
     for physical_index in 0..len {
         if !send_planned_task(&task_sender, physical_index, physical_index, &cancel) {
@@ -150,18 +153,20 @@ fn schedule_physical_order(task_sender: Sender<PlannedTask>, len: usize, cancel:
     }
 }
 
-fn schedule_planned_order(
+/// Schedule replacement-sampled shuffled reads from the streaming epoch sampler.
+fn schedule_shuffled_order(
     task_sender: Sender<PlannedTask>,
-    plan: Vec<usize>,
+    sampler: EpochSampler,
     cancel: Receiver<()>,
 ) {
-    for (sequence, physical_index) in plan.into_iter().enumerate() {
+    for (sequence, physical_index) in sampler.enumerate() {
         if !send_planned_task(&task_sender, sequence, physical_index, &cancel) {
             break;
         }
     }
 }
 
+/// Send one planned task while respecting iterator cancellation.
 fn send_planned_task(
     task_sender: &Sender<PlannedTask>,
     sequence: usize,
@@ -249,6 +254,7 @@ fn load_planned_sample(
     })
 }
 
+/// Resolve a compact physical index into cache-local identity for sample materialization.
 fn locate_physical_sample(
     caches: &[LoadedCache],
     cache_offsets: &[usize],

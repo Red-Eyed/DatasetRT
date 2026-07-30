@@ -63,6 +63,7 @@ impl LoadedCache {
         self.index.len()
     }
 
+    /// Read one sample record by index without loading the metadata side table on the normal path.
     pub fn read_sample(&self, sample_index: usize) -> CacheResult<CacheSample> {
         let entry = self.index.get(sample_index).ok_or_else(|| {
             CacheError::InvalidCache(format!("sample index {sample_index} is out of range"))
@@ -102,6 +103,7 @@ impl LoadedCache {
         })
     }
 
+    /// Lazily load `metadata.arrow` for validation or compatibility paths that need full rows.
     pub fn with_metadata_rows<T>(
         &self,
         read_rows: impl FnOnce(&[Vec<MetadataValue>]) -> CacheResult<T>,

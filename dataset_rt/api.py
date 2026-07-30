@@ -419,6 +419,7 @@ class CachedDataset:
         return weights.select(["cache_id", "sample_id", *metadata_columns, "weight"])
 
     def _weight_metadata_table(self) -> pl.DataFrame:
+        """Load metadata directly into Polars and attach stable cache identity columns."""
         frames = [
             _read_weight_metadata_table(cache_id, path)
             for cache_id, path in enumerate(self.cache_paths)
@@ -438,6 +439,7 @@ class CachedDataset:
 
 
 def _read_weight_metadata_table(cache_id: int, path: Path) -> pl.DataFrame:
+    """Read one cache's metadata Arrow file without constructing Python row objects."""
     return (
         pl.read_ipc(path / "metadata.arrow")
         .with_row_index("sample_id")
