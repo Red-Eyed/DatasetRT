@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from importlib import import_module
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeAlias, cast
 
@@ -403,7 +404,12 @@ class CachedDataset:
         `weight`. Mutating the returned frame has no effect until it is passed
         to `set_weight_table`.
         """
-        weights = pl.DataFrame(self._inner.get_weight_rows())
+        weights = self._weight_metadata_table()
+        if self._inner.has_custom_weights():
+            weights = weights.with_columns(pl.Series("weight", self._inner.get_weights()))
+        else:
+            weights = weights.with_columns(pl.lit(1.0).alias("weight"))
+
         # Column presentation is Python ergonomics; Rust remains the source of truth.
         metadata_columns = [
             column
@@ -412,10 +418,28 @@ class CachedDataset:
         ]
         return weights.select(["cache_id", "sample_id", *metadata_columns, "weight"])
 
+    def _weight_metadata_table(self) -> pl.DataFrame:
+        frames = [
+            _read_weight_metadata_table(cache_id, path)
+            for cache_id, path in enumerate(self.cache_paths)
+        ]
+        return pl.concat(frames, how="vertical")
+
     def set_weight_table(self, weights: pl.DataFrame) -> None:
         """Replace Rust-owned sampling weights from a Polars table.
 
         Rust validates that every physical `(cache_id, sample_id)` appears
         exactly once and that each weight is positive and finite.
         """
-        self._inner.set_weight_table(weights)
+        weight_columns = weights.select(["cache_id", "sample_id", "weight"])
+        buffer = BytesIO()
+        weight_columns.write_ipc(buffer)
+        self._inner.set_weight_table_ipc(buffer.getvalue())
+
+
+def _read_weight_metadata_table(cache_id: int, path: Path) -> pl.DataFrame:
+    return (
+        pl.read_ipc(path / "metadata.arrow")
+        .with_row_index("sample_id")
+        .with_columns(pl.lit(cache_id).alias("cache_id"))
+    )

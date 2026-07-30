@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
@@ -49,12 +49,13 @@ pub struct IndexEntry {
     pub byte_len: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct LoadedCache {
     pub manifest: Manifest,
-    pub metadata_rows: Vec<Vec<MetadataValue>>,
+    metadata_rows: Mutex<Option<Vec<Vec<MetadataValue>>>>,
     pub index: Vec<IndexEntry>,
     pub path: PathBuf,
+    validate_embedded_metadata: bool,
 }
 
 impl LoadedCache {
@@ -83,18 +84,42 @@ impl LoadedCache {
         use std::io::Seek;
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut record)?;
-        let metadata = self.metadata_rows.get(sample_index).ok_or_else(|| {
-            CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
-        })?;
         let (embedded_metadata, stored_payload) =
             split_sample_record(&record, &self.manifest.metadata_schema)?;
-        validate_redundant_metadata(metadata, &embedded_metadata, sample_index)?;
+        if self.validate_embedded_metadata {
+            self.with_metadata_rows(|metadata_rows| {
+                let metadata = metadata_rows.get(sample_index).ok_or_else(|| {
+                    CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
+                })?;
+                validate_redundant_metadata(metadata, &embedded_metadata, sample_index)
+            })?;
+        }
         let data = decompress_payload(stored_payload, &shard.compression)?;
 
         Ok(CacheSample {
             data,
-            metadata: metadata.clone(),
+            metadata: embedded_metadata,
         })
+    }
+
+    pub fn with_metadata_rows<T>(
+        &self,
+        read_rows: impl FnOnce(&[Vec<MetadataValue>]) -> CacheResult<T>,
+    ) -> CacheResult<T> {
+        let mut guard = self
+            .metadata_rows
+            .lock()
+            .map_err(|_| CacheError::WorkerFailed)?;
+        if guard.is_none() {
+            *guard = Some(read_metadata_file(
+                &self.path.join("metadata.arrow"),
+                &self.manifest.metadata_schema,
+            )?);
+        }
+        let rows = guard
+            .as_deref()
+            .ok_or_else(|| CacheError::InvalidCache("metadata rows are unavailable".to_string()))?;
+        read_rows(rows)
     }
 }
 
@@ -376,15 +401,24 @@ pub fn load_cache(path: PathBuf, validate_cache: bool) -> CacheResult<LoadedCach
     }
     verify_shards(&path, &manifest, validate_cache)?;
 
-    let metadata_rows = read_metadata_file(&metadata_path, &manifest.metadata_schema)?;
     let index = read_index_file(&index_path)?;
-    validate_loaded_shapes(&manifest, &metadata_rows, &index)?;
+    let metadata_rows = if validate_cache {
+        Some(read_metadata_file(
+            &metadata_path,
+            &manifest.metadata_schema,
+        )?)
+    } else {
+        fs::metadata(&metadata_path)?;
+        None
+    };
+    validate_loaded_shapes(&manifest, metadata_rows.as_deref(), &index)?;
 
     Ok(LoadedCache {
         manifest,
-        metadata_rows,
+        metadata_rows: Mutex::new(metadata_rows),
         index,
         path,
+        validate_embedded_metadata: validate_cache,
     })
 }
 
@@ -777,14 +811,16 @@ fn verify_shards(path: &Path, manifest: &Manifest, validate_cache: bool) -> Cach
 
 fn validate_loaded_shapes(
     manifest: &Manifest,
-    metadata_rows: &[Vec<MetadataValue>],
+    metadata_rows: Option<&[Vec<MetadataValue>]>,
     index: &[IndexEntry],
 ) -> CacheResult<()> {
     let sample_count = manifest.sample_count as usize;
-    if metadata_rows.len() != sample_count {
-        return Err(CacheError::InvalidCache(
-            "metadata row count does not match manifest".to_string(),
-        ));
+    if let Some(rows) = metadata_rows {
+        if rows.len() != sample_count {
+            return Err(CacheError::InvalidCache(
+                "metadata row count does not match manifest".to_string(),
+            ));
+        }
     }
     if index.len() != sample_count {
         return Err(CacheError::InvalidCache(
