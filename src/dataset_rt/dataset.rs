@@ -10,7 +10,7 @@ use arrow_ipc::reader::FileReader;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
-use crate::runtime::RuntimeIterator;
+use crate::runtime::{EpochPlan, RuntimeIterator};
 use crate::sampling::{plan_epoch, validate_weights};
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
@@ -159,9 +159,11 @@ impl DatasetState {
 
     fn start_iterator(&self) -> CacheResult<RuntimeIterator> {
         let plan = if self.shuffle {
-            self.shuffled_plan()?
+            EpochPlan::Planned(self.shuffled_plan()?)
         } else {
-            physical_order_plan(self.total_samples)
+            EpochPlan::PhysicalOrder {
+                len: self.total_samples,
+            }
         };
         Ok(RuntimeIterator::start(
             self.caches.clone(),
@@ -207,10 +209,6 @@ impl DatasetState {
         validate_weights(&weights, self.total_samples)?;
         Ok(weights)
     }
-}
-
-fn physical_order_plan(sample_count: usize) -> Vec<usize> {
-    (0..sample_count).collect()
 }
 
 struct WeightUpdate {

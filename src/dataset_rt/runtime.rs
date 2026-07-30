@@ -19,6 +19,20 @@ struct LoadedResult {
     result: CacheResult<LoadedSample>,
 }
 
+pub enum EpochPlan {
+    PhysicalOrder { len: usize },
+    Planned(Vec<usize>),
+}
+
+impl EpochPlan {
+    fn len(&self) -> usize {
+        match self {
+            Self::PhysicalOrder { len } => *len,
+            Self::Planned(plan) => plan.len(),
+        }
+    }
+}
+
 pub struct RuntimeIterator {
     output: Receiver<LoadedResult>,
     cancel: Option<Sender<()>>,
@@ -33,7 +47,7 @@ impl RuntimeIterator {
     pub fn start(
         caches: Arc<Vec<LoadedCache>>,
         cache_offsets: Arc<Vec<usize>>,
-        plan: Vec<usize>,
+        plan: EpochPlan,
         prefetch_size: PrefetchSize,
         num_workers: NumWorkers,
     ) -> Self {
@@ -119,25 +133,49 @@ impl Drop for RuntimeIterator {
 
 fn spawn_scheduler(
     task_sender: Sender<PlannedTask>,
-    plan: Vec<usize>,
+    plan: EpochPlan,
     cancel: Receiver<()>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        for (sequence, physical_index) in plan.into_iter().enumerate() {
-            let task = PlannedTask {
-                sequence,
-                physical_index,
-            };
-            select! {
-                send(task_sender, task) -> result => {
-                    if result.is_err() {
-                        break;
-                    }
-                }
-                recv(cancel) -> _ => break,
-            }
-        }
+    thread::spawn(move || match plan {
+        EpochPlan::PhysicalOrder { len } => schedule_physical_order(task_sender, len, cancel),
+        EpochPlan::Planned(plan) => schedule_planned_order(task_sender, plan, cancel),
     })
+}
+
+fn schedule_physical_order(task_sender: Sender<PlannedTask>, len: usize, cancel: Receiver<()>) {
+    for physical_index in 0..len {
+        if !send_planned_task(&task_sender, physical_index, physical_index, &cancel) {
+            break;
+        }
+    }
+}
+
+fn schedule_planned_order(
+    task_sender: Sender<PlannedTask>,
+    plan: Vec<usize>,
+    cancel: Receiver<()>,
+) {
+    for (sequence, physical_index) in plan.into_iter().enumerate() {
+        if !send_planned_task(&task_sender, sequence, physical_index, &cancel) {
+            break;
+        }
+    }
+}
+
+fn send_planned_task(
+    task_sender: &Sender<PlannedTask>,
+    sequence: usize,
+    physical_index: usize,
+    cancel: &Receiver<()>,
+) -> bool {
+    let task = PlannedTask {
+        sequence,
+        physical_index,
+    };
+    select! {
+        send(task_sender, task) -> result => result.is_ok(),
+        recv(cancel) -> _ => false,
+    }
 }
 
 fn spawn_workers(
