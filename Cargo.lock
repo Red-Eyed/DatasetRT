@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "dataset_rt"
-version = "0.1.12"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",

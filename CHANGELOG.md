@@ -2,6 +2,26 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.2.0 - 2026-07-30
+
+### Added
+
+- Added `CachedDataset.samples_metadata()` and `set_samples_metadata()` as the canonical metadata-aware weight editing API.
+- Added deprecated compatibility aliases for `weight_table()` and `set_weight_table()`.
+
+### Changed
+
+- Moved samples metadata table construction to Rust-owned Arrow IPC instead of Python reading `metadata.arrow`.
+- Reused Arrow metadata batches directly when exporting samples metadata, avoiding Python row objects and Rust metadata-cell expansion.
+- Kept default uniform weights implicit instead of materializing an all-ones vector at dataset load.
+- Streamed physical-order and shuffled epoch planning to avoid unnecessary full plan vectors.
+- Preserved `shuffle=True` as deterministic weighted multinomial sampling with replacement.
+- Cached shard readers per worker to reduce repeated file-open overhead during random reads.
+
+### Removed
+
+- Removed the row-based Python/Rust weight bridge and unused private weight-vector bindings.
+
 ## 0.1.12 - 2026-07-29
 
 ### Added
