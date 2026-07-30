@@ -58,29 +58,6 @@ pub fn build_weight_table_ipc(
     write_record_batches_ipc(&arrow_schema, &batches)
 }
 
-/// Build one Arrow IPC table per cache to keep metadata materialization source-local.
-pub fn build_weight_table_ipc_chunks(
-    caches: &[LoadedCache],
-    cache_offsets: &[usize],
-    schema: &[MetadataField],
-    weights: &WeightState,
-) -> CacheResult<Vec<Vec<u8>>> {
-    let arrow_schema = weight_table_schema(schema);
-    caches
-        .iter()
-        .enumerate()
-        .map(|(cache_index, cache)| {
-            let offset = cache_offset(cache_offsets, cache_index)?;
-            let weights = weight_slice(weights, offset, cache.sample_count())?;
-            cache.with_metadata_rows(|metadata_rows| {
-                let batch =
-                    weight_table_batch(cache_index, &arrow_schema, schema, metadata_rows, weights)?;
-                write_record_batch_ipc(batch)
-            })
-        })
-        .collect()
-}
-
 /// Parse a columnar weight update and validate that it covers the dataset exactly once.
 pub fn extract_weight_table_ipc(
     ipc: &[u8],
@@ -336,12 +313,6 @@ fn weight_len(weights: &WeightSlice<'_>) -> usize {
         WeightSlice::Uniform { len } => *len,
         WeightSlice::Custom(values) => values.len(),
     }
-}
-
-/// Serialize a single Arrow record batch to an IPC file payload.
-fn write_record_batch_ipc(batch: RecordBatch) -> CacheResult<Vec<u8>> {
-    let schema = batch.schema();
-    write_record_batches_ipc(&schema, &[batch])
 }
 
 /// Serialize Arrow record batches sharing one schema to an IPC file payload.

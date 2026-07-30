@@ -406,11 +406,6 @@ class CachedDataset:
         """
         return pl.read_ipc(BytesIO(self._inner.weight_table_ipc()))
 
-    def iter_weight_tables(self) -> Iterator[pl.DataFrame]:
-        """Yield per-cache editable Polars weight tables built by Rust."""
-        for ipc in self._inner.weight_table_ipc_chunks():
-            yield pl.read_ipc(BytesIO(ipc))
-
     def set_weight_table(self, weights: pl.DataFrame) -> None:
         """Replace Rust-owned sampling weights from a Polars table.
 

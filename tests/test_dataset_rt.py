@@ -428,24 +428,6 @@ def test_set_weight_table_accepts_reordered_polars_table(tmp_path: Path) -> None
     assert round_trip["weight"].to_list() == [1.0, 10.0, 1.0]
 
 
-def test_iter_weight_tables_yields_per_cache_tables(tmp_path: Path) -> None:
-    class OtherSource(TinySource):
-        name = "other"
-
-    written = success_paths(write_cache([TinySource(), OtherSource()], tmp_path / "cache"))
-    dataset = CachedDataset(written, reader_config=ReaderConfig(seed=7))
-
-    chunks = list(dataset.iter_weight_tables())
-
-    assert len(chunks) == 2
-    assert all(
-        chunk.columns == ["cache_id", "sample_id", "index", "kept", "label", "score", "weight"]
-        for chunk in chunks
-    )
-    assert chunks[0]["cache_id"].to_list() == [0, 0, 0]
-    assert chunks[1]["cache_id"].to_list() == [1, 1, 1]
-
-
 def test_weight_validation_happens_in_rust(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 

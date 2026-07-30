@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList};
+use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
 use crate::runtime::{EpochPlan, RuntimeIterator};
 use crate::sampling::EpochSampler;
@@ -11,7 +11,7 @@ use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
 use crate::weight_table::{
-    build_weight_table_ipc, build_weight_table_ipc_chunks, extract_weight_table_ipc,
+    build_weight_table_ipc, extract_weight_table_ipc,
     has_custom_weights as weight_state_has_custom, weight_values, WeightState,
 };
 
@@ -106,19 +106,6 @@ impl PyCachedDataset {
         Ok(PyBytes::new(py, &ipc))
     }
 
-    /// Return Arrow IPC weight tables per cache so Python can consume metadata in chunks.
-    fn weight_table_ipc_chunks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let chunks = self
-            .inner
-            .weight_table_ipc_chunks()
-            .map_err(CacheError::into_py_err)?;
-        let result = PyList::empty(py);
-        for chunk in chunks {
-            result.append(PyBytes::new(py, &chunk))?;
-        }
-        Ok(result)
-    }
-
     /// Replace weights from a columnar Arrow IPC payload containing identity and weight columns.
     fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
         let weights = self
@@ -209,17 +196,6 @@ impl DatasetState {
     fn weight_table_ipc(&self) -> CacheResult<Vec<u8>> {
         let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
         build_weight_table_ipc(
-            self.caches.as_ref(),
-            self.cache_offsets.as_ref(),
-            &self.schema,
-            &guard.weights,
-        )
-    }
-
-    /// Build one Arrow IPC table per cache to keep metadata materialization source-local.
-    fn weight_table_ipc_chunks(&self) -> CacheResult<Vec<Vec<u8>>> {
-        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-        build_weight_table_ipc_chunks(
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),
             &self.schema,
