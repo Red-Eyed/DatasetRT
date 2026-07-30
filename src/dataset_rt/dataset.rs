@@ -35,9 +35,13 @@ struct DatasetState {
 }
 
 struct MutableDatasetState {
-    weights: Vec<f64>,
+    weights: WeightState,
     next_epoch: u64,
-    custom_weights: bool,
+}
+
+enum WeightState {
+    Uniform,
+    Custom(Vec<f64>),
 }
 
 #[pymethods]
@@ -86,7 +90,7 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        Ok(guard.custom_weights)
+        Ok(matches!(guard.weights, WeightState::Custom(_)))
     }
 
     fn get_weights(&self) -> PyResult<Vec<f64>> {
@@ -95,9 +99,9 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        validate_weights(&guard.weights, self.inner.total_samples)
-            .map_err(CacheError::into_py_err)?;
-        Ok(guard.weights.clone())
+        self.inner
+            .weight_values(&guard.weights)
+            .map_err(CacheError::into_py_err)
     }
 
     fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
@@ -110,8 +114,7 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        guard.weights = weights;
-        guard.custom_weights = true;
+        guard.weights = WeightState::Custom(weights);
         Ok(())
     }
 }
@@ -150,9 +153,8 @@ impl DatasetState {
             num_workers: NumWorkers::new(num_workers)?,
             shuffle,
             mutable: Mutex::new(MutableDatasetState {
-                weights: vec![1.0; total_samples],
+                weights: WeightState::Uniform,
                 next_epoch: 0,
-                custom_weights: false,
             }),
         })
     }
@@ -177,12 +179,22 @@ impl DatasetState {
     fn shuffled_plan(&self) -> CacheResult<Vec<usize>> {
         let (weights, epoch) = {
             let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-            let snapshot = guard.weights.clone();
+            let snapshot = self.weight_values(&guard.weights)?;
             let epoch = guard.next_epoch;
             guard.next_epoch += 1;
             (snapshot, epoch)
         };
         plan_epoch(&weights, self.seed, epoch)
+    }
+
+    fn weight_values(&self, weights: &WeightState) -> CacheResult<Vec<f64>> {
+        match weights {
+            WeightState::Uniform => Ok(vec![1.0; self.total_samples]),
+            WeightState::Custom(values) => {
+                validate_weights(values, self.total_samples)?;
+                Ok(values.clone())
+            }
+        }
     }
 
     fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
