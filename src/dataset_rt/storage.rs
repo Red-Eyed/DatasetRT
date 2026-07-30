@@ -70,6 +70,12 @@ impl LoadedCache {
         self.index.len()
     }
 
+    /// Open `metadata.arrow` as Arrow batches without materializing Rust row values.
+    pub fn metadata_batches(&self) -> CacheResult<FileReader<BufReader<File>>> {
+        let file = File::open(self.path.join("metadata.arrow"))?;
+        FileReader::try_new(BufReader::new(file), None).map_err(CacheError::from)
+    }
+
     /// Read one sample record using caller-owned shard handles for repeated random access.
     pub fn read_sample_with_cache(
         &self,

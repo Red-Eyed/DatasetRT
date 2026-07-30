@@ -2,8 +2,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
-    StringArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch, UInt32Array,
+    UInt64Array,
 };
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
@@ -11,7 +11,7 @@ use arrow_schema::{DataType, Field, Schema};
 
 use crate::sampling::validate_weights;
 use crate::storage::LoadedCache;
-use crate::types::{CacheError, CacheResult, MetadataField, MetadataKind, MetadataValue};
+use crate::types::{CacheError, CacheResult, MetadataField, MetadataKind};
 
 /// Sampling weight storage that avoids materializing uniform all-one vectors.
 pub enum WeightState {
@@ -83,7 +83,7 @@ pub fn extract_weight_table_ipc(
     Ok(weights)
 }
 
-/// Build Arrow batches for every cache while keeping row construction inside Rust.
+/// Build Arrow batches for every cache without expanding metadata cells into Rust objects.
 fn weight_table_batches(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
@@ -91,26 +91,34 @@ fn weight_table_batches(
     arrow_schema: &Arc<Schema>,
     weights: &WeightState,
 ) -> CacheResult<Vec<RecordBatch>> {
-    caches
-        .iter()
-        .enumerate()
-        .map(|(cache_index, cache)| {
-            let offset = cache_offset(cache_offsets, cache_index)?;
-            let weights = weight_slice(weights, offset, cache.sample_count())?;
-            cache.with_metadata_rows(|metadata_rows| {
-                weight_table_batch(
-                    cache_index,
-                    arrow_schema,
-                    metadata_schema,
-                    metadata_rows,
-                    weights,
-                )
-            })
-        })
-        .collect()
+    let mut output_batches = Vec::new();
+    for (cache_index, cache) in caches.iter().enumerate() {
+        let cache_offset = cache_offset(cache_offsets, cache_index)?;
+        let mut sample_start = 0_usize;
+        let reader = cache.metadata_batches()?;
+        for batch in reader {
+            let metadata_batch = batch?;
+            let row_count = metadata_batch.num_rows();
+            let physical_offset = physical_offset(cache_offset, sample_start)?;
+            let weights = weight_slice(weights, physical_offset, row_count)?;
+            output_batches.push(weight_table_batch(
+                cache_index,
+                sample_start,
+                arrow_schema,
+                metadata_schema,
+                &metadata_batch,
+                weights,
+            )?);
+            sample_start = sample_start.checked_add(row_count).ok_or_else(|| {
+                CacheError::InvalidInput("metadata row count overflowed usize".to_string())
+            })?;
+        }
+        validate_cache_metadata_rows(cache_index, cache.sample_count(), sample_start)?;
+    }
+    Ok(output_batches)
 }
 
-/// Return the stable public weight table schema shared by eager and chunked exports.
+/// Return the stable public weight table schema used by Rust IPC exports.
 fn weight_table_schema(schema: &[MetadataField]) -> Arc<Schema> {
     Arc::new(Schema::new(weight_table_fields(schema)))
 }
@@ -147,6 +155,27 @@ fn cache_offset(cache_offsets: &[usize], cache_index: usize) -> CacheResult<usiz
         .ok_or_else(|| CacheError::InvalidCache("cache offset is out of range".to_string()))
 }
 
+/// Add a cache-local batch offset to a cache's physical base offset.
+fn physical_offset(cache_offset: usize, sample_start: usize) -> CacheResult<usize> {
+    cache_offset.checked_add(sample_start).ok_or_else(|| {
+        CacheError::InvalidInput("physical metadata offset overflowed usize".to_string())
+    })
+}
+
+/// Ensure `metadata.arrow` produced exactly the manifest/index row count for one cache.
+fn validate_cache_metadata_rows(
+    cache_index: usize,
+    expected_rows: usize,
+    actual_rows: usize,
+) -> CacheResult<()> {
+    if actual_rows != expected_rows {
+        return Err(CacheError::InvalidCache(format!(
+            "metadata row count for cache {cache_index} expected {expected_rows}, got {actual_rows}"
+        )));
+    }
+    Ok(())
+}
+
 /// Borrow the weight range for one cache without materializing uniform weights.
 fn weight_slice(weights: &WeightState, offset: usize, len: usize) -> CacheResult<WeightSlice<'_>> {
     match weights {
@@ -162,15 +191,16 @@ fn weight_slice(weights: &WeightState, offset: usize, len: usize) -> CacheResult
     }
 }
 
-/// Build one Rust-owned Arrow record batch for a cache's public weight table rows.
+/// Build one output batch by reusing metadata arrays and adding identity plus weight columns.
 fn weight_table_batch(
     cache_index: usize,
+    sample_start: usize,
     arrow_schema: &Arc<Schema>,
     metadata_schema: &[MetadataField],
-    metadata_rows: &[Vec<MetadataValue>],
+    metadata_batch: &RecordBatch,
     weights: WeightSlice<'_>,
 ) -> CacheResult<RecordBatch> {
-    let row_count = metadata_rows.len();
+    let row_count = metadata_batch.num_rows();
     let cache_id = u64::try_from(cache_index)
         .map_err(|_| CacheError::InvalidInput("cache_id does not fit in u64".to_string()))?;
     if row_count != weight_len(&weights) {
@@ -181,16 +211,19 @@ fn weight_table_batch(
 
     let mut columns = Vec::with_capacity(metadata_schema.len() + 3);
     columns.push(Arc::new(UInt64Array::from(vec![cache_id; row_count])) as ArrayRef);
-    columns.push(Arc::new(sample_id_array(row_count)?) as ArrayRef);
-    columns.extend(metadata_arrays(metadata_schema, metadata_rows)?);
+    columns.push(Arc::new(sample_id_array(sample_start, row_count)?) as ArrayRef);
+    columns.extend(metadata_columns(metadata_batch, metadata_schema)?);
     columns.push(Arc::new(weight_array(weights)) as ArrayRef);
 
     RecordBatch::try_new(arrow_schema.clone(), columns).map_err(CacheError::from)
 }
 
-/// Build the sample_id column for one cache.
-fn sample_id_array(row_count: usize) -> CacheResult<UInt64Array> {
-    let values = (0..row_count)
+/// Build the sample_id column for one metadata batch within a cache.
+fn sample_id_array(sample_start: usize, row_count: usize) -> CacheResult<UInt64Array> {
+    let sample_end = sample_start
+        .checked_add(row_count)
+        .ok_or_else(|| CacheError::InvalidInput("sample_id range overflowed usize".to_string()))?;
+    let values = (sample_start..sample_end)
         .map(|sample_index| {
             u64::try_from(sample_index)
                 .map_err(|_| CacheError::InvalidInput("sample_id does not fit in u64".to_string()))
@@ -199,103 +232,45 @@ fn sample_id_array(row_count: usize) -> CacheResult<UInt64Array> {
     Ok(UInt64Array::from(values))
 }
 
-/// Build all metadata columns in the same order as the public weight-table schema.
-fn metadata_arrays(
-    schema: &[MetadataField],
-    rows: &[Vec<MetadataValue>],
+/// Reuse metadata columns after verifying they match the manifest schema.
+fn metadata_columns(
+    metadata_batch: &RecordBatch,
+    metadata_schema: &[MetadataField],
 ) -> CacheResult<Vec<ArrayRef>> {
-    schema
+    if metadata_batch.num_columns() != metadata_schema.len() {
+        return Err(CacheError::InvalidCache(
+            "metadata batch column count does not match manifest".to_string(),
+        ));
+    }
+    metadata_schema
         .iter()
         .enumerate()
-        .map(|(column_index, field)| build_metadata_array(column_index, &field.kind, rows))
+        .map(|(column_index, field)| metadata_column(metadata_batch, column_index, field))
         .collect()
 }
 
-/// Build one typed Arrow metadata column from row-oriented cached metadata.
-fn build_metadata_array(
+/// Return one metadata array if its Arrow field matches the expected manifest field.
+fn metadata_column(
+    metadata_batch: &RecordBatch,
     column_index: usize,
-    kind: &MetadataKind,
-    rows: &[Vec<MetadataValue>],
+    expected: &MetadataField,
 ) -> CacheResult<ArrayRef> {
-    match kind {
-        MetadataKind::Bool => build_bool_metadata_array(column_index, rows),
-        MetadataKind::Int => build_int_metadata_array(column_index, rows),
-        MetadataKind::Float => build_float_metadata_array(column_index, rows),
-        MetadataKind::String => build_string_metadata_array(column_index, rows),
+    let schema = metadata_batch.schema();
+    let actual = schema
+        .fields()
+        .get(column_index)
+        .ok_or_else(|| CacheError::InvalidCache("metadata field is out of range".to_string()))?;
+    let expected_type = arrow_type(&expected.kind);
+    if actual.name() != &expected.name || actual.data_type() != &expected_type {
+        return Err(CacheError::InvalidCache(format!(
+            "metadata column '{}' does not match manifest schema",
+            expected.name
+        )));
     }
-}
-
-/// Build a boolean Arrow metadata column.
-fn build_bool_metadata_array(
-    column_index: usize,
-    rows: &[Vec<MetadataValue>],
-) -> CacheResult<ArrayRef> {
-    let values = rows
-        .iter()
-        .map(|row| match metadata_cell(row, column_index)? {
-            MetadataValue::Bool(value) => Ok(*value),
-            _ => Err(CacheError::InvalidCache(
-                "metadata kind drifted".to_string(),
-            )),
-        })
-        .collect::<CacheResult<Vec<_>>>()?;
-    Ok(Arc::new(BooleanArray::from(values)))
-}
-
-/// Build an integer Arrow metadata column.
-fn build_int_metadata_array(
-    column_index: usize,
-    rows: &[Vec<MetadataValue>],
-) -> CacheResult<ArrayRef> {
-    let values = rows
-        .iter()
-        .map(|row| match metadata_cell(row, column_index)? {
-            MetadataValue::Int(value) => Ok(*value),
-            _ => Err(CacheError::InvalidCache(
-                "metadata kind drifted".to_string(),
-            )),
-        })
-        .collect::<CacheResult<Vec<_>>>()?;
-    Ok(Arc::new(Int64Array::from(values)))
-}
-
-/// Build a float Arrow metadata column.
-fn build_float_metadata_array(
-    column_index: usize,
-    rows: &[Vec<MetadataValue>],
-) -> CacheResult<ArrayRef> {
-    let values = rows
-        .iter()
-        .map(|row| match metadata_cell(row, column_index)? {
-            MetadataValue::Float(value) => Ok(*value),
-            _ => Err(CacheError::InvalidCache(
-                "metadata kind drifted".to_string(),
-            )),
-        })
-        .collect::<CacheResult<Vec<_>>>()?;
-    Ok(Arc::new(Float64Array::from(values)))
-}
-
-/// Build a string Arrow metadata column.
-fn build_string_metadata_array(
-    column_index: usize,
-    rows: &[Vec<MetadataValue>],
-) -> CacheResult<ArrayRef> {
-    let values = rows
-        .iter()
-        .map(|row| match metadata_cell(row, column_index)? {
-            MetadataValue::String(value) => Ok(value.as_str()),
-            _ => Err(CacheError::InvalidCache(
-                "metadata kind drifted".to_string(),
-            )),
-        })
-        .collect::<CacheResult<Vec<_>>>()?;
-    Ok(Arc::new(StringArray::from(values)))
-}
-
-/// Fetch one metadata cell and reject malformed row shapes.
-fn metadata_cell(row: &[MetadataValue], column_index: usize) -> CacheResult<&MetadataValue> {
-    row.get(column_index)
+    metadata_batch
+        .columns()
+        .get(column_index)
+        .cloned()
         .ok_or_else(|| CacheError::InvalidCache("metadata column is out of range".to_string()))
 }
 
