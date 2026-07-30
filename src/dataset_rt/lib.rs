@@ -11,6 +11,7 @@ mod runtime;
 mod sampling;
 mod storage;
 mod types;
+mod weight_table;
 mod writer;
 
 use dataset::PyCachedDataset;

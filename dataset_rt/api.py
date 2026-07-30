@@ -404,27 +404,12 @@ class CachedDataset:
         `weight`. Mutating the returned frame has no effect until it is passed
         to `set_weight_table`.
         """
-        weights = self._weight_metadata_table()
-        if self._inner.has_custom_weights():
-            weights = weights.with_columns(pl.Series("weight", self._inner.get_weights()))
-        else:
-            weights = weights.with_columns(pl.lit(1.0).alias("weight"))
+        return pl.read_ipc(BytesIO(self._inner.weight_table_ipc()))
 
-        # Column presentation is Python ergonomics; Rust remains the source of truth.
-        metadata_columns = [
-            column
-            for column in weights.columns
-            if column not in {"cache_id", "sample_id", "weight"}
-        ]
-        return weights.select(["cache_id", "sample_id", *metadata_columns, "weight"])
-
-    def _weight_metadata_table(self) -> pl.DataFrame:
-        """Load metadata directly into Polars and attach stable cache identity columns."""
-        frames = [
-            _read_weight_metadata_table(cache_id, path)
-            for cache_id, path in enumerate(self.cache_paths)
-        ]
-        return pl.concat(frames, how="vertical")
+    def iter_weight_tables(self) -> Iterator[pl.DataFrame]:
+        """Yield per-cache editable Polars weight tables built by Rust."""
+        for ipc in self._inner.weight_table_ipc_chunks():
+            yield pl.read_ipc(BytesIO(ipc))
 
     def set_weight_table(self, weights: pl.DataFrame) -> None:
         """Replace Rust-owned sampling weights from a Polars table.
@@ -436,12 +421,3 @@ class CachedDataset:
         buffer = BytesIO()
         weight_columns.write_ipc(buffer)
         self._inner.set_weight_table_ipc(buffer.getvalue())
-
-
-def _read_weight_metadata_table(cache_id: int, path: Path) -> pl.DataFrame:
-    """Read one cache's metadata Arrow file without constructing Python row objects."""
-    return (
-        pl.read_ipc(path / "metadata.arrow")
-        .with_row_index("sample_id")
-        .with_columns(pl.lit(cache_id).alias("cache_id"))
-    )

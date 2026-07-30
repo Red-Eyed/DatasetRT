@@ -1,20 +1,18 @@
-use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use arrow_array::{
-    Array, ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch, UInt32Array,
-    UInt64Array,
-};
-use arrow_ipc::reader::FileReader;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
+use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList};
 
 use crate::runtime::{EpochPlan, RuntimeIterator};
-use crate::sampling::{validate_weights, EpochSampler};
+use crate::sampling::EpochSampler;
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
+};
+use crate::weight_table::{
+    build_weight_table_ipc, build_weight_table_ipc_chunks, extract_weight_table_ipc,
+    has_custom_weights as weight_state_has_custom, weight_values, WeightState,
 };
 
 #[pyclass(name = "CachedDataset")]
@@ -37,11 +35,6 @@ struct DatasetState {
 struct MutableDatasetState {
     weights: WeightState,
     next_epoch: u64,
-}
-
-enum WeightState {
-    Uniform,
-    Custom(Vec<f64>),
 }
 
 #[pymethods]
@@ -91,7 +84,7 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        Ok(matches!(guard.weights, WeightState::Custom(_)))
+        Ok(weight_state_has_custom(&guard.weights))
     }
 
     /// Return the current weight vector only for callers that must attach it to a table.
@@ -101,9 +94,29 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        self.inner
-            .weight_values(&guard.weights)
-            .map_err(CacheError::into_py_err)
+        weight_values(&guard.weights, self.inner.total_samples).map_err(CacheError::into_py_err)
+    }
+
+    /// Return an Arrow IPC weight table built by Rust from cache metadata and weights.
+    fn weight_table_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let ipc = self
+            .inner
+            .weight_table_ipc()
+            .map_err(CacheError::into_py_err)?;
+        Ok(PyBytes::new(py, &ipc))
+    }
+
+    /// Return Arrow IPC weight tables per cache so Python can consume metadata in chunks.
+    fn weight_table_ipc_chunks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let chunks = self
+            .inner
+            .weight_table_ipc_chunks()
+            .map_err(CacheError::into_py_err)?;
+        let result = PyList::empty(py);
+        for chunk in chunks {
+            result.append(PyBytes::new(py, &chunk))?;
+        }
+        Ok(result)
     }
 
     /// Replace weights from a columnar Arrow IPC payload containing identity and weight columns.
@@ -192,131 +205,37 @@ impl DatasetState {
         Ok(EpochPlan::Shuffled(Box::new(sampler)))
     }
 
-    /// Materialize weights only for API paths that explicitly need a full vector.
-    fn weight_values(&self, weights: &WeightState) -> CacheResult<Vec<f64>> {
-        match weights {
-            WeightState::Uniform => Ok(vec![1.0; self.total_samples]),
-            WeightState::Custom(values) => {
-                validate_weights(values, self.total_samples)?;
-                Ok(values.clone())
-            }
-        }
+    /// Build one Arrow IPC table containing identity, metadata, and current weights.
+    fn weight_table_ipc(&self) -> CacheResult<Vec<u8>> {
+        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        build_weight_table_ipc(
+            self.caches.as_ref(),
+            self.cache_offsets.as_ref(),
+            &self.schema,
+            &guard.weights,
+        )
     }
+
+    /// Build one Arrow IPC table per cache to keep metadata materialization source-local.
+    fn weight_table_ipc_chunks(&self) -> CacheResult<Vec<Vec<u8>>> {
+        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        build_weight_table_ipc_chunks(
+            self.caches.as_ref(),
+            self.cache_offsets.as_ref(),
+            &self.schema,
+            &guard.weights,
+        )
+    }
+
     /// Parse a columnar weight update and validate that it covers the dataset exactly once.
     fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
-        let mut weights = vec![0.0; self.total_samples];
-        let mut seen = vec![false; self.total_samples];
-        let mut row_count = 0_usize;
-        let reader = FileReader::try_new(Cursor::new(ipc), None)?;
-
-        for batch in reader {
-            let batch = batch?;
-            row_count = row_count.checked_add(batch.num_rows()).ok_or_else(|| {
-                CacheError::InvalidInput("weight table row count overflowed usize".to_string())
-            })?;
-            apply_weight_batch(
-                &batch,
-                &self.caches,
-                &self.cache_offsets,
-                &mut weights,
-                &mut seen,
-            )?;
-        }
-
-        validate_complete_weight_table(row_count, self.total_samples, &seen)?;
-        validate_weights(&weights, self.total_samples)?;
-        Ok(weights)
+        extract_weight_table_ipc(
+            ipc,
+            self.caches.as_ref(),
+            self.cache_offsets.as_ref(),
+            self.total_samples,
+        )
     }
-}
-
-struct WeightUpdate {
-    cache_id: u64,
-    sample_id: u64,
-    weight: f64,
-}
-
-/// Apply one Arrow record batch of weight updates without converting rows through Python.
-fn apply_weight_batch(
-    batch: &RecordBatch,
-    caches: &[LoadedCache],
-    cache_offsets: &[usize],
-    weights: &mut [f64],
-    seen: &mut [bool],
-) -> CacheResult<()> {
-    let cache_ids = required_column(batch, "cache_id")?;
-    let sample_ids = required_column(batch, "sample_id")?;
-    let weight_values = required_column(batch, "weight")?;
-
-    for row_index in 0..batch.num_rows() {
-        let update = WeightUpdate {
-            cache_id: read_u64_cell(cache_ids, row_index, "cache_id")?,
-            sample_id: read_u64_cell(sample_ids, row_index, "sample_id")?,
-            weight: read_f64_cell(weight_values, row_index, "weight")?,
-        };
-        apply_weight_update(update, caches, cache_offsets, weights, seen)?;
-    }
-
-    Ok(())
-}
-
-/// Store one validated weight update at its physical offset and reject duplicate identities.
-fn apply_weight_update(
-    update: WeightUpdate,
-    caches: &[LoadedCache],
-    cache_offsets: &[usize],
-    weights: &mut [f64],
-    seen: &mut [bool],
-) -> CacheResult<()> {
-    let physical_index = physical_index(caches, cache_offsets, update.cache_id, update.sample_id)?;
-    let already_seen = seen
-        .get(physical_index)
-        .copied()
-        .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
-    if already_seen {
-        return Err(CacheError::InvalidInput(format!(
-            "duplicate weight row for cache_id={} sample_id={}",
-            update.cache_id, update.sample_id
-        )));
-    }
-    let seen_slot = seen
-        .get_mut(physical_index)
-        .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
-    *seen_slot = true;
-    let weight_slot = weights
-        .get_mut(physical_index)
-        .ok_or_else(|| CacheError::InvalidCache("weight index is out of range".to_string()))?;
-    *weight_slot = update.weight;
-    Ok(())
-}
-
-/// Convert a `(cache_id, sample_id)` identity into the compact physical index space.
-fn physical_index(
-    caches: &[LoadedCache],
-    cache_offsets: &[usize],
-    cache_id: u64,
-    sample_id: u64,
-) -> CacheResult<usize> {
-    let cache_index = usize::try_from(cache_id)
-        .map_err(|_| CacheError::InvalidInput("cache_id does not fit in usize".to_string()))?;
-    let sample_index = usize::try_from(sample_id)
-        .map_err(|_| CacheError::InvalidInput("sample_id does not fit in usize".to_string()))?;
-    let cache = caches.get(cache_index).ok_or_else(|| {
-        CacheError::InvalidInput(format!(
-            "unknown weight row identity cache_id={cache_id} sample_id={sample_id}"
-        ))
-    })?;
-    if sample_index >= cache.sample_count() {
-        return Err(CacheError::InvalidInput(format!(
-            "unknown weight row identity cache_id={cache_id} sample_id={sample_id}"
-        )));
-    }
-    let offset = cache_offsets
-        .get(cache_index)
-        .copied()
-        .ok_or_else(|| CacheError::InvalidCache("cache offset is out of range".to_string()))?;
-    offset.checked_add(sample_index).ok_or_else(|| {
-        CacheError::InvalidInput("physical weight index overflowed usize".to_string())
-    })
 }
 
 /// Build prefix offsets that map each cache to its first physical sample index.
@@ -332,95 +251,6 @@ fn cache_offsets(caches: &[LoadedCache]) -> CacheResult<Vec<usize>> {
             })?;
     }
     Ok(offsets)
-}
-
-/// Ensure a weight table has exactly one accepted row for every physical sample.
-fn validate_complete_weight_table(
-    row_count: usize,
-    expected_rows: usize,
-    seen: &[bool],
-) -> CacheResult<()> {
-    if row_count != expected_rows {
-        return Err(CacheError::InvalidInput(format!(
-            "expected {expected_rows} weight rows, got {row_count}"
-        )));
-    }
-    if seen.iter().any(|value| !value) {
-        return Err(CacheError::InvalidInput(
-            "weight table must include every physical sample exactly once".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Fetch a required Arrow column by name with a user-facing validation error.
-fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> CacheResult<&'a ArrayRef> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| CacheError::InvalidInput(format!("weight table missing '{name}' column")))
-}
-
-/// Read a non-null integer identity cell from an Arrow column as `u64`.
-fn read_u64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<u64> {
-    reject_null_cell(column, row_index, name)?;
-    if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = column.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(u64::from(values.value(row_index)));
-    }
-    if let Some(values) = column.as_any().downcast_ref::<Int64Array>() {
-        return non_negative_i64_as_u64(values.value(row_index), name);
-    }
-    if let Some(values) = column.as_any().downcast_ref::<Int32Array>() {
-        return non_negative_i64_as_u64(i64::from(values.value(row_index)), name);
-    }
-    Err(CacheError::InvalidInput(format!(
-        "weight table column '{name}' must be an integer"
-    )))
-}
-
-/// Read a non-null numeric weight cell from an Arrow column as `f64`.
-fn read_f64_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<f64> {
-    reject_null_cell(column, row_index, name)?;
-    if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
-        return Ok(f64::from(values.value(row_index)));
-    }
-    if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = column.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(f64::from(values.value(row_index)));
-    }
-    if let Some(values) = column.as_any().downcast_ref::<Int64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = column.as_any().downcast_ref::<Int32Array>() {
-        return Ok(f64::from(values.value(row_index)));
-    }
-    Err(CacheError::InvalidInput(format!(
-        "weight table column '{name}' must be numeric"
-    )))
-}
-
-/// Reject null identity or weight cells before type-specific extraction.
-fn reject_null_cell(column: &ArrayRef, row_index: usize, name: &str) -> CacheResult<()> {
-    if column.is_null(row_index) {
-        return Err(CacheError::InvalidInput(format!(
-            "weight table column '{name}' contains null"
-        )));
-    }
-    Ok(())
-}
-
-/// Convert signed identity values only when they are representable cache/sample IDs.
-fn non_negative_i64_as_u64(value: i64, name: &str) -> CacheResult<u64> {
-    u64::try_from(value).map_err(|_| {
-        CacheError::InvalidInput(format!("weight table column '{name}' must be non-negative"))
-    })
 }
 
 type PySampleTuple<'py> = (Bound<'py, PyBytes>, Bound<'py, PyDict>, u64, u64);
