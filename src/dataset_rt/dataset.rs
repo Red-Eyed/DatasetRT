@@ -8,7 +8,7 @@ use arrow_array::{
 };
 use arrow_ipc::reader::FileReader;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyIterator, PyList};
+use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
 use crate::runtime::RuntimeIterator;
 use crate::sampling::{plan_epoch, validate_weights};
@@ -80,17 +80,6 @@ impl PyCachedDataset {
         })
     }
 
-    fn get_weight_rows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let guard = self
-            .inner
-            .mutable
-            .lock()
-            .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        self.inner
-            .weight_rows(py, &guard.weights)
-            .map_err(CacheError::into_py_err)
-    }
-
     fn has_custom_weights(&self) -> PyResult<bool> {
         let guard = self
             .inner
@@ -109,21 +98,6 @@ impl PyCachedDataset {
         validate_weights(&guard.weights, self.inner.physical_samples.len())
             .map_err(CacheError::into_py_err)?;
         Ok(guard.weights.clone())
-    }
-
-    fn set_weight_table(&self, table: Bound<'_, PyAny>) -> PyResult<()> {
-        let weights = self
-            .inner
-            .extract_weight_table(table)
-            .map_err(CacheError::into_py_err)?;
-        let mut guard = self
-            .inner
-            .mutable
-            .lock()
-            .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        guard.weights = weights;
-        guard.custom_weights = true;
-        Ok(())
     }
 
     fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
@@ -208,50 +182,6 @@ impl DatasetState {
         plan_epoch(&weights, self.seed, epoch)
     }
 
-    fn weight_rows<'py>(
-        &self,
-        py: Python<'py>,
-        weights: &[f64],
-    ) -> CacheResult<Bound<'py, PyList>> {
-        validate_weights(weights, self.physical_samples.len())?;
-        let rows = PyList::empty(py);
-
-        for (physical_index, physical_sample) in self.physical_samples.iter().enumerate() {
-            let cache = self
-                .caches
-                .get(physical_sample.cache_id.as_u64() as usize)
-                .ok_or_else(|| CacheError::InvalidCache("cache id is out of range".to_string()))?;
-            let metadata = cache.with_metadata_rows(|metadata_rows| {
-                metadata_rows
-                    .get(physical_sample.sample_id.as_u64() as usize)
-                    .cloned()
-                    .ok_or_else(|| {
-                        CacheError::InvalidCache("metadata row is out of range".to_string())
-                    })
-            })?;
-            let weight = weights.get(physical_index).copied().ok_or_else(|| {
-                CacheError::InvalidCache("weight row is out of range".to_string())
-            })?;
-            let row = weight_row_to_dict(py, &self.schema, physical_sample, &metadata, weight)?;
-            rows.append(row).map_err(py_error)?;
-        }
-
-        Ok(rows)
-    }
-
-    fn extract_weight_table(&self, table: Bound<'_, PyAny>) -> CacheResult<Vec<f64>> {
-        // Metadata columns are for user filtering; sample identity is only cache_id + sample_id.
-        let selected = select_weight_columns(&table)?;
-        let iterator = iter_named_rows(&selected)?;
-        let updates = iterator
-            .map(|row| {
-                let row = row.map_err(py_error)?;
-                extract_weight_update(&row)
-            })
-            .collect::<CacheResult<Vec<_>>>()?;
-        self.validated_weight_updates(updates)
-    }
-
     fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
         let cache_offsets = cache_offsets(&self.caches)?;
         let mut weights = vec![0.0; self.physical_samples.len()];
@@ -274,36 +204,6 @@ impl DatasetState {
         }
 
         validate_complete_weight_table(row_count, self.physical_samples.len(), &seen)?;
-        validate_weights(&weights, self.physical_samples.len())?;
-        Ok(weights)
-    }
-
-    fn validated_weight_updates(&self, updates: Vec<WeightUpdate>) -> CacheResult<Vec<f64>> {
-        if updates.len() != self.physical_samples.len() {
-            return Err(CacheError::InvalidInput(format!(
-                "expected {} weight rows, got {}",
-                self.physical_samples.len(),
-                updates.len()
-            )));
-        }
-
-        let update_count = updates.len();
-        let mut weights = vec![0.0; self.physical_samples.len()];
-        let mut seen = vec![false; self.physical_samples.len()];
-        let cache_offsets = cache_offsets(&self.caches)?;
-
-        for update in updates {
-            // Rows may be reordered by Polars, so weight updates are applied by identity.
-            apply_weight_update(
-                update,
-                &self.caches,
-                &cache_offsets,
-                &mut weights,
-                &mut seen,
-            )?;
-        }
-
-        validate_complete_weight_table(update_count, self.physical_samples.len(), &seen)?;
         validate_weights(&weights, self.physical_samples.len())?;
         Ok(weights)
     }
@@ -585,22 +485,6 @@ fn sample_to_python<'py>(
     ))
 }
 
-fn weight_row_to_dict<'py>(
-    py: Python<'py>,
-    schema: &[MetadataField],
-    physical_sample: &PhysicalSample,
-    metadata: &[MetadataValue],
-    weight: f64,
-) -> CacheResult<Bound<'py, PyDict>> {
-    let dict = metadata_to_dict(py, schema, metadata).map_err(py_error)?;
-    dict.set_item("cache_id", physical_sample.cache_id.as_u64())
-        .map_err(py_error)?;
-    dict.set_item("sample_id", physical_sample.sample_id.as_u64())
-        .map_err(py_error)?;
-    dict.set_item("weight", weight).map_err(py_error)?;
-    Ok(dict)
-}
-
 fn metadata_to_dict<'py>(
     py: Python<'py>,
     schema: &[MetadataField],
@@ -616,49 +500,4 @@ fn metadata_to_dict<'py>(
         }
     }
     Ok(dict)
-}
-
-fn select_weight_columns<'py>(table: &Bound<'py, PyAny>) -> CacheResult<Bound<'py, PyAny>> {
-    let columns = PyList::new(table.py(), ["cache_id", "sample_id", "weight"]).map_err(py_error)?;
-    table.call_method1("select", (columns,)).map_err(py_error)
-}
-
-fn iter_named_rows<'py>(table: &Bound<'py, PyAny>) -> CacheResult<Bound<'py, PyIterator>> {
-    let kwargs = PyDict::new(table.py());
-    kwargs.set_item("named", true).map_err(py_error)?;
-    let rows = table
-        .call_method("iter_rows", (), Some(&kwargs))
-        .map_err(py_error)?;
-    PyIterator::from_object(&rows).map_err(py_error)
-}
-
-fn extract_weight_update(row: &Bound<'_, PyAny>) -> CacheResult<WeightUpdate> {
-    let dict = row
-        .cast::<PyDict>()
-        .map_err(|_| CacheError::InvalidInput("weight rows must be dictionaries".to_string()))?;
-    Ok(WeightUpdate {
-        cache_id: extract_required_u64(dict, "cache_id")?,
-        sample_id: extract_required_u64(dict, "sample_id")?,
-        weight: extract_required_f64(dict, "weight")?,
-    })
-}
-
-fn extract_required_u64(dict: &Bound<'_, PyDict>, key: &str) -> CacheResult<u64> {
-    dict.get_item(key)
-        .map_err(py_error)?
-        .ok_or_else(|| CacheError::InvalidInput(format!("weight table missing '{key}' column")))?
-        .extract::<u64>()
-        .map_err(py_error)
-}
-
-fn extract_required_f64(dict: &Bound<'_, PyDict>, key: &str) -> CacheResult<f64> {
-    dict.get_item(key)
-        .map_err(py_error)?
-        .ok_or_else(|| CacheError::InvalidInput(format!("weight table missing '{key}' column")))?
-        .extract::<f64>()
-        .map_err(py_error)
-}
-
-fn py_error(error: PyErr) -> CacheError {
-    CacheError::Python(error.to_string())
 }
