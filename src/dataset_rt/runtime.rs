@@ -5,7 +5,7 @@ use std::thread;
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 
 use crate::sampling::EpochSampler;
-use crate::storage::LoadedCache;
+use crate::storage::{LoadedCache, ShardReaderCache};
 use crate::types::{
     CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
 };
@@ -211,26 +211,34 @@ fn spawn_worker(
     output_sender: Sender<LoadedResult>,
     cancel: Receiver<()>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || loop {
-        let task = select! {
-            recv(task_receiver) -> message => match message {
-                Ok(task) => task,
-                Err(_) => break,
-            },
-            recv(cancel) -> _ => break,
-        };
-        let result = load_planned_sample(&caches, &cache_offsets, task.physical_index);
-        let loaded = LoadedResult {
-            sequence: task.sequence,
-            result,
-        };
-        select! {
-            send(output_sender, loaded) -> result => {
-                if result.is_err() {
-                    break;
+    thread::spawn(move || {
+        let mut shard_readers = ShardReaderCache::new();
+        loop {
+            let task = select! {
+                recv(task_receiver) -> message => match message {
+                    Ok(task) => task,
+                    Err(_) => break,
+                },
+                recv(cancel) -> _ => break,
+            };
+            let result = load_planned_sample(
+                &caches,
+                &cache_offsets,
+                task.physical_index,
+                &mut shard_readers,
+            );
+            let loaded = LoadedResult {
+                sequence: task.sequence,
+                result,
+            };
+            select! {
+                send(output_sender, loaded) -> result => {
+                    if result.is_err() {
+                        break;
+                    }
                 }
+                recv(cancel) -> _ => break,
             }
-            recv(cancel) -> _ => break,
         }
     })
 }
@@ -239,13 +247,14 @@ fn load_planned_sample(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     physical_index: usize,
+    shard_readers: &mut ShardReaderCache,
 ) -> CacheResult<LoadedSample> {
     let (cache_index, sample_index) =
         locate_physical_sample(caches, cache_offsets, physical_index)?;
     let cache = caches
         .get(cache_index)
         .ok_or_else(|| CacheError::InvalidCache("cache id is out of range".to_string()))?;
-    let sample = cache.read_sample(sample_index)?;
+    let sample = cache.read_sample_with_cache(sample_index, shard_readers)?;
     Ok(LoadedSample {
         data: sample.data,
         metadata: sample.metadata,

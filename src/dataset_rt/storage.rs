@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use crate::types::{
 const FORMAT_VERSION: u32 = 2;
 const INDEX_ROW_BYTES: usize = 24;
 const RECORD_METADATA_LEN_BYTES: usize = 8;
+const MAX_CACHED_SHARD_READERS: usize = 64;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Manifest {
@@ -58,13 +59,23 @@ pub struct LoadedCache {
     validate_embedded_metadata: bool,
 }
 
+pub struct ShardReaderCache {
+    readers: BTreeMap<PathBuf, BufReader<File>>,
+    recent_paths: VecDeque<PathBuf>,
+    max_readers: usize,
+}
+
 impl LoadedCache {
     pub fn sample_count(&self) -> usize {
         self.index.len()
     }
 
-    /// Read one sample record by index without loading the metadata side table on the normal path.
-    pub fn read_sample(&self, sample_index: usize) -> CacheResult<CacheSample> {
+    /// Read one sample record using caller-owned shard handles for repeated random access.
+    pub fn read_sample_with_cache(
+        &self,
+        sample_index: usize,
+        readers: &mut ShardReaderCache,
+    ) -> CacheResult<CacheSample> {
         let entry = self.index.get(sample_index).ok_or_else(|| {
             CacheError::InvalidCache(format!("sample index {sample_index} is out of range"))
         })?;
@@ -76,13 +87,11 @@ impl LoadedCache {
                 CacheError::InvalidCache(format!("shard id {} is out of range", entry.shard_id))
             })?;
         let shard_path = self.path.join("shards").join(&shard.name);
-        let mut file = File::open(shard_path)?;
-        let mut reader = BufReader::new(&mut file);
         let byte_len = usize::try_from(entry.byte_len).map_err(|_| {
             CacheError::InvalidCache("payload byte length does not fit in usize".to_string())
         })?;
         let mut record = vec![0; byte_len];
-        use std::io::Seek;
+        let reader = readers.reader_for(&shard_path)?;
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut record)?;
         let (embedded_metadata, stored_payload) =
@@ -122,6 +131,68 @@ impl LoadedCache {
             .as_deref()
             .ok_or_else(|| CacheError::InvalidCache("metadata rows are unavailable".to_string()))?;
         read_rows(rows)
+    }
+}
+
+impl ShardReaderCache {
+    /// Create a bounded worker-local shard reader cache for random sample materialization.
+    pub fn new() -> Self {
+        Self {
+            readers: BTreeMap::new(),
+            recent_paths: VecDeque::new(),
+            max_readers: MAX_CACHED_SHARD_READERS,
+        }
+    }
+
+    /// Return an open reader for a shard path, opening and evicting handles as needed.
+    fn reader_for(&mut self, path: &Path) -> CacheResult<&mut BufReader<File>> {
+        if self.readers.contains_key(path) {
+            self.mark_recent(path);
+            return self.reader_mut(path);
+        }
+
+        self.open_reader(path)?;
+        self.reader_mut(path)
+    }
+
+    /// Record recent use so repeated shard reads stay open.
+    fn mark_recent(&mut self, path: &Path) {
+        self.recent_paths
+            .retain(|existing_path| existing_path.as_path() != path);
+        self.recent_paths.push_back(path.to_path_buf());
+    }
+
+    /// Open a shard reader after evicting the oldest cached reader when at capacity.
+    fn open_reader(&mut self, path: &Path) -> CacheResult<()> {
+        self.evict_if_full();
+        self.readers
+            .insert(path.to_path_buf(), BufReader::new(File::open(path)?));
+        self.recent_paths.push_back(path.to_path_buf());
+        Ok(())
+    }
+
+    /// Keep the cache below its file descriptor budget.
+    fn evict_if_full(&mut self) {
+        while self.readers.len() >= self.max_readers {
+            let Some(path) = self.recent_paths.pop_front() else {
+                break;
+            };
+            self.readers.remove(&path);
+        }
+    }
+
+    /// Fetch a cached reader after the cache has guaranteed it exists.
+    fn reader_mut(&mut self, path: &Path) -> CacheResult<&mut BufReader<File>> {
+        self.readers
+            .get_mut(path)
+            .ok_or_else(|| CacheError::InvalidCache("shard reader is unavailable".to_string()))
+    }
+}
+
+impl Default for ShardReaderCache {
+    /// Create the default bounded cache used by reader workers.
+    fn default() -> Self {
+        Self::new()
     }
 }
 
