@@ -239,12 +239,6 @@ pub struct CacheSample {
 }
 
 #[derive(Clone, Debug)]
-pub struct PhysicalSample {
-    pub cache_id: CacheId,
-    pub sample_id: SampleId,
-}
-
-#[derive(Clone, Debug)]
 pub struct LoadedSample {
     pub data: Vec<u8>,
     pub metadata: Vec<MetadataValue>,

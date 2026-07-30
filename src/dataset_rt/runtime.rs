@@ -6,8 +6,7 @@ use crossbeam_channel::{bounded, select, Receiver, Sender};
 
 use crate::storage::LoadedCache;
 use crate::types::{
-    CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PhysicalSample, PrefetchSize,
-    SampleId,
+    CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
 };
 
 struct PlannedTask {
@@ -33,7 +32,7 @@ pub struct RuntimeIterator {
 impl RuntimeIterator {
     pub fn start(
         caches: Arc<Vec<LoadedCache>>,
-        physical_samples: Arc<Vec<PhysicalSample>>,
+        cache_offsets: Arc<Vec<usize>>,
         plan: Vec<usize>,
         prefetch_size: PrefetchSize,
         num_workers: NumWorkers,
@@ -47,7 +46,7 @@ impl RuntimeIterator {
         handles.push(spawn_scheduler(task_sender, plan, cancel_receiver.clone()));
         handles.extend(spawn_workers(
             caches,
-            physical_samples,
+            cache_offsets,
             task_receiver,
             output_sender,
             num_workers,
@@ -143,7 +142,7 @@ fn spawn_scheduler(
 
 fn spawn_workers(
     caches: Arc<Vec<LoadedCache>>,
-    physical_samples: Arc<Vec<PhysicalSample>>,
+    cache_offsets: Arc<Vec<usize>>,
     task_receiver: Receiver<PlannedTask>,
     output_sender: Sender<LoadedResult>,
     num_workers: NumWorkers,
@@ -153,7 +152,7 @@ fn spawn_workers(
         .map(|_| {
             spawn_worker(
                 caches.clone(),
-                physical_samples.clone(),
+                cache_offsets.clone(),
                 task_receiver.clone(),
                 output_sender.clone(),
                 cancel.clone(),
@@ -164,7 +163,7 @@ fn spawn_workers(
 
 fn spawn_worker(
     caches: Arc<Vec<LoadedCache>>,
-    physical_samples: Arc<Vec<PhysicalSample>>,
+    cache_offsets: Arc<Vec<usize>>,
     task_receiver: Receiver<PlannedTask>,
     output_sender: Sender<LoadedResult>,
     cancel: Receiver<()>,
@@ -177,7 +176,7 @@ fn spawn_worker(
             },
             recv(cancel) -> _ => break,
         };
-        let result = load_planned_sample(&caches, &physical_samples, task.physical_index);
+        let result = load_planned_sample(&caches, &cache_offsets, task.physical_index);
         let loaded = LoadedResult {
             sequence: task.sequence,
             result,
@@ -195,25 +194,48 @@ fn spawn_worker(
 
 fn load_planned_sample(
     caches: &[LoadedCache],
-    physical_samples: &[PhysicalSample],
+    cache_offsets: &[usize],
     physical_index: usize,
 ) -> CacheResult<LoadedSample> {
-    let physical_sample = physical_samples.get(physical_index).ok_or_else(|| {
-        CacheError::InvalidCache(format!("physical sample {physical_index} is out of range"))
-    })?;
+    let (cache_index, sample_index) =
+        locate_physical_sample(caches, cache_offsets, physical_index)?;
     let cache = caches
-        .get(physical_sample.cache_id.as_u64() as usize)
-        .ok_or_else(|| {
-            CacheError::InvalidCache(format!(
-                "cache id {} is out of range",
-                physical_sample.cache_id.as_u64()
-            ))
-        })?;
-    let sample = cache.read_sample(physical_sample.sample_id.as_u64() as usize)?;
+        .get(cache_index)
+        .ok_or_else(|| CacheError::InvalidCache("cache id is out of range".to_string()))?;
+    let sample = cache.read_sample(sample_index)?;
     Ok(LoadedSample {
         data: sample.data,
         metadata: sample.metadata,
-        cache_id: CacheId::from_position(physical_sample.cache_id.as_u64() as usize)?,
-        sample_id: SampleId::from_position(physical_sample.sample_id.as_u64() as usize)?,
+        cache_id: CacheId::from_position(cache_index)?,
+        sample_id: SampleId::from_position(sample_index)?,
     })
+}
+
+fn locate_physical_sample(
+    caches: &[LoadedCache],
+    cache_offsets: &[usize],
+    physical_index: usize,
+) -> CacheResult<(usize, usize)> {
+    let cache_index = cache_offsets
+        .partition_point(|offset| *offset <= physical_index)
+        .checked_sub(1)
+        .ok_or_else(|| {
+            CacheError::InvalidCache(format!("physical sample {physical_index} is out of range"))
+        })?;
+    let cache_offset = cache_offsets
+        .get(cache_index)
+        .copied()
+        .ok_or_else(|| CacheError::InvalidCache("cache offset is out of range".to_string()))?;
+    let sample_index = physical_index.checked_sub(cache_offset).ok_or_else(|| {
+        CacheError::InvalidCache(format!("physical sample {physical_index} is out of range"))
+    })?;
+    let cache = caches
+        .get(cache_index)
+        .ok_or_else(|| CacheError::InvalidCache("cache id is out of range".to_string()))?;
+    if sample_index >= cache.sample_count() {
+        return Err(CacheError::InvalidCache(format!(
+            "physical sample {physical_index} is out of range"
+        )));
+    }
+    Ok((cache_index, sample_index))
 }

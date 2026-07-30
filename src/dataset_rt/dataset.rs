@@ -14,8 +14,7 @@ use crate::runtime::RuntimeIterator;
 use crate::sampling::{plan_epoch, validate_weights};
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
-    CacheError, CacheId, CacheResult, MetadataField, MetadataValue, NumWorkers, PhysicalSample,
-    PrefetchSize, SampleId,
+    CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
 
 #[pyclass(name = "CachedDataset")]
@@ -25,7 +24,8 @@ pub struct PyCachedDataset {
 
 struct DatasetState {
     caches: Arc<Vec<LoadedCache>>,
-    physical_samples: Arc<Vec<PhysicalSample>>,
+    cache_offsets: Arc<Vec<usize>>,
+    total_samples: usize,
     schema: Vec<MetadataField>,
     seed: u64,
     prefetch_size: PrefetchSize,
@@ -66,7 +66,7 @@ impl PyCachedDataset {
     }
 
     fn __len__(&self) -> usize {
-        self.inner.physical_samples.len()
+        self.inner.total_samples
     }
 
     fn __iter__(&self) -> PyResult<PyDatasetIterator> {
@@ -95,7 +95,7 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        validate_weights(&guard.weights, self.inner.physical_samples.len())
+        validate_weights(&guard.weights, self.inner.total_samples)
             .map_err(CacheError::into_py_err)?;
         Ok(guard.weights.clone())
     }
@@ -133,8 +133,8 @@ impl DatasetState {
 
         let caches = load_caches(paths, validate_cache)?;
         let schema = common_schema(&caches)?;
-        let physical_samples = collect_physical_samples(&caches)?;
-        if physical_samples.is_empty() {
+        let (cache_offsets, total_samples) = collect_cache_offsets(&caches)?;
+        if total_samples == 0 {
             return Err(CacheError::InvalidCache(
                 "dataset contains no physical samples".to_string(),
             ));
@@ -142,14 +142,15 @@ impl DatasetState {
 
         Ok(Self {
             caches: Arc::new(caches),
-            physical_samples: Arc::new(physical_samples.clone()),
+            cache_offsets: Arc::new(cache_offsets),
+            total_samples,
             schema,
             seed,
             prefetch_size: PrefetchSize::new(prefetch_size)?,
             num_workers: NumWorkers::new(num_workers)?,
             shuffle,
             mutable: Mutex::new(MutableDatasetState {
-                weights: vec![1.0; physical_samples.len()],
+                weights: vec![1.0; total_samples],
                 next_epoch: 0,
                 custom_weights: false,
             }),
@@ -160,11 +161,11 @@ impl DatasetState {
         let plan = if self.shuffle {
             self.shuffled_plan()?
         } else {
-            physical_order_plan(self.physical_samples.len())
+            physical_order_plan(self.total_samples)
         };
         Ok(RuntimeIterator::start(
             self.caches.clone(),
-            self.physical_samples.clone(),
+            self.cache_offsets.clone(),
             plan,
             self.prefetch_size,
             self.num_workers,
@@ -183,9 +184,8 @@ impl DatasetState {
     }
 
     fn extract_weight_table_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
-        let cache_offsets = cache_offsets(&self.caches)?;
-        let mut weights = vec![0.0; self.physical_samples.len()];
-        let mut seen = vec![false; self.physical_samples.len()];
+        let mut weights = vec![0.0; self.total_samples];
+        let mut seen = vec![false; self.total_samples];
         let mut row_count = 0_usize;
         let reader = FileReader::try_new(Cursor::new(ipc), None)?;
 
@@ -197,14 +197,14 @@ impl DatasetState {
             apply_weight_batch(
                 &batch,
                 &self.caches,
-                &cache_offsets,
+                &self.cache_offsets,
                 &mut weights,
                 &mut seen,
             )?;
         }
 
-        validate_complete_weight_table(row_count, self.physical_samples.len(), &seen)?;
-        validate_weights(&weights, self.physical_samples.len())?;
+        validate_complete_weight_table(row_count, self.total_samples, &seen)?;
+        validate_weights(&weights, self.total_samples)?;
         Ok(weights)
     }
 }
@@ -457,18 +457,14 @@ fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
     Ok(first.manifest.metadata_schema.clone())
 }
 
-fn collect_physical_samples(caches: &[LoadedCache]) -> CacheResult<Vec<PhysicalSample>> {
-    let mut physical_samples = Vec::new();
-    for (cache_index, cache) in caches.iter().enumerate() {
-        let cache_id = CacheId::from_position(cache_index)?;
-        for sample_index in 0..cache.sample_count() {
-            physical_samples.push(PhysicalSample {
-                cache_id,
-                sample_id: SampleId::from_position(sample_index)?,
-            });
-        }
-    }
-    Ok(physical_samples)
+fn collect_cache_offsets(caches: &[LoadedCache]) -> CacheResult<(Vec<usize>, usize)> {
+    let offsets = cache_offsets(caches)?;
+    let total = caches.iter().try_fold(0_usize, |total, cache| {
+        total.checked_add(cache.sample_count()).ok_or_else(|| {
+            CacheError::InvalidInput("total sample count overflowed usize".to_string())
+        })
+    })?;
+    Ok((offsets, total))
 }
 
 fn sample_to_python<'py>(
