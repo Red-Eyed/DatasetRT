@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from importlib import import_module
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeAlias, cast
 
@@ -404,7 +403,7 @@ class CachedDataset:
         `weight`. Mutating the returned frame has no effect until it is passed
         to `set_weight_table`.
         """
-        return pl.read_ipc(BytesIO(self._inner.weight_table_ipc()))
+        return pl.read_ipc(self._inner.weight_table_ipc())
 
     def set_weight_table(self, weights: pl.DataFrame) -> None:
         """Replace Rust-owned sampling weights from a Polars table.
@@ -413,6 +412,7 @@ class CachedDataset:
         exactly once and that each weight is positive and finite.
         """
         weight_columns = weights.select(["cache_id", "sample_id", "weight"])
-        buffer = BytesIO()
-        weight_columns.write_ipc(buffer)
+        buffer = weight_columns.write_ipc(None)
+        if buffer is None:
+            raise RuntimeError("Polars did not return an in-memory IPC buffer")
         self._inner.set_weight_table_ipc(buffer.getvalue())
