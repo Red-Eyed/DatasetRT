@@ -10,10 +10,7 @@ use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
-use crate::weight_table::{
-    build_weight_table_ipc, extract_weight_table_ipc,
-    has_custom_weights as weight_state_has_custom, weight_values, WeightState,
-};
+use crate::weight_table::{build_weight_table_ipc, extract_weight_table_ipc, WeightState};
 
 #[pyclass(name = "CachedDataset")]
 pub struct PyCachedDataset {
@@ -75,26 +72,6 @@ impl PyCachedDataset {
             schema: self.inner.schema.clone(),
             runtime: Mutex::new(iterator),
         })
-    }
-
-    /// Report whether the Rust dataset has accepted a non-uniform weight vector.
-    fn has_custom_weights(&self) -> PyResult<bool> {
-        let guard = self
-            .inner
-            .mutable
-            .lock()
-            .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        Ok(weight_state_has_custom(&guard.weights))
-    }
-
-    /// Return the current weight vector only for callers that must attach it to a table.
-    fn get_weights(&self) -> PyResult<Vec<f64>> {
-        let guard = self
-            .inner
-            .mutable
-            .lock()
-            .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        weight_values(&guard.weights, self.inner.total_samples).map_err(CacheError::into_py_err)
     }
 
     /// Return an Arrow IPC weight table built by Rust from cache metadata and weights.

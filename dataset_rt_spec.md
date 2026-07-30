@@ -121,8 +121,8 @@ dataset = CachedDataset([...], seed=42)
 ```
 
 ``` python
-weights = dataset.get_weights()
-dataset.set_weights(weights)
+weights = dataset.weight_table()
+dataset.set_weight_table(weights)
 ```
 
 ------------------------------------------------------------------------

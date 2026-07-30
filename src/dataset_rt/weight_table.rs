@@ -30,22 +30,6 @@ enum WeightSlice<'a> {
     Custom(&'a [f64]),
 }
 
-/// Report whether a weight state contains caller-supplied custom weights.
-pub fn has_custom_weights(weights: &WeightState) -> bool {
-    matches!(weights, WeightState::Custom(_))
-}
-
-/// Materialize weights only for API paths that explicitly need a full vector.
-pub fn weight_values(weights: &WeightState, total_samples: usize) -> CacheResult<Vec<f64>> {
-    match weights {
-        WeightState::Uniform => Ok(vec![1.0; total_samples]),
-        WeightState::Custom(values) => {
-            validate_weights(values, total_samples)?;
-            Ok(values.clone())
-        }
-    }
-}
-
 /// Build one Arrow IPC table containing identity, metadata, and current weights.
 pub fn build_weight_table_ipc(
     caches: &[LoadedCache],
