@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
+import dataset_rt.api as dataset_rt_api
 from dataset_rt import (
     CacheInput,
     CacheSourcesDatasetError,
@@ -440,6 +441,28 @@ def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(ImportError, match="requires PyTorch"):
         dataset.to_torch_iterable_dataset()
+
+
+def test_torch_adapter_rejects_dataloader_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written = success_paths(RUNTIME.write_cache(TinySource(), tmp_path / "cache"))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+
+    class FakeTorchData:
+        class IterableDataset:
+            pass
+
+        @staticmethod
+        def get_worker_info() -> object:
+            return object()
+
+    monkeypatch.setattr(dataset_rt_api, "import_module", lambda name: FakeTorchData)
+
+    torch_dataset = dataset.to_torch_iterable_dataset()
+
+    with pytest.raises(RuntimeError, match="Use Dataloader with num workers = 0"):
+        iter(torch_dataset)
 
 
 def test_samples_metadata_is_polars_table_with_metadata(tmp_path: Path) -> None:

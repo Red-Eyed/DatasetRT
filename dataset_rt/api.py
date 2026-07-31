@@ -413,6 +413,11 @@ class CachedDataset:
             """Sized PyTorch iterable view over a `CachedDataset`."""
 
             def __iter__(self) -> Iterator[CachedSample]:
+                if torch_data.get_worker_info() is not None:
+                    raise RuntimeError(
+                        "Use Dataloader with num workers = 0. "
+                        "Use DatasetRuntime(num_workers=N) for parallel cache reads."
+                    )
                 return iter(dataset)
 
             def __len__(self) -> int:

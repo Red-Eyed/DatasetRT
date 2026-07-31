@@ -95,14 +95,14 @@ When PyTorch is installed, turn the same DatasetRT object into a sized `Iterable
 
 ```python
 torch_dataset = dataset.to_torch_iterable_dataset()
-loader = torch.utils.data.DataLoader(torch_dataset, batch_size=None)
+loader = torch.utils.data.DataLoader(torch_dataset, batch_size=None, num_workers=0)
 
 for sample in loader:
     image = decode_image(sample.data)
     label = sample.metadata["label"]
 ```
 
-The adapter does not decode payloads or add a Torch dependency to DatasetRT. It yields `CachedSample` values and reports `len(torch_dataset)`.
+The adapter does not decode payloads or add a Torch dependency to DatasetRT. It yields `CachedSample` values and reports `len(torch_dataset)`. Keep PyTorch `DataLoader(num_workers=0)`; use `DatasetRuntime(num_workers=N)` for parallel cache reads.
 
 ## Samples Metadata
 

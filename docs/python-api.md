@@ -234,8 +234,11 @@ The epoch length is the physical sample count across all loaded caches.
 
 ```python
 torch_dataset = dataset.to_torch_iterable_dataset()
+loader = torch.utils.data.DataLoader(torch_dataset, batch_size=None, num_workers=0)
 ```
 
 The adapter is available only when PyTorch is installed. It returns a sized `torch.utils.data.IterableDataset` view that yields `CachedSample` objects and implements `__len__`.
 
 DatasetRT does not decode tensors in the adapter. Payload decoding remains in Python, usually inside your collate function, transform, or training loop.
+
+Keep PyTorch `DataLoader(num_workers=0)` with this adapter. Use `DatasetRuntime(num_workers=N)` for parallel cache reads; the adapter rejects PyTorch worker processes to avoid duplicated iterable streams.

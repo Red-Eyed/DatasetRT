@@ -4,6 +4,20 @@ DatasetRT is a framework-independent dataset cache with a Rust correctness core 
 
 The founding rule is simple: if behavior affects correctness, reproducibility, integrity, or concurrency, it belongs in Rust. Python expresses user intent and adapts Python objects into the narrow data shapes the Rust core accepts.
 
+## Inversion Analysis
+
+Charlie Munger often pointed to Jacobi's maxim, "Invert, always invert." DatasetRT applies that idea by starting with the failures an ML dataset runtime must make hard:
+
+- Silent sample duplication.
+- Nondeterministic epoch order.
+- Weight updates applied to the wrong physical sample.
+- Readers accepting incomplete or corrupt caches.
+- Startup paths that hash or materialize more data than requested.
+- Queues that grow without bound under slow consumers.
+- Python adapters that accidentally own correctness-sensitive iteration state.
+
+The architecture is the inverse of those failures. Rust owns identity, sampling, validation, storage layout, bounded queues, and ordering. Python remains the ergonomic edge that describes sources and decodes payload bytes, but unsupported adapter modes should fail clearly rather than produce plausible-looking bad training data.
+
 ## Boundaries
 
 Rust owns:
