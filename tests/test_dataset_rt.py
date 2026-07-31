@@ -244,6 +244,27 @@ def test_write_multiple_sources_returns_cache_paths(tmp_path: Path) -> None:
     assert len(dataset) == 6
 
 
+def test_dataset_loads_multiple_caches_in_constructor_order(tmp_path: Path) -> None:
+    class OtherSource:
+        name = "other"
+
+        def __iter__(self):
+            yield CacheInput(b"three", {"label": "d", "index": 3, "score": 4.5, "kept": False})
+            yield CacheInput(b"four", {"label": "e", "index": 4, "score": 5.5, "kept": True})
+
+    root = tmp_path / "caches"
+    written = success_paths(write_cache([TinySource(), OtherSource()], root))
+    dataset = CachedDataset(
+        [written[1], written[0]],
+        reader_config=ReaderConfig(seed=42, num_workers=2, shuffle=False),
+    )
+
+    samples = list(dataset)
+
+    assert [sample.data for sample in samples] == [b"three", b"four", b"zero", b"one", b"two"]
+    assert [sample.cache_id for sample in samples] == [0, 0, 1, 1, 1]
+
+
 def test_multi_source_write_rejects_duplicate_names_before_writing(tmp_path: Path) -> None:
     root = tmp_path / "caches"
 
