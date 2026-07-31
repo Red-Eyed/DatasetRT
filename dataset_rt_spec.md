@@ -113,11 +113,12 @@ class CachedSample(NamedTuple):
 ```
 
 ``` python
-write_cache(source, path, ...)
+runtime = DatasetRuntime(num_workers=4)
+runtime.write_cache(source, path, ...)
 ```
 
 ``` python
-dataset = CachedDataset([...], seed=42)
+dataset = runtime.cached_dataset([...], reader_config=ReaderConfig(seed=42))
 ```
 
 ``` python

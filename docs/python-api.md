@@ -26,13 +26,22 @@ class CacheSource(Protocol):
 
 A `CacheSource` is a synchronous Python iterable. Python does not create threads or queues. The Rust writer pulls from the iterable and owns the cache construction rules.
 
-## write_cache
+## DatasetRuntime
 
 ```python
-results = write_cache(
+runtime = DatasetRuntime(num_workers=4)
+```
+
+`DatasetRuntime` owns exactly `num_workers` reusable Rust threads. Cache loading,
+sample reading, and cache writing called through the runtime share that pool. The
+worker count is never inferred from the machine and is not repeated on operations.
+
+## DatasetRuntime.write_cache
+
+```python
+results = runtime.write_cache(
     source,
     base_cache_dir,
-    num_workers=4,
     writer_config=WriterConfig(
         prefetch_size=64,
         max_shard_bytes=...,
@@ -41,15 +50,14 @@ results = write_cache(
         validate_cache=False,
     ),
 )
-results = write_cache(
+results = runtime.write_cache(
     [source_a, source_b],
     base_cache_dir,
-    num_workers=4,
     writer_config=WriterConfig(...),
 )
 ```
 
-`write_cache` creates immutable caches and returns one result per source.
+`DatasetRuntime.write_cache` creates immutable caches and returns one result per source.
 
 `path` is always the base cache directory. Python passes this through to Rust as `base_cache_dir`.
 
@@ -70,11 +78,11 @@ for result in results:
 
 `prefetch_size` bounds the writer's in-flight task and result window. If Python iteration is faster than writing, Rust applies backpressure when that window reaches `min(prefetch_size, num_workers)`. For multi-source writes, the window may span source boundaries while ordered commit preserves deterministic output.
 
-The first top-level `num_workers` value fixes DatasetRT's process-wide Rust worker count. On later calls, `num_workers` limits that operation's active jobs without resizing the existing pool.
+The runtime's fixed worker count limits active jobs. Calls do not create threads or resize the pool.
 
 `show_progress` controls Rust-owned write progress. It is enabled by default and reports committed samples/s and MB/s for the active source. For multi-source writes, it also reports completed sources with an ETA based on wall time and completed source count. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
 
-`validate_cache` controls checksum validation when the writer reuses an existing cache. It is `False` by default so `CachedDataset.from_cache_sources` does not hash every payload shard before handing paths to the dataset loader. Set it to `True` for integrity checks.
+`validate_cache` controls checksum validation when the writer reuses an existing cache. It is `False` by default so `DatasetRuntime.from_cache_sources` does not hash every payload shard before handing paths to the dataset loader. Set it to `True` for integrity checks.
 
 Writer configuration is a frozen pydantic model:
 
@@ -115,12 +123,11 @@ Rules:
 - Metadata schema is inferred from the first sample and validated for every sample.
 - Rust assigns `cache_id`, `sample_id`, shard offsets, and checksums.
 
-## CachedDataset
+## DatasetRuntime.cached_dataset
 
 ```python
-dataset = CachedDataset(
+dataset = runtime.cached_dataset(
     [path],
-    num_workers=4,
     reader_config=ReaderConfig(
         seed=42,
         prefetch_size=64,
@@ -130,7 +137,7 @@ dataset = CachedDataset(
 )
 ```
 
-`CachedDataset` loads one or more immutable caches and exposes a synchronous Python iterator.
+The method loads one or more immutable caches and returns a synchronous `CachedDataset`. The dataset retains the runtime pool internally, so reads remain valid for the dataset's lifetime.
 
 Reader configuration is a frozen pydantic model:
 
@@ -149,19 +156,18 @@ Rules:
 - Dataset state is owned by Rust.
 - Multiple readers may load the same cache concurrently.
 - `prefetch_size` controls the bounded Rust reader queue.
-- The top-level `num_workers` argument limits active read jobs and must match the process pool size.
+- The runtime worker count limits active read jobs.
 - `validate_cache=True` verifies metadata, index, and shard checksums during dataset construction.
 - With `shuffle=True`, each Python iterator snapshots the current weight vector.
 - With `shuffle=False`, samples are emitted once in physical cache order.
 - Changing weights after iterator construction affects future shuffled iterators, not existing ones.
 
-## CachedDataset.from_cache_sources
+## DatasetRuntime.from_cache_sources
 
 ```python
-result = CachedDataset.from_cache_sources(
+result = runtime.from_cache_sources(
     [source_a, source_b],
     base_cache_dir,
-    num_workers=4,
     reader_config=ReaderConfig(seed=42),
     writer_config=WriterConfig(),
 )
@@ -190,7 +196,7 @@ cache_id | sample_id | <metadata columns...> | weight
 
 Required columns:
 
-- `cache_id`: cache position from `CachedDataset([...])`.
+- `cache_id`: cache position passed to `DatasetRuntime.cached_dataset(...)`.
 - `sample_id`: physical row within that cache.
 - Metadata columns: one column per metadata field stored in the cache.
 - `weight`: positive finite float, default `1.0`.
@@ -207,8 +213,6 @@ Required columns:
 Rows may be reordered by Polars operations before calling `set_samples_metadata`; Rust maps by `(cache_id, sample_id)`, not by row position.
 
 Metadata columns are included for ergonomic filtering and auditing. They are not trusted for sample identity; `cache_id` and `sample_id` are the identity fields.
-
-`weight_table` and `set_weight_table` remain as deprecated compatibility aliases for the same operations.
 
 ## Iteration
 

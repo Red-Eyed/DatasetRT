@@ -7,6 +7,7 @@
 
 mod compression;
 mod dataset;
+mod dataset_runtime;
 mod runtime;
 mod samples_metadata;
 mod sampling;
@@ -16,20 +17,22 @@ mod worker_pool;
 mod writer;
 
 use dataset::PyCachedDataset;
+use dataset_runtime::PyDatasetRuntime;
 use pyo3::prelude::*;
 
 #[pyfunction]
 fn write_cache(
+    runtime: PyRef<'_, PyDatasetRuntime>,
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
-    num_workers: usize,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> PyResult<Vec<(String, String, String)>> {
     writer::write_cache(
+        runtime.pool(),
+        runtime.num_workers(),
         sources,
         base_cache_dir,
-        num_workers,
         writer_config,
         reuse_existing,
     )
@@ -39,6 +42,7 @@ fn write_cache(
 #[pymodule]
 fn _dataset_rt(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_cache, module)?)?;
+    module.add_class::<PyDatasetRuntime>()?;
     module.add_class::<PyCachedDataset>()?;
     Ok(())
 }

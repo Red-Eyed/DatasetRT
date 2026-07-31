@@ -10,7 +10,7 @@ use crate::storage::{LoadedCache, ShardReaderCache};
 use crate::types::{
     CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
 };
-use crate::worker_pool;
+use crate::worker_pool::WorkerPool;
 
 thread_local! {
     static SHARD_READERS: RefCell<ShardReaderCache> = RefCell::new(ShardReaderCache::new());
@@ -45,6 +45,7 @@ impl EpochPlan {
 }
 
 pub struct RuntimeIterator {
+    pool: Arc<WorkerPool>,
     caches: Arc<Vec<LoadedCache>>,
     cache_offsets: Arc<Vec<usize>>,
     plan: EpochPlan,
@@ -62,6 +63,7 @@ pub struct RuntimeIterator {
 
 impl RuntimeIterator {
     pub fn start(
+        pool: Arc<WorkerPool>,
         caches: Arc<Vec<LoadedCache>>,
         cache_offsets: Arc<Vec<usize>>,
         plan: EpochPlan,
@@ -75,6 +77,7 @@ impl RuntimeIterator {
             .min(total);
         let (output_sender, output) = bounded(parallelism);
         let mut iterator = Self {
+            pool,
             caches,
             cache_offsets,
             output_sender,
@@ -113,7 +116,7 @@ impl RuntimeIterator {
         let output_sender = self.output_sender.clone();
         let cancelled = self.cancelled.clone();
 
-        worker_pool::submit(output_sender, move || {
+        self.pool.submit(output_sender, move || {
             if cancelled.load(Ordering::Acquire) {
                 return Err(CacheError::WorkerFailed);
             }

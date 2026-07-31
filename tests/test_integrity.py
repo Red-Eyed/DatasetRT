@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, ReaderConfig, write_cache
+from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
+
+RUNTIME = DatasetRuntime(num_workers=4)
 
 
 class IntegritySource:
@@ -18,7 +20,7 @@ class IntegritySource:
 
 
 def write_integrity_cache(tmp_path: Path) -> Path:
-    results = write_cache(IntegritySource(), tmp_path / "cache", num_workers=4)
+    results = RUNTIME.write_cache(IntegritySource(), tmp_path / "cache")
     match results[0]:
         case CacheWriteSuccess(path=path):
             return path
@@ -27,9 +29,8 @@ def write_integrity_cache(tmp_path: Path) -> Path:
 
 
 def load_cache(cache_path: Path) -> CachedDataset:
-    return CachedDataset(
+    return RUNTIME.cached_dataset(
         [cache_path],
-        num_workers=4,
         reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=True),
     )
 
@@ -101,9 +102,8 @@ def test_checksum_validation_is_optional_for_dataset_load(tmp_path: Path) -> Non
     manifest["metadata_sha256"] = "0" * 64
     write_manifest(cache_path, manifest)
 
-    dataset = CachedDataset(
+    dataset = RUNTIME.cached_dataset(
         [cache_path],
-        num_workers=4,
         reader_config=ReaderConfig(seed=1, shuffle=False),
     )
 

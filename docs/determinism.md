@@ -41,10 +41,10 @@ The all-zero case is unrepresentable because zero is not a valid v0.1 weight.
 
 Each new shuffled iterator uses the dataset's next epoch number. This means two shuffled iterators created sequentially from the same dataset can produce different deterministic orders because their epoch input differs.
 
-Creating a new `CachedDataset` with the same cache paths and seed resets the epoch counter. Non-shuffled iterators do not advance the epoch counter because their order does not depend on epoch state.
+Loading a new dataset with the same cache paths and seed resets the epoch counter. Non-shuffled iterators do not advance the epoch counter because their order does not depend on epoch state.
 
 ## Cache Identity
 
-`cache_id` is the position of the cache path in the `CachedDataset([...])` constructor.
+`cache_id` is the position of the cache path passed to `DatasetRuntime.cached_dataset(...)`.
 
 `sample_id` is the physical row within that cache.

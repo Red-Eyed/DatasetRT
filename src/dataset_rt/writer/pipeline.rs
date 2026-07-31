@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use indicatif::MultiProgress;
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::storage::{load_cache, CacheBuilder};
 use crate::types::{CacheError, CacheResult};
-use crate::worker_pool;
+use crate::worker_pool::WorkerPool;
 
 struct SourceWriteStart {
     source_index: usize,
@@ -54,8 +55,12 @@ pub(super) fn write_source_list(
     let progress = SourceListProgress::new(config.show_progress, sources.len());
     let committer =
         PipelineCommitter::new(config.clone(), progress, sources.len(), profiler.clone());
-    let mut pipeline =
-        SourceListWritePipeline::new(committer, config.prefetch_size, config.num_workers);
+    let mut pipeline = SourceListWritePipeline::new(
+        config.pool.clone(),
+        committer,
+        config.prefetch_size,
+        config.num_workers,
+    );
     if let Err(error) =
         ingest_source_list(sources, base_cache_dir, config, &mut pipeline, &profiler)
     {
@@ -293,6 +298,7 @@ impl<'a> PipelineIngress<'a> {
 }
 
 struct SourceListWritePipeline {
+    pool: Arc<WorkerPool>,
     result_sender: Sender<CacheResult<SerializedPipelineMessage>>,
     result_receiver: Receiver<CacheResult<SerializedPipelineMessage>>,
     committer: Option<PipelineCommitter>,
@@ -305,6 +311,7 @@ struct SourceListWritePipeline {
 impl SourceListWritePipeline {
     /// Create bounded operation state for finite source-list writer jobs.
     fn new(
+        pool: Arc<WorkerPool>,
         committer: PipelineCommitter,
         prefetch_size: crate::types::PrefetchSize,
         num_workers: crate::types::NumWorkers,
@@ -312,6 +319,7 @@ impl SourceListWritePipeline {
         let parallelism = prefetch_size.as_usize().min(num_workers.as_usize());
         let (result_sender, result_receiver) = bounded(parallelism);
         Self {
+            pool,
             result_sender,
             result_receiver,
             committer: Some(committer),
@@ -328,7 +336,7 @@ impl SourceListWritePipeline {
             self.complete_one()?;
         }
         let result_sender = self.result_sender.clone();
-        worker_pool::submit(result_sender, move || {
+        self.pool.submit(result_sender, move || {
             Ok(SerializedPipelineMessage {
                 sequence: queued.sequence,
                 event: queued.event,

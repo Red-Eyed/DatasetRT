@@ -9,12 +9,12 @@ from dataset_rt.api import (
     CacheWriteError,
     CacheWriteResult,
     CacheWriteSuccess,
+    DatasetRuntime,
     ReaderConfig,
     ShardCompression,
     SizedTorchIterableDataset,
     WriterConfig,
     WriterProfilerConfig,
-    write_cache,
 )
 
 __all__ = [
@@ -28,10 +28,10 @@ __all__ = [
     "CacheWriteSuccess",
     "CachedDataset",
     "CachedSample",
+    "DatasetRuntime",
     "ReaderConfig",
     "ShardCompression",
     "SizedTorchIterableDataset",
     "WriterConfig",
     "WriterProfilerConfig",
-    "write_cache",
 ]

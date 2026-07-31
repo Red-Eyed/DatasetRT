@@ -7,9 +7,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from dataset_rt import (
-    CachedDataset,
     CacheInput,
     CacheSourcesDatasetSuccess,
+    DatasetRuntime,
     ReaderConfig,
     WriterConfig,
 )
@@ -33,11 +33,11 @@ class SyntheticSource:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="dataset_rt_bench_") as temp_dir:
         base_cache_dir = Path(temp_dir) / "cache"
+        runtime = DatasetRuntime(num_workers=4)
         write_started = time.perf_counter()
-        result = CachedDataset.from_cache_sources(
+        result = runtime.from_cache_sources(
             SyntheticSource(),
             base_cache_dir,
-            num_workers=4,
             reader_config=ReaderConfig(seed=42, prefetch_size=128, shuffle=False),
             writer_config=WriterConfig(prefetch_size=128),
         )

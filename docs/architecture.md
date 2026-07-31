@@ -61,10 +61,10 @@ The Python package exposes only:
 - `CacheInput`
 - `CachedSample`
 - `CacheSource`
+- `DatasetRuntime`
 - `ReaderConfig`
 - `WriterConfig`
 - `ShardCompression`
-- `write_cache`
 - `CachedDataset`
 
 All other implementation details are private.

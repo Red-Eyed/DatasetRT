@@ -2,16 +2,16 @@
 
 DatasetRT exposes a synchronous Python API backed by native Rust execution.
 
-No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. The first reader or writer operation initializes one fixed process-wide Rust worker pool from its required top-level `num_workers` argument, and DatasetRT reuses those threads for cache loading, reading, and writer jobs. Later `num_workers` values bound their operation's in-flight work without resizing the process pool; hardware parallelism is never selected implicitly.
+No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. `DatasetRuntime(num_workers=...)` creates one fixed Rust worker pool, and every operation called through that object reuses those threads for cache loading, reading, and writer jobs. Hardware parallelism is never selected implicitly. Creating another runtime creates another independent, explicitly sized pool.
 
 ## Reader Pipeline
 
 ```text
 metadata load
-    -> Rust runtime initialization
+    -> DatasetRuntime
     -> physical-order planner or deterministic weighted sampler
     -> bounded in-flight read window
-    -> process-wide worker pool
+    -> runtime-owned worker pool
     -> reorder buffer
     -> Python iterator
 ```
@@ -23,7 +23,7 @@ Payload materialization means assembling cache records from shard bytes, metadat
 Reader operation settings:
 
 - `prefetch_size`: bounded Rust read/result queue capacity.
-- top-level `num_workers`: fixed process pool size and maximum active read jobs.
+- runtime `num_workers`: fixed pool size and maximum active read jobs.
 - `shuffle`: choose deterministic weighted sampling or physical cache order.
 
 Each iterator keeps at most `min(num_workers, prefetch_size)` reads active. Completed reads fit in a result queue of the same size, so workers do not wait on a full per-iterator result queue. Slow Python consumption stops new submissions instead of growing memory without bound.
@@ -34,7 +34,7 @@ Each iterator keeps at most `min(num_workers, prefetch_size)` reads active. Comp
 Python CacheSource
     -> Rust ingestion
     -> bounded in-flight writer window
-    -> process-wide worker pool
+    -> runtime-owned worker pool
     -> caller-owned ordered commit stage
     -> shard writer
 ```
@@ -51,7 +51,7 @@ The commit stage owns:
 Writer operation settings:
 
 - `prefetch_size`: maximum buffered writer task/result capacity.
-- top-level `num_workers`: fixed process pool size and maximum active writer jobs.
+- runtime `num_workers`: fixed pool size and maximum active writer jobs.
 - `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s for the active source, plus source-count progress and ETA for multi-source writes.
 - `validate_cache`: optional checksum validation for existing caches before writer reuse.
 - `profiler`: optional JSON timing summary for diagnosing whether time is spent in Python iteration, Python-to-Rust extraction, queue backpressure, compression, disk writes, finish steps, or cache publish.
@@ -62,7 +62,7 @@ Each operation's result queue has the same capacity as its active-job limit. Cac
 
 ## Backpressure
 
-The global task queue and every operation result queue are bounded. Submission applies backpressure when the global pool is saturated, and each operation reserves result capacity before submitting work. This keeps memory controlled without allowing pool workers to deadlock on full operation queues.
+The runtime task queue and every operation result queue are bounded. Submission applies backpressure when the runtime pool is saturated, and each operation reserves result capacity before submitting work. This keeps memory controlled without allowing pool workers to deadlock on full operation queues.
 
 ## Cache Validation
 

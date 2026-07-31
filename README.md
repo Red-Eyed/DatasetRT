@@ -40,7 +40,7 @@ from dataset_rt import (
     CacheInput,
     CacheSourcesDatasetError,
     CacheSourcesDatasetSuccess,
-    CachedDataset,
+    DatasetRuntime,
     ReaderConfig,
     ShardCompression,
     WriterConfig,
@@ -58,10 +58,10 @@ class Images:
             )
 
 
-result = CachedDataset.from_cache_sources(
+runtime = DatasetRuntime(num_workers=4)
+result = runtime.from_cache_sources(
     Images(),
     Path("cache"),
-    num_workers=4,
     reader_config=ReaderConfig(
         seed=42,
         prefetch_size=64,
@@ -87,7 +87,7 @@ for sample in dataset:
     label = sample.metadata["label"]
 ```
 
-`CachedDataset.from_cache_sources` creates missing caches, reuses existing cache directories, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs. Existing cache checksum validation is opt-in with `validate_cache=True`; by default DatasetRT avoids hashing every payload shard during restart.
+`DatasetRuntime` creates exactly the requested number of Rust worker threads once and reuses them for cache loading, reading, and writing. `runtime.from_cache_sources` creates missing caches, reuses existing cache directories, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs. Existing cache checksum validation is opt-in with `validate_cache=True`; by default DatasetRT avoids hashing every payload shard during restart.
 
 ## PyTorch
 
@@ -132,10 +132,10 @@ Rust validates that every physical `(cache_id, sample_id)` appears exactly once 
 ## Multiple Sources
 
 ```python
-result = CachedDataset.from_cache_sources(
+large_runtime = DatasetRuntime(num_workers=8)
+result = large_runtime.from_cache_sources(
     [TrainImages(), SyntheticImages(), HardNegatives()],
     Path("cache"),
-    num_workers=8,
     reader_config=ReaderConfig(seed=123),
     writer_config=WriterConfig(prefetch_size=128, show_progress=False),
 )

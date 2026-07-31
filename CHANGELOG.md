@@ -4,9 +4,25 @@ All notable changes to DatasetRT are documented here.
 
 ## 0.2.3 - 2026-07-31
 
+### Added
+
+- Added `DatasetRuntime(num_workers=...)` as the explicit owner of one fixed, reusable Rust worker pool.
+
+### Changed
+
+- Moved cache writing, cache loading, and source-to-dataset construction to `DatasetRuntime` methods so `num_workers` is configured exactly once.
+- Kept finite per-operation task and result windows bounded by the runtime worker count and each operation's `prefetch_size`.
+- Kept loaded datasets bound to their runtime pool for all subsequent sample reads.
+
 ### Fixed
 
-- Reused an initialized global worker pool without rejecting later reader or writer operations based on their operation-local `num_workers` limit.
+- Removed the contradictory global-pool worker-count validation that could reject an operation even when both counts were equal.
+
+### Removed
+
+- Removed hidden process-global worker-pool state and implicit first-call initialization.
+- Removed operation-level `num_workers` arguments, the public `write_cache` function, direct `CachedDataset` construction, and `CachedDataset.from_cache_sources`.
+- Removed deprecated `weight_table` and `set_weight_table` compatibility aliases.
 
 ## 0.2.2 - 2026-07-31
 

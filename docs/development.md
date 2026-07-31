@@ -36,7 +36,7 @@ Use the benchmark smoke script to verify the recommended factory path and get ro
 just smoke
 ```
 
-The script writes a temporary synthetic cache through `CachedDataset.from_cache_sources`, reads it back in physical order, and prints JSON.
+The script writes a temporary synthetic cache through `DatasetRuntime.from_cache_sources`, reads it back in physical order, and prints JSON.
 
 ## Design Rules
 

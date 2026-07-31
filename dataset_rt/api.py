@@ -7,19 +7,15 @@ or rows into familiar Python objects.
 
 from __future__ import annotations
 
-import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from functools import wraps
+from collections.abc import Iterator, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Literal,
     NamedTuple,
-    ParamSpec,
     Protocol,
     TypeAlias,
-    TypeVar,
     cast,
 )
 
@@ -27,28 +23,11 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
+from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
 from dataset_rt._dataset_rt import write_cache as _write_cache
 
 if TYPE_CHECKING:
     from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
-
-def _deprecated(message: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
-    """Decorate compatibility APIs so callers get a runtime migration warning."""
-
-    def decorate(function: Callable[_P, _R]) -> Callable[_P, _R]:
-        @wraps(function)
-        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-            warnings.warn(message, DeprecationWarning, stacklevel=2)
-            return function(*args, **kwargs)
-
-        return wrapper
-
-    return decorate
-
 
 MetadataValue: TypeAlias = bool | int | float | str
 """Primitive metadata value accepted by the Rust cache writer."""
@@ -176,7 +155,7 @@ class CachedSample(NamedTuple):
     """Metadata row associated with this physical sample."""
 
     cache_id: int
-    """Position of the source cache in the `CachedDataset` constructor."""
+    """Position of the source cache passed to `DatasetRuntime.cached_dataset`."""
 
     sample_id: int
     """Physical sample row within the source cache."""
@@ -203,7 +182,7 @@ class CacheWriteError(NamedTuple):
 
 
 CacheWriteResult: TypeAlias = CacheWriteSuccess | CacheWriteError
-"""Per-source cache write outcome returned by `write_cache`."""
+"""Per-source cache write outcome returned by `DatasetRuntime.write_cache`."""
 
 
 class CacheSourcesDatasetSuccess(NamedTuple):
@@ -227,7 +206,7 @@ class CacheSourcesDatasetError(NamedTuple):
 
 
 CacheSourcesDatasetResult: TypeAlias = CacheSourcesDatasetSuccess | CacheSourcesDatasetError
-"""Best-effort result returned by `CachedDataset.from_cache_sources`."""
+"""Best-effort result returned by `DatasetRuntime.from_cache_sources`."""
 
 
 class SizedTorchIterableDataset(Protocol):
@@ -255,39 +234,6 @@ class CacheSource(Protocol):
         iterator and owns bounded prefetching, worker threads, and commits.
         """
         ...
-
-
-def write_cache(
-    sources: CacheSource | list[CacheSource],
-    path: str | Path,
-    *,
-    num_workers: int,
-    writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
-) -> list[CacheWriteResult]:
-    """Write one or more immutable caches below `path`.
-
-    Args:
-        sources: A single `CacheSource` or a list of sources.
-        path: Base cache directory. Rust creates one `name` cache
-            directory per source below this directory.
-        num_workers: Fixed process-wide Rust worker count.
-        writer_config: Writer behavior owned and validated by Rust.
-
-    Returns:
-        Per-source success or error results in source order.
-
-    Raises:
-        ValueError: If Rust rejects batch-level configuration or duplicate
-            generated cache paths before writing starts.
-    """
-    results = _write_cache(
-        sources,
-        str(path),
-        num_workers,
-        writer_config,
-        False,
-    )
-    return [_cache_write_result(result) for result in results]
 
 
 def _cache_write_result(result: _RawCacheWriteResult) -> CacheWriteResult:
@@ -330,51 +276,62 @@ def _format_cache_sources_dataset_error(results: Sequence[CacheWriteResult]) -> 
     return f"no caches were written: {details}"
 
 
-class CachedDataset:
-    """Synchronous dataset wrapper over Rust-owned cache state."""
+class DatasetRuntime:
+    """Own one explicitly sized Rust worker pool shared by dataset operations."""
 
-    def __init__(
+    __slots__ = ("_inner", "_num_workers")
+
+    def __init__(self, *, num_workers: int) -> None:
+        """Create exactly `num_workers` reusable Rust worker threads."""
+        self._num_workers = num_workers
+        self._inner = _RustDatasetRuntime(num_workers)
+
+    @property
+    def num_workers(self) -> int:
+        """Return the fixed worker count selected when this runtime was created."""
+        return self._num_workers
+
+    def write_cache(
         self,
-        paths: Sequence[str | Path],
-        *,
-        num_workers: int,
-        reader_config: ReaderConfig,
-    ) -> None:
-        """Load immutable caches and initialize deterministic sampling state."""
-        self.cache_paths = [Path(path) for path in paths]
-        self.reader_config = reader_config
-        self._inner = _RustCachedDataset(
-            [str(path) for path in self.cache_paths],
-            reader_config.seed,
-            reader_config.prefetch_size,
-            num_workers,
-            reader_config.shuffle,
-            reader_config.validate_cache,
-        )
-
-    @classmethod
-    def from_cache_sources(
-        cls,
         sources: CacheSource | list[CacheSource],
         path: str | Path,
         *,
-        num_workers: int,
+        writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
+    ) -> list[CacheWriteResult]:
+        """Write one or more immutable caches using this runtime's pool."""
+        results = _write_cache(
+            self._inner,
+            sources,
+            str(path),
+            writer_config,
+            False,
+        )
+        return [_cache_write_result(result) for result in results]
+
+    def cached_dataset(
+        self,
+        paths: Sequence[str | Path],
+        *,
+        reader_config: ReaderConfig,
+    ) -> CachedDataset:
+        """Load immutable caches and bind future reads to this runtime's pool."""
+        return CachedDataset._load(self._inner, paths, reader_config)
+
+    def from_cache_sources(
+        self,
+        sources: CacheSource | list[CacheSource],
+        path: str | Path,
+        *,
         reader_config: ReaderConfig,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
     ) -> CacheSourcesDatasetResult:
-        """Create missing caches from sources, reuse valid existing caches, and load them.
-
-        Rust owns cache path generation, existence checks, validation of existing
-        caches, and writes for missing caches. Invalid existing caches raise
-        instead of being silently overwritten. Per-source write failures are
-        returned in the result instead of being raised.
-        """
+        """Create or reuse source caches, then load all successful caches."""
         results = [
             _cache_write_result(result)
             for result in _write_cache(
+                self._inner,
                 sources,
                 str(path),
-                num_workers,
                 writer_config,
                 True,
             )
@@ -382,8 +339,41 @@ class CachedDataset:
         cache_paths = _successful_cache_paths(results)
         if not cache_paths:
             return _cache_sources_dataset_error(results)
-        dataset = cls(cache_paths, num_workers=num_workers, reader_config=reader_config)
+        dataset = self.cached_dataset(cache_paths, reader_config=reader_config)
         return CacheSourcesDatasetSuccess(dataset, results)
+
+
+class CachedDataset:
+    """Synchronous dataset wrapper over Rust-owned cache state."""
+
+    cache_paths: list[Path]
+    reader_config: ReaderConfig
+    _inner: _RustCachedDataset
+
+    def __init__(self) -> None:
+        """Reject direct construction because every dataset requires a runtime."""
+        raise TypeError("use DatasetRuntime.cached_dataset() to create a CachedDataset")
+
+    @classmethod
+    def _load(
+        cls,
+        runtime: _RustDatasetRuntime,
+        paths: Sequence[str | Path],
+        reader_config: ReaderConfig,
+    ) -> CachedDataset:
+        """Construct a dataset bound to an already-created native runtime."""
+        dataset = cls.__new__(cls)
+        dataset.cache_paths = [Path(path) for path in paths]
+        dataset.reader_config = reader_config
+        dataset._inner = _RustCachedDataset(
+            runtime,
+            [str(path) for path in dataset.cache_paths],
+            reader_config.seed,
+            reader_config.prefetch_size,
+            reader_config.shuffle,
+            reader_config.validate_cache,
+        )
+        return dataset
 
     def __iter__(self) -> Iterator[CachedSample]:
         """Create an iterator from the current Rust-side sampling state.
@@ -450,13 +440,3 @@ class CachedDataset:
         if buffer is None:
             raise RuntimeError("Polars did not return an in-memory IPC buffer")
         self._inner.set_samples_metadata_ipc(buffer.getvalue())
-
-    @_deprecated("CachedDataset.weight_table() is deprecated; use samples_metadata().")
-    def weight_table(self) -> pl.DataFrame:
-        """Return the editable samples metadata table for compatibility callers."""
-        return self.samples_metadata()
-
-    @_deprecated("CachedDataset.set_weight_table() is deprecated; use set_samples_metadata().")
-    def set_weight_table(self, weights: pl.DataFrame) -> None:
-        """Replace sampling weights from a samples metadata table for compatibility callers."""
-        self.set_samples_metadata(weights)

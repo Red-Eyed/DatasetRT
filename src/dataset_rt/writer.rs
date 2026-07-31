@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -14,7 +15,7 @@ use crate::types::{
     CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumWorkers,
     PrefetchSize, ShardCompression,
 };
-use crate::worker_pool;
+use crate::worker_pool::WorkerPool;
 
 #[path = "writer/progress.rs"]
 mod progress;
@@ -31,6 +32,7 @@ use progress::WriteProgress;
 
 #[derive(Clone)]
 struct WriterConfig {
+    pool: Arc<WorkerPool>,
     max_shard_bytes: MaxShardBytes,
     prefetch_size: PrefetchSize,
     num_workers: NumWorkers,
@@ -59,15 +61,14 @@ struct SerializedSample {
 type CacheWriteRecord = (String, String, String);
 
 pub fn write_cache(
+    pool: Arc<WorkerPool>,
+    num_workers: NumWorkers,
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
-    num_workers: usize,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> CacheResult<Vec<(String, String, String)>> {
-    let num_workers = NumWorkers::new(num_workers)?;
-    worker_pool::initialize(num_workers.as_usize())?;
-    let config = extract_writer_config(&writer_config, num_workers, reuse_existing)?;
+    let config = extract_writer_config(&writer_config, pool, num_workers, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
     let profiler = WriterProfiler::new(&config.profiler);
 
@@ -222,6 +223,7 @@ fn write_with_pipeline(
 ) -> CacheResult<()> {
     let progress = WriteProgress::new(config.show_progress, source_name, multi_progress);
     let mut pipeline = SampleWritePipeline::new(
+        config.pool.clone(),
         builder,
         progress,
         source_name.to_string(),
@@ -318,6 +320,7 @@ fn record_finish_stats(profiler: &WriterProfiler, source_name: &str, stats: Fini
 }
 
 struct SampleWritePipeline {
+    pool: Arc<WorkerPool>,
     builder: CacheBuilder,
     result_sender: Sender<CacheResult<SerializedSample>>,
     result_receiver: Receiver<CacheResult<SerializedSample>>,
@@ -331,8 +334,9 @@ struct SampleWritePipeline {
 }
 
 impl SampleWritePipeline {
-    /// Create a bounded per-write task window over the process-wide worker pool.
+    /// Create a bounded per-write task window over the runtime-owned worker pool.
     fn new(
+        pool: Arc<WorkerPool>,
         builder: CacheBuilder,
         progress: WriteProgress,
         source_name: String,
@@ -343,6 +347,7 @@ impl SampleWritePipeline {
         let parallelism = prefetch_size.as_usize().min(num_workers.as_usize());
         let (result_sender, result_receiver) = bounded(parallelism);
         Self {
+            pool,
             builder,
             result_sender,
             result_receiver,
@@ -362,7 +367,7 @@ impl SampleWritePipeline {
             self.complete_one()?;
         }
         let result_sender = self.result_sender.clone();
-        worker_pool::submit(result_sender, move || {
+        self.pool.submit(result_sender, move || {
             Ok(SerializedSample {
                 sequence: queued.sequence,
                 input: queued.input,
@@ -444,6 +449,7 @@ fn commit_ready_samples(
 
 fn extract_writer_config(
     value: &Bound<'_, PyAny>,
+    pool: Arc<WorkerPool>,
     num_workers: NumWorkers,
     reuse_existing: bool,
 ) -> CacheResult<WriterConfig> {
@@ -470,6 +476,7 @@ fn extract_writer_config(
         .map_err(py_error)?;
 
     Ok(WriterConfig {
+        pool,
         max_shard_bytes: MaxShardBytes::new(max_shard_bytes)?,
         prefetch_size: PrefetchSize::new(prefetch_size)?,
         num_workers,

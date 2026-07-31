@@ -5,6 +5,7 @@ use crossbeam_channel::{bounded, Sender};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
+use crate::dataset_runtime::PyDatasetRuntime;
 use crate::runtime::{EpochPlan, RuntimeIterator};
 use crate::samples_metadata::{
     build_samples_metadata_ipc, extract_samples_metadata_ipc, WeightState,
@@ -14,7 +15,7 @@ use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
-use crate::worker_pool;
+use crate::worker_pool::WorkerPool;
 
 #[pyclass(name = "CachedDataset")]
 pub struct PyCachedDataset {
@@ -22,6 +23,7 @@ pub struct PyCachedDataset {
 }
 
 struct DatasetState {
+    pool: Arc<WorkerPool>,
     caches: Arc<Vec<LoadedCache>>,
     cache_offsets: Arc<Vec<usize>>,
     total_samples: usize,
@@ -42,18 +44,19 @@ struct MutableDatasetState {
 impl PyCachedDataset {
     #[new]
     fn new(
+        runtime: PyRef<'_, PyDatasetRuntime>,
         paths: Vec<String>,
         seed: u64,
         prefetch_size: usize,
-        num_workers: usize,
         shuffle: bool,
         validate_cache: bool,
     ) -> PyResult<Self> {
         DatasetState::load(
+            runtime.pool(),
+            runtime.num_workers(),
             paths,
             seed,
             prefetch_size,
-            num_workers,
             shuffle,
             validate_cache,
         )
@@ -101,24 +104,15 @@ impl PyCachedDataset {
         guard.weights = WeightState::Custom(weights);
         Ok(())
     }
-
-    /// Compatibility alias for callers using the previous native method name.
-    fn weight_table_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        self.samples_metadata_ipc(py)
-    }
-
-    /// Compatibility alias for callers using the previous native method name.
-    fn set_weight_table_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
-        self.set_samples_metadata_ipc(ipc)
-    }
 }
 
 impl DatasetState {
     fn load(
+        pool: Arc<WorkerPool>,
+        num_workers: NumWorkers,
         paths: Vec<String>,
         seed: u64,
         prefetch_size: usize,
-        num_workers: usize,
         shuffle: bool,
         validate_cache: bool,
     ) -> CacheResult<Self> {
@@ -129,9 +123,7 @@ impl DatasetState {
         }
 
         let prefetch_size = PrefetchSize::new(prefetch_size)?;
-        let num_workers = NumWorkers::new(num_workers)?;
-        worker_pool::initialize(num_workers.as_usize())?;
-        let caches = load_caches(paths, validate_cache, num_workers)?;
+        let caches = load_caches(pool.clone(), paths, validate_cache, num_workers)?;
         let schema = common_schema(&caches)?;
         let (cache_offsets, total_samples) = collect_cache_offsets(&caches)?;
         if total_samples == 0 {
@@ -141,6 +133,7 @@ impl DatasetState {
         }
 
         Ok(Self {
+            pool,
             caches: Arc::new(caches),
             cache_offsets: Arc::new(cache_offsets),
             total_samples,
@@ -165,6 +158,7 @@ impl DatasetState {
             }
         };
         RuntimeIterator::start(
+            self.pool.clone(),
             self.caches.clone(),
             self.cache_offsets.clone(),
             plan,
@@ -257,6 +251,7 @@ struct CacheLoadResult {
 
 /// Load cache directories with bounded concurrency while preserving constructor path order.
 fn load_caches(
+    pool: Arc<WorkerPool>,
     paths: Vec<String>,
     validate_cache: bool,
     num_workers: NumWorkers,
@@ -268,7 +263,7 @@ fn load_caches(
     let mut scheduled = 0_usize;
 
     while scheduled < parallelism {
-        submit_next_cache_load(&mut paths, &result_sender, validate_cache)?;
+        submit_next_cache_load(&pool, &mut paths, &result_sender, validate_cache)?;
         scheduled += 1;
     }
 
@@ -280,7 +275,7 @@ fn load_caches(
                 .map_err(|_| CacheError::WorkerFailed)??,
         );
         if scheduled < total {
-            submit_next_cache_load(&mut paths, &result_sender, validate_cache)?;
+            submit_next_cache_load(&pool, &mut paths, &result_sender, validate_cache)?;
             scheduled += 1;
         }
     }
@@ -290,6 +285,7 @@ fn load_caches(
 
 /// Submit one cache load while retaining its constructor identity position.
 fn submit_next_cache_load(
+    pool: &WorkerPool,
     paths: &mut impl Iterator<Item = (usize, String)>,
     result_sender: &Sender<CacheResult<CacheLoadResult>>,
     validate_cache: bool,
@@ -299,7 +295,7 @@ fn submit_next_cache_load(
     };
     let path = PathBuf::from(path);
     let result_sender = result_sender.clone();
-    worker_pool::submit(result_sender, move || {
+    pool.submit(result_sender, move || {
         let cache = load_cache(path, validate_cache)?;
         Ok(CacheLoadResult { position, cache })
     })
