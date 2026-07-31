@@ -130,7 +130,7 @@ impl DatasetState {
 
         let prefetch_size = PrefetchSize::new(prefetch_size)?;
         let num_workers = NumWorkers::new(num_workers)?;
-        worker_pool::configure(num_workers.as_usize())?;
+        worker_pool::initialize(num_workers.as_usize())?;
         let caches = load_caches(paths, validate_cache, num_workers)?;
         let schema = common_schema(&caches)?;
         let (cache_offsets, total_samples) = collect_cache_offsets(&caches)?;

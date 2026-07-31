@@ -2,7 +2,7 @@
 
 DatasetRT exposes a synchronous Python API backed by native Rust execution.
 
-No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. The first reader or writer operation initializes one fixed process-wide Rust worker pool from its required top-level `num_workers` argument, and DatasetRT reuses those threads for cache loading, reading, and writer jobs. Every later operation must pass the same value; hardware parallelism is never selected implicitly.
+No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. The first reader or writer operation initializes one fixed process-wide Rust worker pool from its required top-level `num_workers` argument, and DatasetRT reuses those threads for cache loading, reading, and writer jobs. Later `num_workers` values bound their operation's in-flight work without resizing the process pool; hardware parallelism is never selected implicitly.
 
 ## Reader Pipeline
 

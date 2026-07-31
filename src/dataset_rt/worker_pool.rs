@@ -12,7 +12,6 @@ const QUEUED_JOBS_PER_WORKER: usize = 4;
 
 struct WorkerPool {
     sender: Sender<Job>,
-    worker_count: usize,
 }
 
 impl WorkerPool {
@@ -25,26 +24,19 @@ impl WorkerPool {
             spawn_worker(worker_index, receiver.clone()).map_err(|error| error.to_string())?;
         }
 
-        Ok(Self {
-            sender,
-            worker_count,
-        })
+        Ok(Self { sender })
     }
 }
 
 static GLOBAL_POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
 
-/// Configure the immutable process-wide thread count and reject inconsistent calls.
-pub fn configure(num_workers: usize) -> CacheResult<()> {
+/// Initialize the process-wide pool once and reuse it for every later operation.
+pub fn initialize(num_workers: usize) -> CacheResult<()> {
     let configured = GLOBAL_POOL.get_or_init(|| WorkerPool::new(num_workers));
-    let pool = configured.as_ref().map_err(|_| CacheError::WorkerFailed)?;
-    if pool.worker_count != num_workers {
-        return Err(CacheError::InvalidInput(format!(
-            "global worker pool uses {} workers; this operation requested {num_workers}",
-            pool.worker_count
-        )));
-    }
-    Ok(())
+    configured
+        .as_ref()
+        .map(|_| ())
+        .map_err(|_| CacheError::WorkerFailed)
 }
 
 /// Submit one finite job and guarantee one result even if its implementation unwinds.
@@ -84,12 +76,12 @@ fn spawn_worker(worker_index: usize, receiver: Receiver<Job>) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::configure;
-    use crate::types::CacheError;
+    use super::initialize;
 
     #[test]
-    fn global_pool_rejects_inconsistent_worker_counts() {
-        assert!(configure(2).is_ok());
-        assert!(matches!(configure(3), Err(CacheError::InvalidInput(_))));
+    fn global_pool_reuses_the_first_worker_set() {
+        assert!(initialize(2).is_ok());
+        assert!(initialize(2).is_ok());
+        assert!(initialize(3).is_ok());
     }
 }

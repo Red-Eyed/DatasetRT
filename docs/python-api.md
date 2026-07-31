@@ -70,7 +70,7 @@ for result in results:
 
 `prefetch_size` bounds the writer's in-flight task and result window. If Python iteration is faster than writing, Rust applies backpressure when that window reaches `min(prefetch_size, num_workers)`. For multi-source writes, the window may span source boundaries while ordered commit preserves deterministic output.
 
-The top-level `num_workers` argument fixes DatasetRT's process-wide Rust worker count on the first operation and limits that operation's active jobs. Every later reader or writer call must pass the same value.
+The first top-level `num_workers` value fixes DatasetRT's process-wide Rust worker count. On later calls, `num_workers` limits that operation's active jobs without resizing the existing pool.
 
 `show_progress` controls Rust-owned write progress. It is enabled by default and reports committed samples/s and MB/s for the active source. For multi-source writes, it also reports completed sources with an ETA based on wall time and completed source count. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
 

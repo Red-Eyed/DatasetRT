@@ -66,7 +66,7 @@ pub fn write_cache(
     reuse_existing: bool,
 ) -> CacheResult<Vec<(String, String, String)>> {
     let num_workers = NumWorkers::new(num_workers)?;
-    worker_pool::configure(num_workers.as_usize())?;
+    worker_pool::initialize(num_workers.as_usize())?;
     let config = extract_writer_config(&writer_config, num_workers, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
     let profiler = WriterProfiler::new(&config.profiler);

@@ -2,6 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.2.3 - 2026-07-31
+
+### Fixed
+
+- Reused an initialized global worker pool without rejecting later reader or writer operations based on their operation-local `num_workers` limit.
+
 ## 0.2.2 - 2026-07-31
 
 ### Changed
