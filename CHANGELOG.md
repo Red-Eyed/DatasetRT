@@ -2,6 +2,21 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.2.2 - 2026-07-31
+
+### Changed
+
+- Reused one explicitly sized process-wide Rust worker pool for cache loading, sample reads, and writer jobs.
+- Made `num_workers` a required top-level argument to `write_cache`, `CachedDataset`, and `CachedDataset.from_cache_sources`.
+- Loaded cache directories concurrently with bounded work while preserving constructor order and stable `cache_id` values.
+- Kept per-operation task and result windows bounded by `num_workers` and `prefetch_size`.
+- Preserved deterministic read ordering, iterator cancellation, ordered writer commits, and interruption cleanup.
+
+### Removed
+
+- Removed per-operation scheduler, reader, cache-loader, and writer thread creation.
+- Removed worker-count fields and legacy aliases from `ReaderConfig` and `WriterConfig`.
+
 ## 0.2.0 - 2026-07-30
 
 ### Added
