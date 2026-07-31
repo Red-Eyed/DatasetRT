@@ -28,6 +28,7 @@ class CachedDataset:
 def write_cache(
     sources: object,
     base_cache_dir: str,
+    num_workers: int,
     writer_config: object,
     reuse_existing: bool,
 ) -> list[CacheWriteRecord]: ...

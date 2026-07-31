@@ -32,16 +32,21 @@ A `CacheSource` is a synchronous Python iterable. Python does not create threads
 results = write_cache(
     source,
     base_cache_dir,
+    num_workers=4,
     writer_config=WriterConfig(
         prefetch_size=64,
-        num_threads=4,
         max_shard_bytes=...,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
         show_progress=True,
         validate_cache=False,
     ),
 )
-results = write_cache([source_a, source_b], base_cache_dir, writer_config=WriterConfig(...))
+results = write_cache(
+    [source_a, source_b],
+    base_cache_dir,
+    num_workers=4,
+    writer_config=WriterConfig(...),
+)
 ```
 
 `write_cache` creates immutable caches and returns one result per source.
@@ -63,9 +68,9 @@ for result in results:
             print(source_name, message)
 ```
 
-`prefetch_size` controls the bounded Rust ingestion queue. If Python iteration is faster than writing, Rust pulls ahead until this queue is full, then applies backpressure. For multi-source writes, that queue spans source boundaries so Python ingestion can continue into later sources while earlier sources are being committed and published.
+`prefetch_size` bounds the writer's in-flight task and result window. If Python iteration is faster than writing, Rust applies backpressure when that window reaches `min(prefetch_size, num_workers)`. For multi-source writes, the window may span source boundaries while ordered commit preserves deterministic output.
 
-`num_threads` controls the fixed Rust serialization worker pool.
+The top-level `num_workers` argument fixes DatasetRT's process-wide Rust worker count on the first operation and limits that operation's active jobs. Every later reader or writer call must pass the same value.
 
 `show_progress` controls Rust-owned write progress. It is enabled by default and reports committed samples/s and MB/s for the active source. For multi-source writes, it also reports completed sources with an ETA based on wall time and completed source count. Set it to `False` for quiet tests, background jobs, or logging systems that do not want terminal progress output.
 
@@ -82,7 +87,6 @@ class ShardCompression(BaseModel):
 
 class WriterConfig(BaseModel):
     prefetch_size: int = 64
-    num_threads: int = 4
     max_shard_bytes: int = 64 * 1024 * 1024
     shard_compression: ShardCompression = ShardCompression()
     show_progress: bool = True
@@ -105,7 +109,6 @@ Rules:
 - Every target path must not already contain a completed cache.
 - Source names used as subdirectories must be plain path segments.
 - `prefetch_size` must be greater than zero.
-- `num_threads` must be greater than zero.
 - `validate_cache=True` verifies existing cache checksums before reuse.
 - The source must yield at least one sample.
 - Payload data must be bytes-like.
@@ -117,10 +120,10 @@ Rules:
 ```python
 dataset = CachedDataset(
     [path],
+    num_workers=4,
     reader_config=ReaderConfig(
         seed=42,
         prefetch_size=64,
-        num_workers=4,
         shuffle=True,
         validate_cache=False,
     ),
@@ -135,7 +138,6 @@ Reader configuration is a frozen pydantic model:
 class ReaderConfig(BaseModel):
     seed: int
     prefetch_size: int = 64
-    num_workers: int = 4
     shuffle: bool = True
     validate_cache: bool = False
 ```
@@ -147,7 +149,7 @@ Rules:
 - Dataset state is owned by Rust.
 - Multiple readers may load the same cache concurrently.
 - `prefetch_size` controls the bounded Rust reader queue.
-- `num_workers` controls the fixed Rust sample-loading worker pool.
+- The top-level `num_workers` argument limits active read jobs and must match the process pool size.
 - `validate_cache=True` verifies metadata, index, and shard checksums during dataset construction.
 - With `shuffle=True`, each Python iterator snapshots the current weight vector.
 - With `shuffle=False`, samples are emitted once in physical cache order.
@@ -159,6 +161,7 @@ Rules:
 result = CachedDataset.from_cache_sources(
     [source_a, source_b],
     base_cache_dir,
+    num_workers=4,
     reader_config=ReaderConfig(seed=42),
     writer_config=WriterConfig(),
 )

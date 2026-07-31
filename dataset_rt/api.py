@@ -12,7 +12,16 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import wraps
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple, ParamSpec, Protocol, TypeAlias, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NamedTuple,
+    ParamSpec,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
@@ -101,13 +110,10 @@ DEFAULT_WRITER_PROFILER_CONFIG = WriterProfilerConfig()
 class WriterConfig(BaseModel):
     """Configuration for Rust-owned cache writing."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     prefetch_size: int = Field(default=64, gt=0)
-    """Capacity of Rust's bounded ingestion queue."""
-
-    num_threads: int = Field(default=4, gt=0)
-    """Number of Rust serialization worker threads."""
+    """Maximum buffered writer task/result capacity."""
 
     max_shard_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     """Target maximum shard size before rotating to a new shard."""
@@ -128,16 +134,13 @@ class WriterConfig(BaseModel):
 class ReaderConfig(BaseModel):
     """Configuration for Rust-owned dataset reading and sampling."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     seed: int
     """Seed used for deterministic epoch sampling."""
 
     prefetch_size: int = Field(default=64, gt=0)
     """Capacity of Rust's bounded reader result queue."""
-
-    num_workers: int = Field(default=4, gt=0)
-    """Number of Rust worker threads used to load samples."""
 
     shuffle: bool = True
     """Whether each epoch uses deterministic weighted shuffling."""
@@ -258,6 +261,7 @@ def write_cache(
     sources: CacheSource | list[CacheSource],
     path: str | Path,
     *,
+    num_workers: int,
     writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
 ) -> list[CacheWriteResult]:
     """Write one or more immutable caches below `path`.
@@ -266,6 +270,7 @@ def write_cache(
         sources: A single `CacheSource` or a list of sources.
         path: Base cache directory. Rust creates one `name` cache
             directory per source below this directory.
+        num_workers: Fixed process-wide Rust worker count.
         writer_config: Writer behavior owned and validated by Rust.
 
     Returns:
@@ -278,6 +283,7 @@ def write_cache(
     results = _write_cache(
         sources,
         str(path),
+        num_workers,
         writer_config,
         False,
     )
@@ -327,7 +333,13 @@ def _format_cache_sources_dataset_error(results: Sequence[CacheWriteResult]) -> 
 class CachedDataset:
     """Synchronous dataset wrapper over Rust-owned cache state."""
 
-    def __init__(self, paths: Sequence[str | Path], *, reader_config: ReaderConfig) -> None:
+    def __init__(
+        self,
+        paths: Sequence[str | Path],
+        *,
+        num_workers: int,
+        reader_config: ReaderConfig,
+    ) -> None:
         """Load immutable caches and initialize deterministic sampling state."""
         self.cache_paths = [Path(path) for path in paths]
         self.reader_config = reader_config
@@ -335,7 +347,7 @@ class CachedDataset:
             [str(path) for path in self.cache_paths],
             reader_config.seed,
             reader_config.prefetch_size,
-            reader_config.num_workers,
+            num_workers,
             reader_config.shuffle,
             reader_config.validate_cache,
         )
@@ -346,6 +358,7 @@ class CachedDataset:
         sources: CacheSource | list[CacheSource],
         path: str | Path,
         *,
+        num_workers: int,
         reader_config: ReaderConfig,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
     ) -> CacheSourcesDatasetResult:
@@ -361,6 +374,7 @@ class CachedDataset:
             for result in _write_cache(
                 sources,
                 str(path),
+                num_workers,
                 writer_config,
                 True,
             )
@@ -368,7 +382,7 @@ class CachedDataset:
         cache_paths = _successful_cache_paths(results)
         if not cache_paths:
             return _cache_sources_dataset_error(results)
-        dataset = cls(cache_paths, reader_config=reader_config)
+        dataset = cls(cache_paths, num_workers=num_workers, reader_config=reader_config)
         return CacheSourcesDatasetSuccess(dataset, results)
 
     def __iter__(self) -> Iterator[CachedSample]:

@@ -37,7 +37,7 @@ def tensor_from_bytes(data: bytes):
 
 
 def test_dataset_rt_streams_into_pytorch_iterable_dataset(tmp_path: Path) -> None:
-    results = write_cache(TensorSource(), tmp_path / "cache")
+    results = write_cache(TensorSource(), tmp_path / "cache", num_workers=4)
     match results[0]:
         case CacheWriteSuccess(path=path):
             cache_paths = [path]
@@ -45,7 +45,8 @@ def test_dataset_rt_streams_into_pytorch_iterable_dataset(tmp_path: Path) -> Non
             raise AssertionError(result)
     dataset = CachedDataset(
         cache_paths,
-        reader_config=ReaderConfig(seed=3, prefetch_size=2, num_workers=2, shuffle=False),
+        num_workers=4,
+        reader_config=ReaderConfig(seed=3, prefetch_size=2, shuffle=False),
     )
     torch_dataset = dataset.to_torch_iterable_dataset()
     loader = torch.utils.data.DataLoader(torch_dataset, batch_size=None)

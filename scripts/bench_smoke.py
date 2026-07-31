@@ -6,7 +6,13 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from dataset_rt import CachedDataset, CacheInput, ReaderConfig, WriterConfig
+from dataset_rt import (
+    CachedDataset,
+    CacheInput,
+    CacheSourcesDatasetSuccess,
+    ReaderConfig,
+    WriterConfig,
+)
 
 SAMPLE_COUNT = 10_000
 PAYLOAD_BYTES = 1024
@@ -28,12 +34,18 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="dataset_rt_bench_") as temp_dir:
         base_cache_dir = Path(temp_dir) / "cache"
         write_started = time.perf_counter()
-        dataset = CachedDataset.from_cache_sources(
+        result = CachedDataset.from_cache_sources(
             SyntheticSource(),
             base_cache_dir,
-            reader_config=ReaderConfig(seed=42, prefetch_size=128, num_workers=4, shuffle=False),
-            writer_config=WriterConfig(prefetch_size=128, num_threads=4),
+            num_workers=4,
+            reader_config=ReaderConfig(seed=42, prefetch_size=128, shuffle=False),
+            writer_config=WriterConfig(prefetch_size=128),
         )
+        match result:
+            case CacheSourcesDatasetSuccess(dataset=dataset):
+                pass
+            case error:
+                raise RuntimeError(error)
         write_seconds = time.perf_counter() - write_started
 
         read_started = time.perf_counter()

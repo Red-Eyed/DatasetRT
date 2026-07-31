@@ -1,23 +1,24 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 
-use crossbeam_channel::{bounded, select, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 use crate::sampling::EpochSampler;
 use crate::storage::{LoadedCache, ShardReaderCache};
 use crate::types::{
     CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
 };
+use crate::worker_pool;
 
-struct PlannedTask {
-    sequence: usize,
-    physical_index: usize,
+thread_local! {
+    static SHARD_READERS: RefCell<ShardReaderCache> = RefCell::new(ShardReaderCache::new());
 }
 
 struct LoadedResult {
     sequence: usize,
-    result: CacheResult<LoadedSample>,
+    result: LoadedSample,
 }
 
 pub enum EpochPlan {
@@ -33,13 +34,27 @@ impl EpochPlan {
             Self::Shuffled(sampler) => sampler.len(),
         }
     }
+
+    /// Return the next physical sample without materializing an epoch-wide task list.
+    fn next_physical_index(&mut self, sequence: usize) -> Option<usize> {
+        match self {
+            Self::PhysicalOrder { len } => (sequence < *len).then_some(sequence),
+            Self::Shuffled(sampler) => sampler.next(),
+        }
+    }
 }
 
 pub struct RuntimeIterator {
-    output: Receiver<LoadedResult>,
-    cancel: Option<Sender<()>>,
-    handles: Vec<thread::JoinHandle<()>>,
-    pending: BTreeMap<usize, CacheResult<LoadedSample>>,
+    caches: Arc<Vec<LoadedCache>>,
+    cache_offsets: Arc<Vec<usize>>,
+    plan: EpochPlan,
+    output_sender: Sender<CacheResult<LoadedResult>>,
+    output: Receiver<CacheResult<LoadedResult>>,
+    cancelled: Arc<AtomicBool>,
+    pending: BTreeMap<usize, LoadedSample>,
+    parallelism: usize,
+    scheduled: usize,
+    in_flight: usize,
     next_sequence: usize,
     emitted: usize,
     total: usize,
@@ -52,32 +67,73 @@ impl RuntimeIterator {
         plan: EpochPlan,
         prefetch_size: PrefetchSize,
         num_workers: NumWorkers,
-    ) -> Self {
+    ) -> CacheResult<Self> {
         let total = plan.len();
-        let (task_sender, task_receiver) = bounded(prefetch_size.as_usize());
-        let (output_sender, output_receiver) = bounded(prefetch_size.as_usize());
-        let (cancel_sender, cancel_receiver) = bounded(1);
-        let mut handles = Vec::with_capacity(num_workers.as_usize() + 1);
-
-        handles.push(spawn_scheduler(task_sender, plan, cancel_receiver.clone()));
-        handles.extend(spawn_workers(
+        let parallelism = num_workers
+            .as_usize()
+            .min(prefetch_size.as_usize())
+            .min(total);
+        let (output_sender, output) = bounded(parallelism);
+        let mut iterator = Self {
             caches,
             cache_offsets,
-            task_receiver,
             output_sender,
-            num_workers,
-            cancel_receiver,
-        ));
-
-        Self {
-            output: output_receiver,
-            cancel: Some(cancel_sender),
-            handles,
+            output,
+            plan,
+            cancelled: Arc::new(AtomicBool::new(false)),
             pending: BTreeMap::new(),
+            parallelism,
+            scheduled: 0,
+            in_flight: 0,
             next_sequence: 0,
             emitted: 0,
             total,
+        };
+        iterator.schedule_available()?;
+        Ok(iterator)
+    }
+
+    /// Keep only the configured finite number of sample reads active for this iterator.
+    fn schedule_available(&mut self) -> CacheResult<()> {
+        while self.in_flight < self.parallelism && self.scheduled < self.total {
+            self.schedule_next()?;
         }
+        Ok(())
+    }
+
+    /// Submit one finite read job while preserving its planned output sequence.
+    fn schedule_next(&mut self) -> CacheResult<()> {
+        let sequence = self.scheduled;
+        let physical_index = self
+            .plan
+            .next_physical_index(sequence)
+            .ok_or(CacheError::WorkerFailed)?;
+        let caches = self.caches.clone();
+        let cache_offsets = self.cache_offsets.clone();
+        let output_sender = self.output_sender.clone();
+        let cancelled = self.cancelled.clone();
+
+        worker_pool::submit(output_sender, move || {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(CacheError::WorkerFailed);
+            }
+            let result = SHARD_READERS.with(|readers| {
+                load_planned_sample(
+                    caches.as_ref(),
+                    cache_offsets.as_ref(),
+                    physical_index,
+                    &mut readers.borrow_mut(),
+                )
+            })?;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(CacheError::WorkerFailed);
+            }
+            Ok(LoadedResult { sequence, result })
+        })?;
+
+        self.scheduled += 1;
+        self.in_flight += 1;
+        Ok(())
     }
 }
 
@@ -93,23 +149,40 @@ impl Iterator for RuntimeIterator {
             if let Some(result) = self.pending.remove(&self.next_sequence) {
                 self.next_sequence += 1;
                 self.emitted += 1;
-                return Some(result);
+                return Some(Ok(result));
             }
 
             let loaded = match self.output.recv() {
-                Ok(loaded) => loaded,
+                Ok(Ok(loaded)) => loaded,
+                Ok(Err(error)) => {
+                    self.emitted = self.total;
+                    self.cancelled.store(true, Ordering::Release);
+                    return Some(Err(error));
+                }
                 Err(_) => {
                     self.emitted = self.total;
+                    self.cancelled.store(true, Ordering::Release);
                     return Some(Err(CacheError::WorkerFailed));
                 }
             };
+            let Some(in_flight) = self.in_flight.checked_sub(1) else {
+                self.emitted = self.total;
+                self.cancelled.store(true, Ordering::Release);
+                return Some(Err(CacheError::WorkerFailed));
+            };
+            self.in_flight = in_flight;
+            if self.schedule_available().is_err() {
+                self.emitted = self.total;
+                self.cancelled.store(true, Ordering::Release);
+                return Some(Err(CacheError::WorkerFailed));
+            }
 
             // Read workers may finish out of order; Python observes the planned
             // sampler order, so completed future samples wait in a small buffer.
             if loaded.sequence == self.next_sequence {
                 self.next_sequence += 1;
                 self.emitted += 1;
-                return Some(loaded.result);
+                return Some(Ok(loaded.result));
             }
 
             if self
@@ -118,6 +191,7 @@ impl Iterator for RuntimeIterator {
                 .is_some()
             {
                 self.emitted = self.total;
+                self.cancelled.store(true, Ordering::Release);
                 return Some(Err(CacheError::WorkerFailed));
             }
         }
@@ -126,121 +200,8 @@ impl Iterator for RuntimeIterator {
 
 impl Drop for RuntimeIterator {
     fn drop(&mut self) {
-        let _ = self.cancel.take();
-        while let Some(handle) = self.handles.pop() {
-            let _ = handle.join();
-        }
+        self.cancelled.store(true, Ordering::Release);
     }
-}
-
-fn spawn_scheduler(
-    task_sender: Sender<PlannedTask>,
-    plan: EpochPlan,
-    cancel: Receiver<()>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || match plan {
-        EpochPlan::PhysicalOrder { len } => schedule_physical_order(task_sender, len, cancel),
-        EpochPlan::Shuffled(sampler) => schedule_shuffled_order(task_sender, *sampler, cancel),
-    })
-}
-
-/// Schedule physical-order reads directly from the range of sample indexes.
-fn schedule_physical_order(task_sender: Sender<PlannedTask>, len: usize, cancel: Receiver<()>) {
-    for physical_index in 0..len {
-        if !send_planned_task(&task_sender, physical_index, physical_index, &cancel) {
-            break;
-        }
-    }
-}
-
-/// Schedule replacement-sampled shuffled reads from the streaming epoch sampler.
-fn schedule_shuffled_order(
-    task_sender: Sender<PlannedTask>,
-    sampler: EpochSampler,
-    cancel: Receiver<()>,
-) {
-    for (sequence, physical_index) in sampler.enumerate() {
-        if !send_planned_task(&task_sender, sequence, physical_index, &cancel) {
-            break;
-        }
-    }
-}
-
-/// Send one planned task while respecting iterator cancellation.
-fn send_planned_task(
-    task_sender: &Sender<PlannedTask>,
-    sequence: usize,
-    physical_index: usize,
-    cancel: &Receiver<()>,
-) -> bool {
-    let task = PlannedTask {
-        sequence,
-        physical_index,
-    };
-    select! {
-        send(task_sender, task) -> result => result.is_ok(),
-        recv(cancel) -> _ => false,
-    }
-}
-
-fn spawn_workers(
-    caches: Arc<Vec<LoadedCache>>,
-    cache_offsets: Arc<Vec<usize>>,
-    task_receiver: Receiver<PlannedTask>,
-    output_sender: Sender<LoadedResult>,
-    num_workers: NumWorkers,
-    cancel: Receiver<()>,
-) -> Vec<thread::JoinHandle<()>> {
-    (0..num_workers.as_usize())
-        .map(|_| {
-            spawn_worker(
-                caches.clone(),
-                cache_offsets.clone(),
-                task_receiver.clone(),
-                output_sender.clone(),
-                cancel.clone(),
-            )
-        })
-        .collect()
-}
-
-fn spawn_worker(
-    caches: Arc<Vec<LoadedCache>>,
-    cache_offsets: Arc<Vec<usize>>,
-    task_receiver: Receiver<PlannedTask>,
-    output_sender: Sender<LoadedResult>,
-    cancel: Receiver<()>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut shard_readers = ShardReaderCache::new();
-        loop {
-            let task = select! {
-                recv(task_receiver) -> message => match message {
-                    Ok(task) => task,
-                    Err(_) => break,
-                },
-                recv(cancel) -> _ => break,
-            };
-            let result = load_planned_sample(
-                &caches,
-                &cache_offsets,
-                task.physical_index,
-                &mut shard_readers,
-            );
-            let loaded = LoadedResult {
-                sequence: task.sequence,
-                result,
-            };
-            select! {
-                send(output_sender, loaded) -> result => {
-                    if result.is_err() {
-                        break;
-                    }
-                }
-                recv(cancel) -> _ => break,
-            }
-        }
-    })
 }
 
 fn load_planned_sample(

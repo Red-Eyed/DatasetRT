@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Sender};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
@@ -15,6 +14,7 @@ use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
     CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
+use crate::worker_pool;
 
 #[pyclass(name = "CachedDataset")]
 pub struct PyCachedDataset {
@@ -130,6 +130,7 @@ impl DatasetState {
 
         let prefetch_size = PrefetchSize::new(prefetch_size)?;
         let num_workers = NumWorkers::new(num_workers)?;
+        worker_pool::configure(num_workers.as_usize())?;
         let caches = load_caches(paths, validate_cache, num_workers)?;
         let schema = common_schema(&caches)?;
         let (cache_offsets, total_samples) = collect_cache_offsets(&caches)?;
@@ -163,13 +164,13 @@ impl DatasetState {
                 len: self.total_samples,
             }
         };
-        Ok(RuntimeIterator::start(
+        RuntimeIterator::start(
             self.caches.clone(),
             self.cache_offsets.clone(),
             plan,
             self.prefetch_size,
             self.num_workers,
-        ))
+        )
     }
 
     /// Snapshot the current weight state and construct a replacement-sampling epoch plan.
@@ -249,14 +250,9 @@ impl PyDatasetIterator {
     }
 }
 
-struct CacheLoadTask {
-    position: usize,
-    path: PathBuf,
-}
-
 struct CacheLoadResult {
     position: usize,
-    result: CacheResult<LoadedCache>,
+    cache: LoadedCache,
 }
 
 /// Load cache directories with bounded concurrency while preserving constructor path order.
@@ -266,112 +262,58 @@ fn load_caches(
     num_workers: NumWorkers,
 ) -> CacheResult<Vec<LoadedCache>> {
     let total = paths.len();
-    let worker_count = num_workers.as_usize().min(total);
-    let (task_sender, task_receiver) = bounded(worker_count);
-    let (result_sender, result_receiver) = bounded(worker_count);
-    let scheduler = spawn_cache_load_scheduler(task_sender, paths);
-    let workers =
-        spawn_cache_load_workers(task_receiver, result_sender, validate_cache, worker_count);
+    let parallelism = num_workers.as_usize().min(total);
+    let (result_sender, result_receiver) = bounded(parallelism);
+    let mut paths = paths.into_iter().enumerate();
+    let mut scheduled = 0_usize;
 
-    let results = collect_cache_load_results(result_receiver, total);
-    let scheduler_result = join_cache_load_scheduler(scheduler);
-    let workers_result = join_cache_load_workers(workers);
+    while scheduled < parallelism {
+        submit_next_cache_load(&mut paths, &result_sender, validate_cache)?;
+        scheduled += 1;
+    }
 
-    scheduler_result?;
-    workers_result?;
-    order_loaded_caches(results?)
-}
-
-/// Send cache paths to a bounded worker pool without changing their identity positions.
-fn spawn_cache_load_scheduler(
-    task_sender: Sender<CacheLoadTask>,
-    paths: Vec<String>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        for (position, path) in paths.into_iter().enumerate() {
-            let task = CacheLoadTask {
-                position,
-                path: PathBuf::from(path),
-            };
-            if task_sender.send(task).is_err() {
-                break;
-            }
-        }
-    })
-}
-
-/// Start the fixed construction-time cache loader pool.
-fn spawn_cache_load_workers(
-    task_receiver: Receiver<CacheLoadTask>,
-    result_sender: Sender<CacheLoadResult>,
-    validate_cache: bool,
-    worker_count: usize,
-) -> Vec<thread::JoinHandle<()>> {
-    (0..worker_count)
-        .map(|_| {
-            spawn_cache_load_worker(task_receiver.clone(), result_sender.clone(), validate_cache)
-        })
-        .collect()
-}
-
-/// Load cache directories independently; shared dataset invariants are checked after ordering.
-fn spawn_cache_load_worker(
-    task_receiver: Receiver<CacheLoadTask>,
-    result_sender: Sender<CacheLoadResult>,
-    validate_cache: bool,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        for task in task_receiver {
-            let result = load_cache(task.path, validate_cache);
-            let loaded = CacheLoadResult {
-                position: task.position,
-                result,
-            };
-            if result_sender.send(loaded).is_err() {
-                break;
-            }
-        }
-    })
-}
-
-/// Collect exactly one construction result per requested cache path.
-fn collect_cache_load_results(
-    result_receiver: Receiver<CacheLoadResult>,
-    total: usize,
-) -> CacheResult<Vec<CacheLoadResult>> {
     let mut results = Vec::with_capacity(total);
-    for _ in 0..total {
+    while results.len() < total {
         results.push(
             result_receiver
                 .recv()
-                .map_err(|_| CacheError::WorkerFailed)?,
+                .map_err(|_| CacheError::WorkerFailed)??,
         );
+        if scheduled < total {
+            submit_next_cache_load(&mut paths, &result_sender, validate_cache)?;
+            scheduled += 1;
+        }
     }
-    Ok(results)
+
+    order_loaded_caches(results)
 }
 
-/// Surface scheduler panics as DatasetRT worker failures.
-fn join_cache_load_scheduler(handle: thread::JoinHandle<()>) -> CacheResult<()> {
-    handle.join().map_err(|_| CacheError::WorkerFailed)
-}
-
-/// Surface loader panics as DatasetRT worker failures.
-fn join_cache_load_workers(handles: Vec<thread::JoinHandle<()>>) -> CacheResult<()> {
-    for handle in handles {
-        handle.join().map_err(|_| CacheError::WorkerFailed)?;
-    }
-    Ok(())
+/// Submit one cache load while retaining its constructor identity position.
+fn submit_next_cache_load(
+    paths: &mut impl Iterator<Item = (usize, String)>,
+    result_sender: &Sender<CacheResult<CacheLoadResult>>,
+    validate_cache: bool,
+) -> CacheResult<()> {
+    let Some((position, path)) = paths.next() else {
+        return Err(CacheError::WorkerFailed);
+    };
+    let path = PathBuf::from(path);
+    let result_sender = result_sender.clone();
+    worker_pool::submit(result_sender, move || {
+        let cache = load_cache(path, validate_cache)?;
+        Ok(CacheLoadResult { position, cache })
+    })
 }
 
 /// Restore constructor path order so `cache_id` remains stable under parallel loading.
 fn order_loaded_caches(results: Vec<CacheLoadResult>) -> CacheResult<Vec<LoadedCache>> {
     let mut ordered = results
         .into_iter()
-        .map(|result| (result.position, result.result))
+        .map(|result| (result.position, result.cache))
         .collect::<Vec<_>>();
     ordered.sort_by_key(|(position, _)| *position);
 
-    ordered.into_iter().map(|(_, result)| result).collect()
+    Ok(ordered.into_iter().map(|(_, cache)| cache).collect())
 }
 
 fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {

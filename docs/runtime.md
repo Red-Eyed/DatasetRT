@@ -2,7 +2,7 @@
 
 DatasetRT exposes a synchronous Python API backed by native Rust execution.
 
-No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues.
+No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. The first reader or writer operation initializes one fixed process-wide Rust worker pool from its required top-level `num_workers` argument, and DatasetRT reuses those threads for cache loading, reading, and writer jobs. Every later operation must pass the same value; hardware parallelism is never selected implicitly.
 
 ## Reader Pipeline
 
@@ -10,8 +10,8 @@ No async runtime is used. There is no Tokio, no `async`/`await`, no Python threa
 metadata load
     -> Rust runtime initialization
     -> physical-order planner or deterministic weighted sampler
-    -> bounded read task queue
-    -> sample-loading worker pool
+    -> bounded in-flight read window
+    -> process-wide worker pool
     -> reorder buffer
     -> Python iterator
 ```
@@ -20,22 +20,22 @@ Rust owns every queue, worker, and iterator cursor.
 
 Payload materialization means assembling cache records from shard bytes, metadata, `cache_id`, and `sample_id`. It does not mean JPEG, PNG, tensor, or domain-object decoding; that belongs in Python or optional framework adapters.
 
-Reader configuration:
+Reader operation settings:
 
 - `prefetch_size`: bounded Rust read/result queue capacity.
-- `num_workers`: fixed Rust sample-loading worker count.
+- top-level `num_workers`: fixed process pool size and maximum active read jobs.
 - `shuffle`: choose deterministic weighted sampling or physical cache order.
 
-If storage reads are slower than Python consumption, Rust workers fill up to `prefetch_size` results. If Python consumption is slower than storage reads, workers block instead of growing memory without bound.
+Each iterator keeps at most `min(num_workers, prefetch_size)` reads active. Completed reads fit in a result queue of the same size, so workers do not wait on a full per-iterator result queue. Slow Python consumption stops new submissions instead of growing memory without bound.
 
 ## Writer Pipeline
 
 ```text
 Python CacheSource
     -> Rust ingestion
-    -> bounded serialization queue
-    -> serialization thread pool
-    -> ordered commit stage
+    -> bounded in-flight writer window
+    -> process-wide worker pool
+    -> caller-owned ordered commit stage
     -> shard writer
 ```
 
@@ -48,21 +48,21 @@ The commit stage owns:
 - Rolling SHA-256.
 - Shard rotation.
 
-Writer configuration:
+Writer operation settings:
 
-- `prefetch_size`: bounded Rust ingestion queue capacity.
-- `num_threads`: fixed Rust serialization worker count.
+- `prefetch_size`: maximum buffered writer task/result capacity.
+- top-level `num_workers`: fixed process pool size and maximum active writer jobs.
 - `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s for the active source, plus source-count progress and ETA for multi-source writes.
 - `validate_cache`: optional checksum validation for existing caches before writer reuse.
 - `profiler`: optional JSON timing summary for diagnosing whether time is spent in Python iteration, Python-to-Rust extraction, queue backpressure, compression, disk writes, finish steps, or cache publish.
 
-If Python iteration is faster than writing, Rust prefetches up to `prefetch_size` queued messages and then blocks the ingestion edge. For multi-source writes, the queue spans source boundaries: Rust starts pulling the next source as soon as its begin/end markers fit in the queue instead of waiting for the previous source to publish. This gives burst smoothing without unbounded memory growth.
+If Python iteration is faster than writing, Rust keeps at most `min(num_workers, prefetch_size)` writer jobs active and then commits a completed job before pulling more input. For multi-source writes, the bounded window can span source boundaries while ordered commit keeps manifests and result ordering deterministic.
 
-Multi-source writes also use a bounded worker-to-commit queue. Workers keep that output queue full until commit catches up, while cache commit and publish remain sequential for deterministic manifests and result ordering.
+Each operation's result queue has the same capacity as its active-job limit. Cache commit and publish remain sequential for deterministic manifests and result ordering.
 
 ## Backpressure
 
-Queues are bounded. If downstream work cannot keep up, upstream producers block. This keeps memory usage controlled and makes execution behavior explicit.
+The global task queue and every operation result queue are bounded. Submission applies backpressure when the global pool is saturated, and each operation reserves result capacity before submitting work. This keeps memory controlled without allowing pool workers to deadlock on full operation queues.
 
 ## Cache Validation
 

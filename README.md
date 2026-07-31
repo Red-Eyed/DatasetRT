@@ -24,7 +24,7 @@ Rust owns:
 - shard offsets and index generation
 - deterministic weighted sampling
 - iterator state
-- bounded reader/writer prefetch and worker pools
+- bounded reader/writer prefetch over one reused Rust worker pool
 - samples metadata validation
 
 Python stays thin and ergonomic. It describes your source data and receives bytes plus metadata back.
@@ -61,16 +61,15 @@ class Images:
 result = CachedDataset.from_cache_sources(
     Images(),
     Path("cache"),
+    num_workers=4,
     reader_config=ReaderConfig(
         seed=42,
         prefetch_size=64,
-        num_workers=4,
         shuffle=True,
         validate_cache=False,
     ),
     writer_config=WriterConfig(
         prefetch_size=64,
-        num_threads=4,
         shard_compression=ShardCompression(algo="none", ratio=1.0),
         show_progress=True,
         validate_cache=False,
@@ -136,8 +135,9 @@ Rust validates that every physical `(cache_id, sample_id)` appears exactly once 
 result = CachedDataset.from_cache_sources(
     [TrainImages(), SyntheticImages(), HardNegatives()],
     Path("cache"),
+    num_workers=8,
     reader_config=ReaderConfig(seed=123),
-    writer_config=WriterConfig(prefetch_size=128, num_threads=8, show_progress=False),
+    writer_config=WriterConfig(prefetch_size=128, show_progress=False),
 )
 ```
 

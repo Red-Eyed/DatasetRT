@@ -12,6 +12,7 @@ mod samples_metadata;
 mod sampling;
 mod storage;
 mod types;
+mod worker_pool;
 mod writer;
 
 use dataset::PyCachedDataset;
@@ -21,11 +22,18 @@ use pyo3::prelude::*;
 fn write_cache(
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
+    num_workers: usize,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> PyResult<Vec<(String, String, String)>> {
-    writer::write_cache(sources, base_cache_dir, writer_config, reuse_existing)
-        .map_err(types::CacheError::into_py_err)
+    writer::write_cache(
+        sources,
+        base_cache_dir,
+        num_workers,
+        writer_config,
+        reuse_existing,
+    )
+    .map_err(types::CacheError::into_py_err)
 }
 
 #[pymodule]

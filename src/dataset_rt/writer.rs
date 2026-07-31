@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use indicatif::MultiProgress;
 use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
@@ -12,9 +11,10 @@ use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, P
 
 use crate::storage::{load_cache, CacheBuilder, FinishStats, PushSampleStats};
 use crate::types::{
-    CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumThreads,
+    CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumWorkers,
     PrefetchSize, ShardCompression,
 };
+use crate::worker_pool;
 
 #[path = "writer/progress.rs"]
 mod progress;
@@ -33,7 +33,7 @@ use progress::WriteProgress;
 struct WriterConfig {
     max_shard_bytes: MaxShardBytes,
     prefetch_size: PrefetchSize,
-    num_threads: NumThreads,
+    num_workers: NumWorkers,
     shard_compression: ShardCompression,
     show_progress: bool,
     validate_cache: bool,
@@ -56,20 +56,18 @@ struct SerializedSample {
     input: WriterInput,
 }
 
-enum CommitMessage {
-    Sample(SerializedSample),
-    Abort(String),
-}
-
 type CacheWriteRecord = (String, String, String);
 
 pub fn write_cache(
     sources: Bound<'_, PyAny>,
     base_cache_dir: String,
+    num_workers: usize,
     writer_config: Bound<'_, PyAny>,
     reuse_existing: bool,
 ) -> CacheResult<Vec<(String, String, String)>> {
-    let config = extract_writer_config(&writer_config, reuse_existing)?;
+    let num_workers = NumWorkers::new(num_workers)?;
+    worker_pool::configure(num_workers.as_usize())?;
+    let config = extract_writer_config(&writer_config, num_workers, reuse_existing)?;
     let base_cache_dir = PathBuf::from(base_cache_dir);
     let profiler = WriterProfiler::new(&config.profiler);
 
@@ -222,41 +220,22 @@ fn write_with_pipeline(
     multi_progress: Option<&MultiProgress>,
     profiler: WriterProfiler,
 ) -> CacheResult<()> {
-    let (input_sender, input_receiver) = bounded(config.prefetch_size.as_usize());
-    let (commit_sender, commit_receiver) = bounded(config.prefetch_size.as_usize());
     let progress = WriteProgress::new(config.show_progress, source_name, multi_progress);
-    let commit_handle = spawn_commit_thread(
+    let mut pipeline = SampleWritePipeline::new(
         builder,
-        commit_receiver,
         progress,
         source_name.to_string(),
         profiler.clone(),
+        config.prefetch_size,
+        config.num_workers,
     );
-    let worker_handles =
-        spawn_serialization_workers(input_receiver, commit_sender.clone(), config.num_threads);
-
-    let ingestion_result = ingest_python_samples(
-        iterator,
-        &input_sender,
-        &commit_sender,
-        source_name,
-        &profiler,
-    );
-    drop(input_sender);
-    drop(commit_sender);
-
-    let workers_result = join_workers(worker_handles);
-    let commit_result = join_commit(commit_handle);
-
-    ingestion_result?;
-    workers_result?;
-    commit_result
+    ingest_python_samples(iterator, &mut pipeline, source_name, &profiler)?;
+    pipeline.finish()
 }
 
 fn ingest_python_samples(
     mut iterator: Bound<'_, PyIterator>,
-    sender: &Sender<QueuedSample>,
-    abort_sender: &Sender<CommitMessage>,
+    pipeline: &mut SampleWritePipeline,
     source_name: &str,
     profiler: &WriterProfiler,
 ) -> CacheResult<()> {
@@ -280,16 +259,9 @@ fn ingest_python_samples(
         );
         let current_sequence = sequence;
         let extract_started_at = Instant::now();
-        let item = match item
+        let item = item
             .map_err(py_error)
-            .and_then(|item| extract_cache_input(&item))
-        {
-            Ok(input) => input,
-            Err(error) => {
-                let _ = abort_sender.send(CommitMessage::Abort(error.to_string()));
-                return Err(error);
-            }
-        };
+            .and_then(|item| extract_cache_input(&item))?;
         profiler.record_bytes(
             source_name,
             ProfileStage::PythonExtract,
@@ -297,13 +269,10 @@ fn ingest_python_samples(
             u64::try_from(item.data.len()).unwrap_or(u64::MAX),
         );
         let send_started_at = Instant::now();
-        send_queued_sample(
-            sender,
-            QueuedSample {
-                sequence: current_sequence,
-                input: item,
-            },
-        )?;
+        pipeline.submit(QueuedSample {
+            sequence: current_sequence,
+            input: item,
+        })?;
         profiler.record(
             source_name,
             ProfileStage::IngressWait,
@@ -312,20 +281,6 @@ fn ingest_python_samples(
         sequence = sequence.checked_add(1).ok_or_else(|| {
             CacheError::InvalidInput("sample sequence overflowed u64".to_string())
         })?;
-    }
-}
-
-fn send_queued_sample(sender: &Sender<QueuedSample>, mut sample: QueuedSample) -> CacheResult<()> {
-    loop {
-        match sender.send_timeout(sample, Duration::from_millis(100)) {
-            Ok(()) => return Ok(()),
-            Err(SendTimeoutError::Timeout(returned_sample)) => {
-                // A full bounded queue can block ingestion; keep Ctrl-C responsive while waiting.
-                Python::attach(|py| py.check_signals()).map_err(py_error)?;
-                sample = returned_sample;
-            }
-            Err(SendTimeoutError::Disconnected(_)) => return Err(CacheError::WorkerFailed),
-        }
     }
 }
 
@@ -362,86 +317,109 @@ fn record_finish_stats(profiler: &WriterProfiler, source_name: &str, stats: Fini
     profiler.record(source_name, ProfileStage::FinishManifest, stats.manifest);
 }
 
-fn spawn_serialization_workers(
-    input_receiver: Receiver<QueuedSample>,
-    commit_sender: Sender<CommitMessage>,
-    num_threads: NumThreads,
-) -> Vec<thread::JoinHandle<CacheResult<()>>> {
-    (0..num_threads.as_usize())
-        .map(|_| {
-            let input_receiver = input_receiver.clone();
-            let commit_sender = commit_sender.clone();
-            thread::spawn(move || run_serialization_worker(input_receiver, commit_sender))
-        })
-        .collect()
-}
-
-fn run_serialization_worker(
-    input_receiver: Receiver<QueuedSample>,
-    commit_sender: Sender<CommitMessage>,
-) -> CacheResult<()> {
-    for queued in input_receiver {
-        let serialized = SerializedSample {
-            sequence: queued.sequence,
-            input: queued.input,
-        };
-        if commit_sender
-            .send(CommitMessage::Sample(serialized))
-            .is_err()
-        {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-fn spawn_commit_thread(
+struct SampleWritePipeline {
     builder: CacheBuilder,
-    receiver: Receiver<CommitMessage>,
+    result_sender: Sender<CacheResult<SerializedSample>>,
+    result_receiver: Receiver<CacheResult<SerializedSample>>,
+    pending: BTreeMap<u64, SerializedSample>,
+    next_sequence: u64,
+    in_flight: usize,
+    parallelism: usize,
     progress: WriteProgress,
     source_name: String,
     profiler: WriterProfiler,
-) -> thread::JoinHandle<CacheResult<()>> {
-    thread::spawn(move || {
-        commit_serialized_samples(builder, receiver, progress, &source_name, &profiler)
-    })
 }
 
-fn commit_serialized_samples(
-    mut builder: CacheBuilder,
-    receiver: Receiver<CommitMessage>,
-    mut progress: WriteProgress,
-    source_name: &str,
-    profiler: &WriterProfiler,
-) -> CacheResult<()> {
-    let mut pending = BTreeMap::new();
-    let mut next_sequence = 0_u64;
-
-    for message in receiver {
-        match message {
-            CommitMessage::Sample(sample) => {
-                pending.insert(sample.sequence, sample);
-                commit_ready_samples(
-                    &mut builder,
-                    &mut pending,
-                    &mut next_sequence,
-                    &mut progress,
-                    source_name,
-                    profiler,
-                )?;
-            }
-            CommitMessage::Abort(message) => return Err(CacheError::InvalidInput(message)),
+impl SampleWritePipeline {
+    /// Create a bounded per-write task window over the process-wide worker pool.
+    fn new(
+        builder: CacheBuilder,
+        progress: WriteProgress,
+        source_name: String,
+        profiler: WriterProfiler,
+        prefetch_size: PrefetchSize,
+        num_workers: NumWorkers,
+    ) -> Self {
+        let parallelism = prefetch_size.as_usize().min(num_workers.as_usize());
+        let (result_sender, result_receiver) = bounded(parallelism);
+        Self {
+            builder,
+            result_sender,
+            result_receiver,
+            pending: BTreeMap::new(),
+            next_sequence: 0,
+            in_flight: 0,
+            parallelism,
+            progress,
+            source_name,
+            profiler,
         }
     }
 
-    if !pending.is_empty() {
-        return Err(CacheError::WorkerFailed);
+    /// Submit one finite serialization job after freeing an operation-local credit.
+    fn submit(&mut self, queued: QueuedSample) -> CacheResult<()> {
+        if self.in_flight == self.parallelism {
+            self.complete_one()?;
+        }
+        let result_sender = self.result_sender.clone();
+        worker_pool::submit(result_sender, move || {
+            Ok(SerializedSample {
+                sequence: queued.sequence,
+                input: queued.input,
+            })
+        })?;
+        self.in_flight += 1;
+        Ok(())
     }
 
-    let (_, stats) = builder.finish()?;
-    record_finish_stats(profiler, source_name, stats);
-    progress.finish();
-    Ok(())
+    /// Drain all submitted jobs, commit in source order, and publish writer metadata.
+    fn finish(mut self) -> CacheResult<()> {
+        while self.in_flight > 0 {
+            self.complete_one()?;
+        }
+        if !self.pending.is_empty() {
+            return Err(CacheError::WorkerFailed);
+        }
+        let (_, stats) = self.builder.finish()?;
+        record_finish_stats(&self.profiler, &self.source_name, stats);
+        self.progress.finish();
+        Ok(())
+    }
+
+    /// Receive one completed task and advance every now-contiguous sample.
+    fn complete_one(&mut self) -> CacheResult<()> {
+        let sample = receive_worker_result(&self.result_receiver)?;
+        self.in_flight = self
+            .in_flight
+            .checked_sub(1)
+            .ok_or(CacheError::WorkerFailed)?;
+        if self.pending.insert(sample.sequence, sample).is_some() {
+            return Err(CacheError::WorkerFailed);
+        }
+        commit_ready_samples(
+            &mut self.builder,
+            &mut self.pending,
+            &mut self.next_sequence,
+            &mut self.progress,
+            &self.source_name,
+            &self.profiler,
+        )
+    }
+}
+
+/// Wait for one finite writer job while keeping Python signal handling responsive.
+fn receive_worker_result<T>(receiver: &Receiver<CacheResult<T>>) -> CacheResult<T> {
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => return result,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                Python::attach(|py| py.check_signals()).map_err(py_error)?;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return Err(CacheError::WorkerFailed);
+            }
+        }
+    }
 }
 
 fn commit_ready_samples(
@@ -464,23 +442,9 @@ fn commit_ready_samples(
     Ok(())
 }
 
-fn join_workers(handles: Vec<thread::JoinHandle<CacheResult<()>>>) -> CacheResult<()> {
-    for handle in handles {
-        join_worker(handle)?;
-    }
-    Ok(())
-}
-
-fn join_worker(handle: thread::JoinHandle<CacheResult<()>>) -> CacheResult<()> {
-    handle.join().map_err(|_| CacheError::WorkerFailed)?
-}
-
-fn join_commit(handle: thread::JoinHandle<CacheResult<()>>) -> CacheResult<()> {
-    handle.join().map_err(|_| CacheError::WorkerFailed)?
-}
-
 fn extract_writer_config(
     value: &Bound<'_, PyAny>,
+    num_workers: NumWorkers,
     reuse_existing: bool,
 ) -> CacheResult<WriterConfig> {
     let max_shard_bytes = value
@@ -490,11 +454,6 @@ fn extract_writer_config(
         .map_err(py_error)?;
     let prefetch_size = value
         .getattr("prefetch_size")
-        .map_err(py_error)?
-        .extract::<usize>()
-        .map_err(py_error)?;
-    let num_threads = value
-        .getattr("num_threads")
         .map_err(py_error)?
         .extract::<usize>()
         .map_err(py_error)?;
@@ -513,7 +472,7 @@ fn extract_writer_config(
     Ok(WriterConfig {
         max_shard_bytes: MaxShardBytes::new(max_shard_bytes)?,
         prefetch_size: PrefetchSize::new(prefetch_size)?,
-        num_threads: NumThreads::new(num_threads)?,
+        num_workers,
         shard_compression: extract_shard_compression(&shard_compression)?,
         show_progress,
         validate_cache,

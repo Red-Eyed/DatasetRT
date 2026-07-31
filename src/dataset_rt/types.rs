@@ -110,24 +110,6 @@ impl PrefetchSize {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct NumThreads(usize);
-
-impl NumThreads {
-    pub fn new(value: usize) -> CacheResult<Self> {
-        if value == 0 {
-            return Err(CacheError::InvalidInput(
-                "num_threads must be greater than zero".to_string(),
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_usize(self) -> usize {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct NumWorkers(usize);
 
 impl NumWorkers {

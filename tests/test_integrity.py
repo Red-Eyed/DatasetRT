@@ -18,7 +18,7 @@ class IntegritySource:
 
 
 def write_integrity_cache(tmp_path: Path) -> Path:
-    results = write_cache(IntegritySource(), tmp_path / "cache")
+    results = write_cache(IntegritySource(), tmp_path / "cache", num_workers=4)
     match results[0]:
         case CacheWriteSuccess(path=path):
             return path
@@ -29,6 +29,7 @@ def write_integrity_cache(tmp_path: Path) -> Path:
 def load_cache(cache_path: Path) -> CachedDataset:
     return CachedDataset(
         [cache_path],
+        num_workers=4,
         reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=True),
     )
 
@@ -102,6 +103,7 @@ def test_checksum_validation_is_optional_for_dataset_load(tmp_path: Path) -> Non
 
     dataset = CachedDataset(
         [cache_path],
+        num_workers=4,
         reader_config=ReaderConfig(seed=1, shuffle=False),
     )
 
