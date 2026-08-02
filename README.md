@@ -1,16 +1,51 @@
 # DatasetRT
 
-DatasetRT is a correctness-first dataset cache for ML training loops.
+DatasetRT is a correctness-first dataset cache for ML training loops that need
+fast restarts, reproducible sampling, and metadata-aware weighting without
+moving dataset state into Python.
 
-It gives you a deterministic, immutable cache on disk, backed by a Rust runtime and exposed through a small Python API. You keep your model code in PyTorch, JAX, TensorFlow, NumPy, or plain Python; DatasetRT handles cache integrity, metadata, sampling weights, and repeatable iteration without becoming another framework.
+It gives you immutable on-disk caches, deterministic weighted sampling, and
+bounded Rust-owned read/write pipelines behind a small Python API. You keep your
+model code in PyTorch, JAX, TensorFlow, NumPy, or plain Python; DatasetRT handles
+cache integrity, metadata, weights, and repeatable iteration without becoming
+another framework.
 
-## Authorship
+Once a dataset is loaded, balanced sampling is only a few Polars lines:
 
-Created by Vadym Stupakov <vadim.stupakov@gmail.com>.
+```python
+import polars as pl
+
+metadata = dataset.samples_metadata()
+
+class_counts = metadata.group_by("label").agg(pl.len().alias("class_count"))
+balanced = (
+    metadata.join(class_counts, on="label")
+    .with_columns((1.0 / pl.col("class_count")).alias("weight"))
+    .drop("class_count")
+)
+
+dataset.set_samples_metadata(balanced)
+```
+
+That is the whole balanced-sampling workflow: compute weights with Polars, hand
+the table back, and let Rust validate identity, coverage, and weight values
+before the next shuffled iterator uses them.
 
 ## Why ML Users Need This
 
-Dataset bugs are expensive. A silent shuffle change, corrupt shard, mismatched metadata row, or weight vector applied to the wrong sample can waste training runs and make experiments impossible to reproduce.
+Dataset bugs are expensive. A silent shuffle change, corrupt shard, mismatched
+metadata row, or weight vector applied to the wrong sample can waste training
+runs and make experiments impossible to reproduce.
+
+DatasetRT is for the boring, high-stakes part of training infrastructure:
+
+- cache expensive preprocessing once and restart quickly
+- keep payload bytes immutable while metadata stays queryable
+- balance imbalanced classes without copying or rewriting the dataset
+- sample deterministically from the same seed, epoch, cache contents, and weights
+- validate weights against stable `(cache_id, sample_id)` identities before they
+  can affect training
+- keep queues bounded so fast producers cannot silently grow memory
 
 DatasetRT is built around one rule:
 
@@ -31,10 +66,11 @@ Python stays thin and ergonomic. It describes your source data and receives byte
 
 ## Quickstart
 
+Wrap your existing data source as a tiny Python iterable. DatasetRT stores the
+payload bytes and metadata, then returns cached samples in deterministic order.
+
 ```python
 from pathlib import Path
-
-import polars as pl
 
 from dataset_rt import (
     CacheInput,
@@ -89,6 +125,77 @@ for sample in dataset:
 
 `DatasetRuntime` creates exactly the requested number of Rust worker threads once and reuses them for cache loading, reading, and writing. `runtime.from_cache_sources` creates missing caches, reuses existing cache directories, and returns a result containing the loaded dataset plus per-source write outcomes. The cache directory argument is always a base cache directory; Rust writes each source under `base_cache_dir / name`. Cache writing shows committed samples/s and MB/s for the active source and source-count ETA for multi-source writes by default; pass `WriterConfig(show_progress=False)` for quiet jobs. Existing cache checksum validation is opt-in with `validate_cache=True`; by default DatasetRT avoids hashing every payload shard during restart.
 
+## Balanced Sampling With Weights
+
+Class balancing is just a metadata operation. You do not need to duplicate rare
+samples, build a Python sampler, or keep a separate weight vector in sync with
+the dataset.
+
+For example, imagine this cached dataset:
+
+```text
+label | rows
+cat   | 900
+dog   |  90
+fox   |  10
+```
+
+If every sample has weight `1.0`, a shuffled epoch mostly follows the original
+imbalance. To make the total probability mass of each label equal, give each
+sample an inverse-frequency weight:
+
+```python
+import polars as pl
+
+metadata = dataset.samples_metadata()
+
+class_counts = metadata.group_by("label").agg(pl.len().alias("class_count"))
+balanced = (
+    metadata.join(class_counts, on="label")
+    .with_columns((1.0 / pl.col("class_count")).alias("weight"))
+    .drop("class_count")
+)
+
+dataset.set_samples_metadata(balanced)
+```
+
+The resulting per-sample weights are:
+
+```text
+label | rows | per-sample weight | total label weight
+cat   | 900  | 1 / 900           | 1.0
+dog   |  90  | 1 / 90            | 1.0
+fox   |  10  | 1 / 10            | 1.0
+```
+
+With `ReaderConfig(shuffle=True)`, the next iterator snapshots those weights and
+uses deterministic weighted multinomial sampling with replacement. Epoch length
+is still the physical dataset length; rare samples may appear more than once in
+one epoch, and common samples may be skipped.
+
+You can balance on any metadata column or expression:
+
+```python
+import polars as pl
+
+metadata = dataset.samples_metadata()
+
+bucketed = metadata.with_columns(
+    pl.when(pl.col("source") == "hard_negatives")
+    .then(8.0)
+    .when(pl.col("split") == "synthetic")
+    .then(0.5)
+    .otherwise(1.0)
+    .alias("weight")
+)
+
+dataset.set_samples_metadata(bucketed)
+```
+
+Rust accepts only the identity and weight columns from the Polars table, then
+validates that every physical `(cache_id, sample_id)` appears exactly once and
+that every weight is positive and finite.
+
 ## PyTorch
 
 When PyTorch is installed, turn the same DatasetRT object into a sized `IterableDataset`:
@@ -106,16 +213,17 @@ The adapter does not decode payloads or add a Torch dependency to DatasetRT. It 
 
 ## Samples Metadata
 
-Weights are not a loose list that can drift out of alignment. DatasetRT exposes dataset-level samples metadata as a Polars table with stable identity columns, stored metadata, and editable weights:
+Weights are not a loose list that can drift out of alignment. DatasetRT exposes
+dataset-level samples metadata as a Polars table with stable identity columns,
+stored metadata, and editable weights:
 
 ```python
+import polars as pl
+
 metadata = dataset.samples_metadata()
 
 rare = metadata.with_columns(
-    pl.when(pl.col("label") == "rare_class")
-    .then(5.0)
-    .otherwise(1.0)
-    .alias("weight")
+    pl.when(pl.col("label") == "rare_class").then(5.0).otherwise(1.0).alias("weight")
 )
 
 dataset.set_samples_metadata(rare)
@@ -131,6 +239,11 @@ Rust validates that every physical `(cache_id, sample_id)` appears exactly once 
 
 ## Multiple Sources
 
+Pass multiple sources when your training set is assembled from different
+origins, such as real images, synthetic images, and hard negatives. Each source
+gets its own immutable cache directory, and the loaded dataset has one stable
+physical identity space across all successful caches.
+
 ```python
 large_runtime = DatasetRuntime(num_workers=8)
 result = large_runtime.from_cache_sources(
@@ -142,6 +255,21 @@ result = large_runtime.from_cache_sources(
 ```
 
 If one source fails during a multi-source write, DatasetRT reports that source as `CacheWriteError` and keeps going. `CacheSourcesDatasetSuccess.results` tells you which sources were loaded and which were missing or malformed. A loaded dataset means every successful cache was validated from its manifest.
+
+If your sources store an origin column in metadata, you can rebalance after
+loading:
+
+```python
+import polars as pl
+
+metadata = dataset.samples_metadata()
+
+weighted = metadata.with_columns(
+    pl.when(pl.col("source") == "hard_negatives").then(4.0).otherwise(1.0).alias("weight")
+)
+
+dataset.set_samples_metadata(weighted)
+```
 
 ## Storage Layout
 
@@ -175,6 +303,7 @@ LZ4 compression is applied per payload record so random access stays direct. The
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Inversion Analysis](docs/inversion-analysis.md)
 - [Python API](docs/python-api.md)
 - [Storage Format](docs/storage-format.md)
 - [Runtime Model](docs/runtime.md)
@@ -193,3 +322,16 @@ Wheels use Python's stable ABI (`cp310-abi3`) and support Python 3.10 through 3.
 ## Status
 
 DatasetRT is at foundational v0.1 architecture. The core cache lifecycle, immutable storage, metadata, deterministic weighted sampling, Rust-owned reader/writer prefetching, and Polars samples metadata table are in place.
+
+## Citation
+
+If DatasetRT helps your work, please cite it as:
+
+```bibtex
+@software{stupakov_datasetrt_2026,
+  author = {Stupakov, Vadym},
+  title = {DatasetRT: A Correctness-First Dataset Cache Runtime},
+  year = {2026},
+  url = {https://github.com/Red-Eyed/DatasetRT}
+}
+```

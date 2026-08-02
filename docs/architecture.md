@@ -6,17 +6,7 @@ The founding rule is simple: if behavior affects correctness, reproducibility, i
 
 ## Inversion Analysis
 
-Charlie Munger often pointed to Jacobi's maxim, "Invert, always invert." DatasetRT applies that idea by starting with the failures an ML dataset runtime must make hard:
-
-- Silent sample duplication.
-- Nondeterministic epoch order.
-- Weight updates applied to the wrong physical sample.
-- Readers accepting incomplete or corrupt caches.
-- Startup paths that hash or materialize more data than requested.
-- Queues that grow without bound under slow consumers.
-- Python adapters that accidentally own correctness-sensitive iteration state.
-
-The architecture is the inverse of those failures. Rust owns identity, sampling, validation, storage layout, bounded queues, and ordering. Python remains the ergonomic edge that describes sources and decodes payload bytes, but unsupported adapter modes should fail clearly rather than produce plausible-looking bad training data.
+DatasetRT's architecture starts from the failure modes a dataset runtime must make hard. See [Inversion Analysis](inversion-analysis.md) for the full failure list and the corresponding design responses.
 
 ## Boundaries
 
