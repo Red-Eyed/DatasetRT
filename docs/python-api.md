@@ -184,11 +184,11 @@ The factory asks Rust to generate cache paths, reuse valid existing caches, crea
 ## Samples Metadata
 
 ```python
-metadata = dataset.samples_metadata()
-dataset.set_samples_metadata(metadata)
+metadata = dataset.get_metadata()
+dataset.update_metadata(metadata)
 ```
 
-Weights are represented inside a Polars samples metadata `DataFrame`, not as a bare vector. The table is designed to be filtered and edited by metadata:
+Active samples and weights are represented inside a Polars metadata `DataFrame`, not as a bare vector. The table is designed to be filtered and edited by metadata:
 
 ```text
 cache_id | sample_id | <metadata columns...> | weight
@@ -201,16 +201,25 @@ Required columns:
 - Metadata columns: one column per metadata field stored in the cache.
 - `weight`: positive finite float, default `1.0`.
 
-`samples_metadata` returns a copy. Mutating the Polars frame has no effect until it is passed to `set_samples_metadata`.
+`get_metadata` returns a copy. Mutating the Polars frame has no effect until it is passed to `update_metadata`.
 
-`set_samples_metadata` accepts a Polars `DataFrame`. Rust reads and validates the authoritative identity and weight columns:
+`update_metadata` accepts a Polars `DataFrame`. Rust reads and validates the authoritative identity, stored metadata, and weight columns:
 
-- Every physical sample must appear exactly once.
+- At least one physical sample must be included.
 - Unknown `(cache_id, sample_id)` pairs are rejected.
 - Duplicate `(cache_id, sample_id)` pairs are rejected.
+- Stored metadata columns must be present.
 - Every weight must be finite and positive.
 
-Rows may be reordered by Polars operations before calling `set_samples_metadata`; Rust maps by `(cache_id, sample_id)`, not by row position.
+Rows may be filtered or reordered by Polars operations before calling `update_metadata`. Removed rows are excluded from future iterators, and non-shuffled iterators follow the active table order.
+
+Additional columns are preserved in the active metadata table. They will be returned by the next `get_metadata()` call.
+
+For a quick development run:
+
+```python
+dataset.update_metadata(dataset.get_metadata().head(100))
+```
 
 Metadata columns are included for ergonomic filtering and auditing. They are not trusted for sample identity; `cache_id` and `sample_id` are the identity fields.
 
@@ -228,7 +237,9 @@ for sample in dataset:
 - `cache_id`: int
 - `sample_id`: int
 
-The epoch length is the physical sample count across all loaded caches.
+The epoch length is the active metadata row count. Each iterator snapshots the
+active metadata table when the iterator is created, so `update_metadata` affects
+future iterators and does not rewrite an iterator that is already mid-epoch.
 
 ## PyTorch Adapter
 

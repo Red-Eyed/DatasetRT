@@ -72,15 +72,14 @@ Readers and writer reuse skip checksum validation by default. Dataset constructi
 
 Output order is deterministic. Workers may complete out of order, but the reorder stage publishes samples in the sampler's planned order.
 
-With `shuffle=False`, the plan is physical cache order. With `shuffle=True`, the plan comes from deterministic weighted sampling.
+With `shuffle=False`, the plan is active metadata table order. With `shuffle=True`, the plan comes from deterministic weighted sampling over active metadata rows.
 
 ## Iterator Snapshots
 
-When `shuffle=True`, each iterator snapshots:
+Each iterator snapshots:
 
 - Cache manifests.
-- Current weight vector.
-- Seed.
-- Epoch number.
+- Current active metadata table.
+- Seed and epoch number when `shuffle=True`.
 
-Weight changes made after iterator construction do not affect that iterator.
+Metadata changes made after iterator construction do not affect that iterator.

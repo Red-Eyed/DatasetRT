@@ -426,22 +426,25 @@ class CachedDataset:
         return DatasetRTTorchIterableDataset()
 
     def samples_metadata(self) -> pl.DataFrame:
-        """Return editable dataset-level sample metadata as a Polars table.
+        """Return the current active metadata table."""
+        return self.get_metadata()
 
-        The table contains `cache_id`, `sample_id`, all metadata columns, and
-        `weight`. Mutating the returned frame has no effect until it is passed to
-        `set_samples_metadata`.
-        """
-        return pl.read_ipc(self._inner.samples_metadata_ipc())
+    def get_metadata(self) -> pl.DataFrame:
+        """Return a copy of the active sample table that controls future iteration."""
+        return pl.read_ipc(self._inner.metadata_ipc())
 
     def set_samples_metadata(self, metadata: pl.DataFrame) -> None:
-        """Replace Rust-owned sampling weights from a Polars table.
+        """Replace the active metadata table using the compatibility method name."""
+        self.update_metadata(metadata)
 
-        Rust validates that every physical `(cache_id, sample_id)` appears
-        exactly once and that each weight is positive and finite.
+    def update_metadata(self, metadata: pl.DataFrame) -> None:
+        """Replace the active sample table after Rust validates identity and weights.
+
+        Rows absent from `metadata` are excluded from future iterators. Rust
+        validates that every included `(cache_id, sample_id)` exists once and
+        that each weight is positive and finite.
         """
-        weight_columns = metadata.select(["cache_id", "sample_id", "weight"])
-        buffer = weight_columns.write_ipc(None)
+        buffer = metadata.write_ipc(None)
         if buffer is None:
             raise RuntimeError("Polars did not return an in-memory IPC buffer")
-        self._inner.set_samples_metadata_ipc(buffer.getvalue())
+        self._inner.update_metadata_ipc(buffer.getvalue())

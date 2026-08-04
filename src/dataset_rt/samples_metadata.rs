@@ -16,7 +16,13 @@ use crate::types::{CacheError, CacheResult, MetadataField, MetadataKind};
 /// Sampling weight storage that avoids materializing uniform all-one vectors.
 pub enum WeightState {
     Uniform,
-    Custom(Vec<f64>),
+}
+
+/// Active metadata table accepted by Rust after validating identity and weights.
+pub struct ActiveMetadataTable {
+    pub physical_indices: Arc<Vec<usize>>,
+    pub weights: Vec<f64>,
+    pub ipc: Vec<u8>,
 }
 
 struct WeightUpdate {
@@ -25,9 +31,8 @@ struct WeightUpdate {
     weight: f64,
 }
 
-enum WeightSlice<'a> {
+enum WeightSlice {
     Uniform { len: usize },
-    Custom(&'a [f64]),
 }
 
 /// Build one Arrow IPC samples metadata table containing identity, metadata, and weights.
@@ -42,14 +47,16 @@ pub fn build_samples_metadata_ipc(
     write_record_batches_ipc(&arrow_schema, &batches)
 }
 
-/// Parse a columnar weight update and validate that it covers the dataset exactly once.
-pub fn extract_samples_metadata_ipc(
+/// Parse an active metadata table and validate that every included sample is usable.
+pub fn extract_metadata_ipc(
     ipc: &[u8],
     caches: &[LoadedCache],
     cache_offsets: &[usize],
+    schema: &[MetadataField],
     total_samples: usize,
-) -> CacheResult<Vec<f64>> {
-    let mut weights = vec![0.0; total_samples];
+) -> CacheResult<ActiveMetadataTable> {
+    let mut weights = Vec::new();
+    let mut physical_indices = Vec::new();
     let mut seen = vec![false; total_samples];
     let mut row_count = 0_usize;
     let reader = FileReader::try_new(Cursor::new(ipc), None)?;
@@ -59,12 +66,51 @@ pub fn extract_samples_metadata_ipc(
         row_count = row_count.checked_add(batch.num_rows()).ok_or_else(|| {
             CacheError::InvalidInput("samples metadata row count overflowed usize".to_string())
         })?;
-        apply_weight_batch(&batch, caches, cache_offsets, &mut weights, &mut seen)?;
+        validate_required_metadata_columns(&batch, schema)?;
+        apply_metadata_batch(
+            &batch,
+            caches,
+            cache_offsets,
+            &mut physical_indices,
+            &mut weights,
+            &mut seen,
+        )?;
     }
 
-    validate_complete_samples_metadata(row_count, total_samples, &seen)?;
-    validate_weights(&weights, total_samples)?;
-    Ok(weights)
+    validate_active_metadata(row_count)?;
+    validate_weights(&weights, row_count)?;
+    Ok(ActiveMetadataTable {
+        physical_indices: Arc::new(physical_indices),
+        weights,
+        ipc: ipc.to_vec(),
+    })
+}
+
+/// Ensure updates preserve the stored metadata columns with their original Arrow types.
+fn validate_required_metadata_columns(
+    batch: &RecordBatch,
+    schema: &[MetadataField],
+) -> CacheResult<()> {
+    for field in schema {
+        let column = required_column(batch, &field.name)?;
+        let expected_type = arrow_type(&field.kind);
+        if !metadata_update_type_matches(column.data_type(), &expected_type) {
+            return Err(CacheError::InvalidInput(format!(
+                "samples metadata column '{}' must have Arrow type {:?}",
+                field.name, expected_type
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Accept Arrow string width differences introduced by Polars IPC round-trips.
+fn metadata_update_type_matches(actual: &DataType, expected: &DataType) -> bool {
+    actual == expected
+        || matches!(
+            (actual, expected),
+            (DataType::LargeUtf8 | DataType::Utf8View, DataType::Utf8)
+        )
 }
 
 /// Build Arrow batches for every cache without expanding metadata cells into Rust objects.
@@ -84,7 +130,7 @@ fn samples_metadata_batches(
             let metadata_batch = batch?;
             let row_count = metadata_batch.num_rows();
             let physical_offset = physical_offset(cache_offset, sample_start)?;
-            let weights = weight_slice(weights, physical_offset, row_count)?;
+            let weights = weight_slice(weights, physical_offset, row_count);
             output_batches.push(samples_metadata_batch(
                 cache_index,
                 sample_start,
@@ -160,19 +206,9 @@ fn validate_cache_metadata_rows(
     Ok(())
 }
 
-/// Borrow the weight range for one cache without materializing uniform weights.
-fn weight_slice(weights: &WeightState, offset: usize, len: usize) -> CacheResult<WeightSlice<'_>> {
-    match weights {
-        WeightState::Uniform => Ok(WeightSlice::Uniform { len }),
-        WeightState::Custom(values) => values
-            .get(
-                offset..offset.checked_add(len).ok_or_else(|| {
-                    CacheError::InvalidInput("weight slice offset overflowed usize".to_string())
-                })?,
-            )
-            .map(WeightSlice::Custom)
-            .ok_or_else(|| CacheError::InvalidInput("weight slice is out of range".to_string())),
-    }
+/// Return the weight range for one cache without materializing uniform weights.
+fn weight_slice(_weights: &WeightState, _offset: usize, len: usize) -> WeightSlice {
+    WeightSlice::Uniform { len }
 }
 
 /// Build one output batch by reusing metadata arrays and adding identity plus weight columns.
@@ -182,7 +218,7 @@ fn samples_metadata_batch(
     arrow_schema: &Arc<Schema>,
     metadata_schema: &[MetadataField],
     metadata_batch: &RecordBatch,
-    weights: WeightSlice<'_>,
+    weights: WeightSlice,
 ) -> CacheResult<RecordBatch> {
     let row_count = metadata_batch.num_rows();
     let cache_id = u64::try_from(cache_index)
@@ -259,18 +295,16 @@ fn metadata_column(
 }
 
 /// Build the current weight column for one cache.
-fn weight_array(weights: WeightSlice<'_>) -> Float64Array {
+fn weight_array(weights: WeightSlice) -> Float64Array {
     match weights {
         WeightSlice::Uniform { len } => Float64Array::from(vec![1.0; len]),
-        WeightSlice::Custom(values) => Float64Array::from(values.to_vec()),
     }
 }
 
 /// Return the number of rows represented by a weight slice.
-fn weight_len(weights: &WeightSlice<'_>) -> usize {
+fn weight_len(weights: &WeightSlice) -> usize {
     match weights {
         WeightSlice::Uniform { len } => *len,
-        WeightSlice::Custom(values) => values.len(),
     }
 }
 
@@ -287,12 +321,13 @@ fn write_record_batches_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Ca
     Ok(bytes)
 }
 
-/// Apply one Arrow record batch of weight updates without converting rows through Python.
-fn apply_weight_batch(
+/// Apply one Arrow record batch of active metadata without converting rows through Python.
+fn apply_metadata_batch(
     batch: &RecordBatch,
     caches: &[LoadedCache],
     cache_offsets: &[usize],
-    weights: &mut [f64],
+    physical_indices: &mut Vec<usize>,
+    weights: &mut Vec<f64>,
     seen: &mut [bool],
 ) -> CacheResult<()> {
     let cache_ids = required_column(batch, "cache_id")?;
@@ -305,18 +340,26 @@ fn apply_weight_batch(
             sample_id: read_u64_cell(sample_ids, row_index, "sample_id")?,
             weight: read_f64_cell(weight_values, row_index, "weight")?,
         };
-        apply_weight_update(update, caches, cache_offsets, weights, seen)?;
+        apply_metadata_update(
+            update,
+            caches,
+            cache_offsets,
+            physical_indices,
+            weights,
+            seen,
+        )?;
     }
 
     Ok(())
 }
 
-/// Store one validated weight update at its physical offset and reject duplicate identities.
-fn apply_weight_update(
+/// Store one active metadata row and reject duplicate identities.
+fn apply_metadata_update(
     update: WeightUpdate,
     caches: &[LoadedCache],
     cache_offsets: &[usize],
-    weights: &mut [f64],
+    physical_indices: &mut Vec<usize>,
+    weights: &mut Vec<f64>,
     seen: &mut [bool],
 ) -> CacheResult<()> {
     let physical_index = physical_index(caches, cache_offsets, update.cache_id, update.sample_id)?;
@@ -334,10 +377,8 @@ fn apply_weight_update(
         .get_mut(physical_index)
         .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
     *seen_slot = true;
-    let weight_slot = weights
-        .get_mut(physical_index)
-        .ok_or_else(|| CacheError::InvalidCache("weight index is out of range".to_string()))?;
-    *weight_slot = update.weight;
+    physical_indices.push(physical_index);
+    weights.push(update.weight);
     Ok(())
 }
 
@@ -371,20 +412,11 @@ fn physical_index(
     })
 }
 
-/// Ensure samples metadata has exactly one accepted row for every physical sample.
-fn validate_complete_samples_metadata(
-    row_count: usize,
-    expected_rows: usize,
-    seen: &[bool],
-) -> CacheResult<()> {
-    if row_count != expected_rows {
-        return Err(CacheError::InvalidInput(format!(
-            "expected {expected_rows} samples metadata rows, got {row_count}"
-        )));
-    }
-    if seen.iter().any(|value| !value) {
+/// Ensure an active metadata table contains at least one sample.
+fn validate_active_metadata(row_count: usize) -> CacheResult<()> {
+    if row_count == 0 {
         return Err(CacheError::InvalidInput(
-            "samples metadata must include every physical sample exactly once".to_string(),
+            "metadata table must include at least one sample".to_string(),
         ));
     }
     Ok(())

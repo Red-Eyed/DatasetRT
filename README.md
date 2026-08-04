@@ -15,7 +15,7 @@ Once a dataset is loaded, balanced sampling is only a few Polars lines:
 ```python
 import polars as pl
 
-metadata = dataset.samples_metadata()
+metadata = dataset.get_metadata()
 
 class_counts = metadata.group_by("label").agg(pl.len().alias("class_count"))
 balanced = (
@@ -24,7 +24,7 @@ balanced = (
     .drop("class_count")
 )
 
-dataset.set_samples_metadata(balanced)
+dataset.update_metadata(balanced)
 ```
 
 That is the whole balanced-sampling workflow: compute weights with Polars, hand
@@ -147,7 +147,7 @@ sample an inverse-frequency weight:
 ```python
 import polars as pl
 
-metadata = dataset.samples_metadata()
+metadata = dataset.get_metadata()
 
 class_counts = metadata.group_by("label").agg(pl.len().alias("class_count"))
 balanced = (
@@ -156,7 +156,7 @@ balanced = (
     .drop("class_count")
 )
 
-dataset.set_samples_metadata(balanced)
+dataset.update_metadata(balanced)
 ```
 
 The resulting per-sample weights are:
@@ -168,17 +168,17 @@ dog   |  90  | 1 / 90            | 1.0
 fox   |  10  | 1 / 10            | 1.0
 ```
 
-With `ReaderConfig(shuffle=True)`, the next iterator snapshots those weights and
-uses deterministic weighted multinomial sampling with replacement. Epoch length
-is still the physical dataset length; rare samples may appear more than once in
-one epoch, and common samples may be skipped.
+With `ReaderConfig(shuffle=True)`, the next iterator snapshots the active
+metadata table and uses deterministic weighted multinomial sampling with
+replacement over its rows. Rare samples may appear more than once in one epoch,
+and common samples may be skipped.
 
 You can balance on any metadata column or expression:
 
 ```python
 import polars as pl
 
-metadata = dataset.samples_metadata()
+metadata = dataset.get_metadata()
 
 bucketed = metadata.with_columns(
     pl.when(pl.col("source") == "hard_negatives")
@@ -189,12 +189,13 @@ bucketed = metadata.with_columns(
     .alias("weight")
 )
 
-dataset.set_samples_metadata(bucketed)
+dataset.update_metadata(bucketed)
 ```
 
-Rust accepts only the identity and weight columns from the Polars table, then
-validates that every physical `(cache_id, sample_id)` appears exactly once and
-that every weight is positive and finite.
+Rust validates the required identity, stored metadata, and weight columns, then
+keeps the whole active table in runtime memory. Extra columns round-trip through
+`get_metadata()`, and rows removed from the table are excluded from future
+iterators.
 
 ## PyTorch
 
@@ -211,7 +212,7 @@ for sample in loader:
 
 The adapter does not decode payloads or add a Torch dependency to DatasetRT. It yields `CachedSample` values and reports `len(torch_dataset)`. Keep PyTorch `DataLoader(num_workers=0)`; use `DatasetRuntime(num_workers=N)` for parallel cache reads.
 
-## Samples Metadata
+## Metadata Table
 
 Weights are not a loose list that can drift out of alignment. DatasetRT exposes
 dataset-level samples metadata as a Polars table with stable identity columns,
@@ -220,13 +221,13 @@ stored metadata, and editable weights:
 ```python
 import polars as pl
 
-metadata = dataset.samples_metadata()
+metadata = dataset.get_metadata()
 
 rare = metadata.with_columns(
     pl.when(pl.col("label") == "rare_class").then(5.0).otherwise(1.0).alias("weight")
 )
 
-dataset.set_samples_metadata(rare)
+dataset.update_metadata(rare)
 ```
 
 The table contains:
@@ -235,7 +236,7 @@ The table contains:
 cache_id | sample_id | <metadata columns...> | weight
 ```
 
-Rust validates that every physical `(cache_id, sample_id)` appears exactly once and that every weight is positive and finite.
+Rows present in the table are the active samples for future iterators. Rust validates that every included physical `(cache_id, sample_id)` exists once, that stored metadata columns are present, and that every weight is positive and finite.
 
 ## Multiple Sources
 
@@ -262,13 +263,13 @@ loading:
 ```python
 import polars as pl
 
-metadata = dataset.samples_metadata()
+metadata = dataset.get_metadata()
 
 weighted = metadata.with_columns(
     pl.when(pl.col("source") == "hard_negatives").then(4.0).otherwise(1.0).alias("weight")
 )
 
-dataset.set_samples_metadata(weighted)
+dataset.update_metadata(weighted)
 ```
 
 ## Storage Layout

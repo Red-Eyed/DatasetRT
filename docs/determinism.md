@@ -3,7 +3,7 @@
 With `ReaderConfig.shuffle=True`, DatasetRT sampling is deterministic for:
 
 - Cache contents.
-- Weight vector.
+- Active metadata table and weight vector.
 - Seed.
 - Epoch.
 
@@ -11,15 +11,15 @@ Given those inputs, the same physical samples are emitted in the same order.
 
 ## Epoch Length
 
-Epoch length equals the number of physical samples across all loaded caches.
+Epoch length equals the number of rows in the active metadata table.
 
 Shuffled sampling is weighted multinomial with replacement. A physical sample can appear more than once in one epoch, and another sample can be absent from that epoch.
 
-With `ReaderConfig.shuffle=False`, DatasetRT emits each physical sample once in cache order. Weights are still stored and editable, but they are not applied until a shuffled iterator is created.
+With `ReaderConfig.shuffle=False`, DatasetRT emits each active sample once in active table order. Weights are still stored and editable, but they are not applied until a shuffled iterator is created.
 
-## Weight Table
+## Metadata Table
 
-Weights live in Rust but are exposed to Python as a Polars `DataFrame`:
+The active metadata table lives in Rust but is exposed to Python as a Polars `DataFrame`:
 
 ```text
 cache_id | sample_id | <metadata columns...> | weight
@@ -27,15 +27,17 @@ cache_id | sample_id | <metadata columns...> | weight
 
 The metadata columns make it natural to create weighted subsets in Python, while Rust remains the authority for applying the result.
 
-When `set_samples_metadata` is called, Rust validates:
+When `update_metadata` is called, Rust validates:
 
-- Every physical `(cache_id, sample_id)` appears exactly once.
+- At least one physical `(cache_id, sample_id)` appears.
 - No unknown physical identity appears.
 - No duplicate physical identity appears.
+- Every stored metadata column must be present.
 - Every weight must be finite.
 - Every weight must be positive.
 
 The all-zero case is unrepresentable because zero is not a valid v0.1 weight.
+Rows removed from the table are excluded from future iterators.
 
 ## Epoch Advancement
 

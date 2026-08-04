@@ -22,8 +22,16 @@ struct LoadedResult {
 }
 
 pub enum EpochPlan {
-    PhysicalOrder { len: usize },
-    Shuffled(Box<EpochSampler>),
+    PhysicalOrder {
+        len: usize,
+    },
+    PhysicalIndices {
+        physical_indices: Arc<Vec<usize>>,
+    },
+    Shuffled {
+        sampler: Box<EpochSampler>,
+        physical_indices: Option<Arc<Vec<usize>>>,
+    },
 }
 
 impl EpochPlan {
@@ -31,7 +39,8 @@ impl EpochPlan {
     fn len(&self) -> usize {
         match self {
             Self::PhysicalOrder { len } => *len,
-            Self::Shuffled(sampler) => sampler.len(),
+            Self::PhysicalIndices { physical_indices } => physical_indices.len(),
+            Self::Shuffled { sampler, .. } => sampler.len(),
         }
     }
 
@@ -39,7 +48,17 @@ impl EpochPlan {
     fn next_physical_index(&mut self, sequence: usize) -> Option<usize> {
         match self {
             Self::PhysicalOrder { len } => (sequence < *len).then_some(sequence),
-            Self::Shuffled(sampler) => sampler.next(),
+            Self::PhysicalIndices { physical_indices } => physical_indices.get(sequence).copied(),
+            Self::Shuffled {
+                sampler,
+                physical_indices,
+            } => {
+                let sampled_index = sampler.next()?;
+                match physical_indices {
+                    Some(indices) => indices.get(sampled_index).copied(),
+                    None => Some(sampled_index),
+                }
+            }
         }
     }
 }

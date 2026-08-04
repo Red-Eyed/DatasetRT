@@ -8,7 +8,7 @@ use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 use crate::dataset_runtime::PyDatasetRuntime;
 use crate::runtime::{EpochPlan, RuntimeIterator};
 use crate::samples_metadata::{
-    build_samples_metadata_ipc, extract_samples_metadata_ipc, WeightState,
+    build_samples_metadata_ipc, extract_metadata_ipc, ActiveMetadataTable, WeightState,
 };
 use crate::sampling::EpochSampler;
 use crate::storage::{load_cache, LoadedCache};
@@ -36,8 +36,13 @@ struct DatasetState {
 }
 
 struct MutableDatasetState {
-    weights: WeightState,
+    active: ActiveMetadata,
     next_epoch: u64,
+}
+
+enum ActiveMetadata {
+    Full,
+    Table(ActiveMetadataTable),
 }
 
 #[pymethods]
@@ -66,8 +71,8 @@ impl PyCachedDataset {
         .map_err(CacheError::into_py_err)
     }
 
-    fn __len__(&self) -> usize {
-        self.inner.total_samples
+    fn __len__(&self) -> PyResult<usize> {
+        self.inner.active_len().map_err(CacheError::into_py_err)
     }
 
     fn __iter__(&self) -> PyResult<PyDatasetIterator> {
@@ -81,28 +86,35 @@ impl PyCachedDataset {
         })
     }
 
-    /// Return Arrow IPC samples metadata built by Rust from cache metadata and weights.
-    fn samples_metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let ipc = self
-            .inner
-            .samples_metadata_ipc()
-            .map_err(CacheError::into_py_err)?;
+    /// Return Arrow IPC metadata for the current active sample table.
+    fn metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let ipc = self.inner.metadata_ipc().map_err(CacheError::into_py_err)?;
         Ok(PyBytes::new(py, &ipc))
     }
 
-    /// Replace weights from samples metadata IPC containing identity and weight columns.
-    fn set_samples_metadata_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
-        let weights = self
+    /// Return Arrow IPC metadata using the compatibility native method name.
+    fn samples_metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.metadata_ipc(py)
+    }
+
+    /// Replace the active metadata table after Rust validates identities and weights.
+    fn update_metadata_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
+        let active = self
             .inner
-            .extract_samples_metadata_ipc(ipc.as_bytes())
+            .extract_metadata_ipc(ipc.as_bytes())
             .map_err(CacheError::into_py_err)?;
         let mut guard = self
             .inner
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        guard.weights = WeightState::Custom(weights);
+        guard.active = ActiveMetadata::Table(active);
         Ok(())
+    }
+
+    /// Replace metadata using the compatibility native method name.
+    fn set_samples_metadata_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
+        self.update_metadata_ipc(ipc)
     }
 }
 
@@ -143,20 +155,14 @@ impl DatasetState {
             num_workers,
             shuffle,
             mutable: Mutex::new(MutableDatasetState {
-                weights: WeightState::Uniform,
+                active: ActiveMetadata::Full,
                 next_epoch: 0,
             }),
         })
     }
 
     fn start_iterator(&self) -> CacheResult<RuntimeIterator> {
-        let plan = if self.shuffle {
-            self.shuffled_plan()?
-        } else {
-            EpochPlan::PhysicalOrder {
-                len: self.total_samples,
-            }
-        };
+        let plan = self.epoch_plan()?;
         RuntimeIterator::start(
             self.pool.clone(),
             self.caches.clone(),
@@ -167,36 +173,64 @@ impl DatasetState {
         )
     }
 
-    /// Snapshot the current weight state and construct a replacement-sampling epoch plan.
-    fn shuffled_plan(&self) -> CacheResult<EpochPlan> {
+    /// Snapshot the active table and construct the epoch plan used by one iterator.
+    fn epoch_plan(&self) -> CacheResult<EpochPlan> {
         let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        if !self.shuffle {
+            return Ok(match &guard.active {
+                ActiveMetadata::Full => EpochPlan::PhysicalOrder {
+                    len: self.total_samples,
+                },
+                ActiveMetadata::Table(active) => EpochPlan::PhysicalIndices {
+                    physical_indices: active.physical_indices.clone(),
+                },
+            });
+        }
+
         let epoch = guard.next_epoch;
         guard.next_epoch += 1;
-
-        let sampler = match &guard.weights {
-            WeightState::Uniform => EpochSampler::uniform(self.total_samples, self.seed, epoch)?,
-            WeightState::Custom(weights) => EpochSampler::weighted(weights, self.seed, epoch)?,
-        };
-        Ok(EpochPlan::Shuffled(Box::new(sampler)))
+        match &guard.active {
+            ActiveMetadata::Full => Ok(EpochPlan::Shuffled {
+                sampler: Box::new(EpochSampler::uniform(self.total_samples, self.seed, epoch)?),
+                physical_indices: None,
+            }),
+            ActiveMetadata::Table(active) => Ok(EpochPlan::Shuffled {
+                sampler: Box::new(EpochSampler::weighted(&active.weights, self.seed, epoch)?),
+                physical_indices: Some(active.physical_indices.clone()),
+            }),
+        }
     }
 
-    /// Build one Arrow IPC table containing identity, metadata, and current weights.
-    fn samples_metadata_ipc(&self) -> CacheResult<Vec<u8>> {
+    /// Return the row count visible through future dataset iterators.
+    fn active_len(&self) -> CacheResult<usize> {
         let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-        build_samples_metadata_ipc(
-            self.caches.as_ref(),
-            self.cache_offsets.as_ref(),
-            &self.schema,
-            &guard.weights,
-        )
+        Ok(match &guard.active {
+            ActiveMetadata::Full => self.total_samples,
+            ActiveMetadata::Table(active) => active.physical_indices.len(),
+        })
     }
 
-    /// Parse a columnar weight update and validate that it covers the dataset exactly once.
-    fn extract_samples_metadata_ipc(&self, ipc: &[u8]) -> CacheResult<Vec<f64>> {
-        extract_samples_metadata_ipc(
+    /// Build or return the active metadata table IPC without touching immutable cache files.
+    fn metadata_ipc(&self) -> CacheResult<Vec<u8>> {
+        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        match &guard.active {
+            ActiveMetadata::Full => build_samples_metadata_ipc(
+                self.caches.as_ref(),
+                self.cache_offsets.as_ref(),
+                &self.schema,
+                &WeightState::Uniform,
+            ),
+            ActiveMetadata::Table(active) => Ok(active.ipc.clone()),
+        }
+    }
+
+    /// Parse an active metadata table and validate every included sample identity.
+    fn extract_metadata_ipc(&self, ipc: &[u8]) -> CacheResult<ActiveMetadataTable> {
+        extract_metadata_ipc(
             ipc,
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),
+            &self.schema,
             self.total_samples,
         )
     }

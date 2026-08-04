@@ -465,13 +465,13 @@ def test_torch_adapter_rejects_dataloader_workers(
         iter(torch_dataset)
 
 
-def test_samples_metadata_is_polars_table_with_metadata(tmp_path: Path) -> None:
+def test_get_metadata_returns_polars_table_with_metadata(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
     written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
     dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
 
-    metadata = dataset.samples_metadata()
+    metadata = dataset.get_metadata()
 
     assert isinstance(metadata, pl.DataFrame)
     assert metadata.columns == [
@@ -486,35 +486,123 @@ def test_samples_metadata_is_polars_table_with_metadata(tmp_path: Path) -> None:
     assert metadata["weight"].to_list() == [1.0, 1.0, 1.0]
 
 
-def test_set_samples_metadata_accepts_reordered_polars_table(tmp_path: Path) -> None:
+def test_update_metadata_limits_active_samples(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
+
+    dataset.update_metadata(dataset.get_metadata().head(2))
+
+    samples = list(dataset)
+    round_trip = dataset.get_metadata()
+
+    assert len(dataset) == 2
+    assert [sample.data for sample in samples] == [b"zero", b"one"]
+    assert round_trip["sample_id"].to_list() == [0, 1]
+
+
+def test_update_metadata_preserves_table_order_for_non_shuffled_reads(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
+
+    dataset.update_metadata(dataset.get_metadata().sort("sample_id", descending=True))
+
+    assert [sample.data for sample in dataset] == [b"two", b"one", b"zero"]
+
+
+def test_update_metadata_preserves_optional_columns(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
     written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
     dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
 
-    metadata = dataset.samples_metadata()
-    updated = metadata.with_columns(
-        pl.when(pl.col("label") == "b").then(10.0).otherwise(1.0).alias("weight")
-    ).sort("sample_id", descending=True)
-    dataset.set_samples_metadata(updated)
+    metadata = (
+        dataset.get_metadata()
+        .with_columns(
+            pl.when(pl.col("label") == "c").then(8.0).otherwise(1.0).alias("ohem_weight"),
+            pl.lit("fast-dev").alias("run_tag"),
+        )
+        .with_columns(pl.col("ohem_weight").alias("weight"))
+    )
+    dataset.update_metadata(metadata)
 
-    round_trip = dataset.samples_metadata().sort("sample_id")
+    round_trip = dataset.get_metadata()
 
-    assert round_trip["weight"].to_list() == [1.0, 10.0, 1.0]
+    assert "ohem_weight" in round_trip.columns
+    assert "run_tag" in round_trip.columns
+    assert round_trip["weight"].to_list() == [1.0, 1.0, 8.0]
+    assert round_trip["ohem_weight"].to_list() == [1.0, 1.0, 8.0]
+    assert round_trip["run_tag"].to_list() == ["fast-dev", "fast-dev", "fast-dev"]
 
 
-def test_weight_validation_happens_in_rust(tmp_path: Path) -> None:
+def test_update_metadata_rejects_empty_table(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
     written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
     dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-    metadata = dataset.samples_metadata()
 
-    with pytest.raises(ValueError, match="expected 3 samples metadata rows"):
-        dataset.set_samples_metadata(metadata.head(1))
+    with pytest.raises(ValueError, match="metadata table must include at least one sample"):
+        dataset.update_metadata(dataset.get_metadata().head(0))
+
+
+def test_update_metadata_rejects_duplicate_identity(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+    first_row = dataset.get_metadata().head(1)
+
+    with pytest.raises(ValueError, match="duplicate samples metadata row"):
+        dataset.update_metadata(pl.concat([first_row, first_row]))
+
+
+def test_update_metadata_rejects_unknown_identity(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+    unknown = dataset.get_metadata().head(1).with_columns(pl.lit(999).alias("sample_id"))
+
+    with pytest.raises(ValueError, match="unknown samples metadata row identity"):
+        dataset.update_metadata(unknown)
+
+
+def test_update_metadata_rejects_missing_stored_metadata_column(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+
+    with pytest.raises(ValueError, match="samples metadata missing 'label' column"):
+        dataset.update_metadata(dataset.get_metadata().drop("label"))
+
+
+def test_metadata_weight_validation_happens_in_rust(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+    metadata = dataset.get_metadata()
 
     with pytest.raises(ValueError, match="positive and finite"):
-        dataset.set_samples_metadata(metadata.with_columns(pl.lit(0.0).alias("weight")))
+        dataset.update_metadata(metadata.with_columns(pl.lit(0.0).alias("weight")))
+
+
+def test_samples_metadata_and_set_samples_metadata_remain_compatible(tmp_path: Path) -> None:
+    base_cache_dir = tmp_path / "cache"
+
+    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
+    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
+
+    dataset.set_samples_metadata(dataset.samples_metadata().tail(1))
+
+    samples = list(dataset)
+
+    assert len(dataset) == 1
+    assert [sample.data for sample in samples] == [b"two"]
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
