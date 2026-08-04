@@ -47,6 +47,27 @@ def success_paths(results: list[CacheWriteResult]) -> list[Path]:
     return paths
 
 
+@pytest.fixture
+def tiny_cache_paths(tmp_path: Path) -> list[Path]:
+    return success_paths(RUNTIME.write_cache(TinySource(), tmp_path / "cache"))
+
+
+@pytest.fixture
+def tiny_dataset(tiny_cache_paths: list[Path]) -> dataset_rt_api.CachedDataset:
+    return RUNTIME.cached_dataset(
+        tiny_cache_paths,
+        reader_config=ReaderConfig(seed=7, shuffle=False),
+    )
+
+
+@pytest.fixture
+def shuffled_tiny_dataset(tiny_cache_paths: list[Path]) -> dataset_rt_api.CachedDataset:
+    return RUNTIME.cached_dataset(
+        tiny_cache_paths,
+        reader_config=ReaderConfig(seed=7, shuffle=True),
+    )
+
+
 def test_write_and_read_cache(tmp_path: Path) -> None:
     base_cache_dir = tmp_path / "cache"
 
@@ -465,13 +486,10 @@ def test_torch_adapter_rejects_dataloader_workers(
         iter(torch_dataset)
 
 
-def test_get_metadata_returns_polars_table_with_metadata(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
-
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-
-    metadata = dataset.get_metadata()
+def test_get_metadata_returns_polars_table_with_metadata(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    metadata = tiny_dataset.get_metadata()
 
     assert isinstance(metadata, pl.DataFrame)
     assert metadata.columns == [
@@ -486,50 +504,64 @@ def test_get_metadata_returns_polars_table_with_metadata(tmp_path: Path) -> None
     assert metadata["weight"].to_list() == [1.0, 1.0, 1.0]
 
 
-def test_update_metadata_limits_active_samples(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+def test_update_metadata_limits_active_samples(tiny_dataset: dataset_rt_api.CachedDataset) -> None:
+    tiny_dataset.update_metadata(tiny_dataset.get_metadata().head(2))
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
+    samples = list(tiny_dataset)
+    round_trip = tiny_dataset.get_metadata()
 
-    dataset.update_metadata(dataset.get_metadata().head(2))
-
-    samples = list(dataset)
-    round_trip = dataset.get_metadata()
-
-    assert len(dataset) == 2
+    assert len(tiny_dataset) == 2
     assert [sample.data for sample in samples] == [b"zero", b"one"]
     assert round_trip["sample_id"].to_list() == [0, 1]
 
 
-def test_update_metadata_preserves_table_order_for_non_shuffled_reads(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+def test_update_metadata_preserves_table_order_for_non_shuffled_reads(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    tiny_dataset.update_metadata(tiny_dataset.get_metadata().sort("sample_id", descending=True))
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
-
-    dataset.update_metadata(dataset.get_metadata().sort("sample_id", descending=True))
-
-    assert [sample.data for sample in dataset] == [b"two", b"one", b"zero"]
+    assert [sample.data for sample in tiny_dataset] == [b"two", b"one", b"zero"]
 
 
-def test_update_metadata_preserves_optional_columns(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+def test_update_metadata_changes_new_iterators_not_existing_iterator(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    existing_iterator = iter(tiny_dataset)
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
+    assert next(existing_iterator).data == b"zero"
 
+    tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(1))
+
+    assert len(tiny_dataset) == 1
+    assert [sample.data for sample in existing_iterator] == [b"one", b"two"]
+    assert [sample.data for sample in tiny_dataset] == [b"two"]
+
+
+def test_update_metadata_limits_shuffled_sampling_to_active_rows(
+    shuffled_tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    shuffled_tiny_dataset.update_metadata(
+        shuffled_tiny_dataset.get_metadata().filter(pl.col("label") == "c")
+    )
+
+    assert len(shuffled_tiny_dataset) == 1
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two"]
+
+
+def test_update_metadata_preserves_optional_columns(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
     metadata = (
-        dataset.get_metadata()
+        tiny_dataset.get_metadata()
         .with_columns(
             pl.when(pl.col("label") == "c").then(8.0).otherwise(1.0).alias("ohem_weight"),
             pl.lit("fast-dev").alias("run_tag"),
         )
         .with_columns(pl.col("ohem_weight").alias("weight"))
     )
-    dataset.update_metadata(metadata)
+    tiny_dataset.update_metadata(metadata)
 
-    round_trip = dataset.get_metadata()
+    round_trip = tiny_dataset.get_metadata()
 
     assert "ohem_weight" in round_trip.columns
     assert "run_tag" in round_trip.columns
@@ -538,70 +570,122 @@ def test_update_metadata_preserves_optional_columns(tmp_path: Path) -> None:
     assert round_trip["run_tag"].to_list() == ["fast-dev", "fast-dev", "fast-dev"]
 
 
-def test_update_metadata_rejects_empty_table(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
-
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-
+def test_update_metadata_rejects_empty_table(tiny_dataset: dataset_rt_api.CachedDataset) -> None:
     with pytest.raises(ValueError, match="metadata table must include at least one sample"):
-        dataset.update_metadata(dataset.get_metadata().head(0))
+        tiny_dataset.update_metadata(tiny_dataset.get_metadata().head(0))
 
 
-def test_update_metadata_rejects_duplicate_identity(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+@pytest.mark.parametrize("column", ["cache_id", "sample_id", "weight"])
+def test_update_metadata_rejects_missing_required_control_columns(
+    tiny_dataset: dataset_rt_api.CachedDataset, column: str
+) -> None:
+    with pytest.raises(ValueError, match=f"samples metadata missing '{column}' column"):
+        tiny_dataset.update_metadata(tiny_dataset.get_metadata().drop(column))
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-    first_row = dataset.get_metadata().head(1)
+
+def test_update_metadata_rejects_duplicate_identity(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    first_row = tiny_dataset.get_metadata().head(1)
 
     with pytest.raises(ValueError, match="duplicate samples metadata row"):
-        dataset.update_metadata(pl.concat([first_row, first_row]))
+        tiny_dataset.update_metadata(pl.concat([first_row, first_row]))
 
 
-def test_update_metadata_rejects_unknown_identity(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
-
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-    unknown = dataset.get_metadata().head(1).with_columns(pl.lit(999).alias("sample_id"))
+def test_update_metadata_rejects_unknown_identity(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    unknown = tiny_dataset.get_metadata().head(1).with_columns(pl.lit(999).alias("sample_id"))
 
     with pytest.raises(ValueError, match="unknown samples metadata row identity"):
-        dataset.update_metadata(unknown)
+        tiny_dataset.update_metadata(unknown)
 
 
-def test_update_metadata_rejects_missing_stored_metadata_column(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
-
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-
+def test_update_metadata_rejects_missing_stored_metadata_column(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
     with pytest.raises(ValueError, match="samples metadata missing 'label' column"):
-        dataset.update_metadata(dataset.get_metadata().drop("label"))
+        tiny_dataset.update_metadata(tiny_dataset.get_metadata().drop("label"))
 
 
-def test_metadata_weight_validation_happens_in_rust(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+def test_update_metadata_rejects_changed_stored_metadata_column_type(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    changed = tiny_dataset.get_metadata().with_columns(pl.lit(1).alias("label"))
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-    metadata = dataset.get_metadata()
+    with pytest.raises(ValueError, match="samples metadata column 'label' must have Arrow type"):
+        tiny_dataset.update_metadata(changed)
+
+
+@pytest.mark.parametrize("column", ["cache_id", "sample_id"])
+def test_update_metadata_rejects_null_identity_cells(
+    tiny_dataset: dataset_rt_api.CachedDataset, column: str
+) -> None:
+    invalid = tiny_dataset.get_metadata().with_columns(pl.lit(None, dtype=pl.Int64).alias(column))
+
+    with pytest.raises(ValueError, match=f"samples metadata column '{column}' contains null"):
+        tiny_dataset.update_metadata(invalid)
+
+
+@pytest.mark.parametrize("column", ["cache_id", "sample_id"])
+def test_update_metadata_rejects_negative_identity_cells(
+    tiny_dataset: dataset_rt_api.CachedDataset, column: str
+) -> None:
+    invalid = tiny_dataset.get_metadata().with_columns(pl.lit(-1).alias(column))
+
+    with pytest.raises(
+        ValueError, match=f"samples metadata column '{column}' must be non-negative"
+    ):
+        tiny_dataset.update_metadata(invalid)
+
+
+@pytest.mark.parametrize("column", ["cache_id", "sample_id"])
+def test_update_metadata_rejects_non_integer_identity_columns(
+    tiny_dataset: dataset_rt_api.CachedDataset, column: str
+) -> None:
+    invalid = tiny_dataset.get_metadata().with_columns(pl.lit("bad").alias(column))
+
+    with pytest.raises(ValueError, match=f"samples metadata column '{column}' must be an integer"):
+        tiny_dataset.update_metadata(invalid)
+
+
+def test_metadata_weight_validation_happens_in_rust(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    metadata = tiny_dataset.get_metadata()
 
     with pytest.raises(ValueError, match="positive and finite"):
-        dataset.update_metadata(metadata.with_columns(pl.lit(0.0).alias("weight")))
+        tiny_dataset.update_metadata(metadata.with_columns(pl.lit(0.0).alias("weight")))
 
 
-def test_samples_metadata_and_set_samples_metadata_remain_compatible(tmp_path: Path) -> None:
-    base_cache_dir = tmp_path / "cache"
+def test_update_metadata_rejects_null_weight_cells(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    invalid = tiny_dataset.get_metadata().with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("weight")
+    )
 
-    written = success_paths(RUNTIME.write_cache(TinySource(), base_cache_dir))
-    dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7, shuffle=False))
+    with pytest.raises(ValueError, match="samples metadata column 'weight' contains null"):
+        tiny_dataset.update_metadata(invalid)
 
-    dataset.set_samples_metadata(dataset.samples_metadata().tail(1))
 
-    samples = list(dataset)
+def test_update_metadata_rejects_non_numeric_weight_columns(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    invalid = tiny_dataset.get_metadata().with_columns(pl.lit("heavy").alias("weight"))
 
-    assert len(dataset) == 1
+    with pytest.raises(ValueError, match="samples metadata column 'weight' must be numeric"):
+        tiny_dataset.update_metadata(invalid)
+
+
+def test_samples_metadata_and_set_samples_metadata_remain_compatible(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    tiny_dataset.set_samples_metadata(tiny_dataset.samples_metadata().tail(1))
+
+    samples = list(tiny_dataset)
+
+    assert len(tiny_dataset) == 1
     assert [sample.data for sample in samples] == [b"two"]
 
 
