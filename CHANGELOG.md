@@ -2,6 +2,24 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.2.5 - 2026-08-04
+
+### Added
+
+- Added `CachedDataset.get_metadata()` and `update_metadata()` as the runtime metadata table API.
+- Added support for runtime-only metadata table edits that can keep optional columns alongside required identity, cache metadata, and `weight` columns.
+
+### Changed
+
+- Made the active metadata table authoritative for dataset length and future sampling, so removing rows limits subsequent iterators to the remaining physical samples.
+- Kept `update_metadata()` in memory only; it does not rewrite cache files and existing iterators continue using the metadata snapshot they were created with.
+- Kept `samples_metadata()` and `set_samples_metadata()` as compatibility aliases.
+- Rewrote the README as a shorter project overview and moved detailed behavior to the docs.
+
+### Fixed
+
+- Validated metadata updates through Rust before mutating runtime state, including required columns, stable physical sample identities, duplicate rows, unknown rows, and positive finite weights.
+
 ## 0.2.3 - 2026-07-31
 
 ### Added
