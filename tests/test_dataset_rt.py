@@ -548,6 +548,37 @@ def test_update_metadata_limits_shuffled_sampling_to_active_rows(
     assert [sample.data for sample in shuffled_tiny_dataset] == [b"two"]
 
 
+def test_update_metadata_allows_duplicate_rows_in_active_table(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    metadata = tiny_dataset.get_metadata()
+    duplicated = pl.concat([metadata.tail(1), metadata.head(1), metadata.tail(1)])
+
+    tiny_dataset.update_metadata(duplicated)
+
+    round_trip = tiny_dataset.get_metadata()
+
+    assert len(tiny_dataset) == 3
+    assert [sample.data for sample in tiny_dataset] == [b"two", b"zero", b"two"]
+    assert round_trip["sample_id"].to_list() == [2, 0, 2]
+
+
+def test_update_metadata_samples_duplicate_rows_when_shuffled(
+    shuffled_tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    duplicated = pl.concat(
+        [
+            shuffled_tiny_dataset.get_metadata().tail(1),
+            shuffled_tiny_dataset.get_metadata().tail(1),
+        ]
+    )
+
+    shuffled_tiny_dataset.update_metadata(duplicated)
+
+    assert len(shuffled_tiny_dataset) == 2
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two"]
+
+
 def test_update_metadata_preserves_optional_columns(
     tiny_dataset: dataset_rt_api.CachedDataset,
 ) -> None:
@@ -581,15 +612,6 @@ def test_update_metadata_rejects_missing_required_control_columns(
 ) -> None:
     with pytest.raises(ValueError, match=f"samples metadata missing '{column}' column"):
         tiny_dataset.update_metadata(tiny_dataset.get_metadata().drop(column))
-
-
-def test_update_metadata_rejects_duplicate_identity(
-    tiny_dataset: dataset_rt_api.CachedDataset,
-) -> None:
-    first_row = tiny_dataset.get_metadata().head(1)
-
-    with pytest.raises(ValueError, match="duplicate samples metadata row"):
-        tiny_dataset.update_metadata(pl.concat([first_row, first_row]))
 
 
 def test_update_metadata_rejects_unknown_identity(

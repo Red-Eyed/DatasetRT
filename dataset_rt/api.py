@@ -56,10 +56,17 @@ class ShardCompression(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    algo: CompressionAlgo = "none"
+    algo: CompressionAlgo = Field(
+        default="none",
+        description="Compression algorithm to apply independently to each payload record.",
+    )
     """Compression algorithm to apply to each shard."""
 
-    ratio: float = Field(default=1.0, gt=0.0)
+    ratio: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Expected compression ratio; `algo='none'` requires exactly `1.0`.",
+    )
     """Expected compression ratio for this policy; `none` requires `1.0`."""
 
 
@@ -76,10 +83,16 @@ class WriterProfilerConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    enabled: bool = False
+    enabled: bool = Field(
+        default=False,
+        description="Whether Rust collects and writes writer-stage timing statistics.",
+    )
     """Whether Rust should collect and write writer-stage timing stats."""
 
-    path: Path = Path("dataset_rt_profile.json")
+    path: Path = Field(
+        default=Path("dataset_rt_profile.json"),
+        description="JSON summary path used when profiling is enabled.",
+    )
     """JSON summary path used when profiling is enabled."""
 
 
@@ -91,22 +104,42 @@ class WriterConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    prefetch_size: int = Field(default=64, gt=0)
+    prefetch_size: int = Field(
+        default=64,
+        gt=0,
+        description="Maximum number of writer tasks/results buffered by Rust.",
+    )
     """Maximum buffered writer task/result capacity."""
 
-    max_shard_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
+    max_shard_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        gt=0,
+        description="Target shard byte size before Rust rotates to a new shard.",
+    )
     """Target maximum shard size before rotating to a new shard."""
 
-    shard_compression: ShardCompression = DEFAULT_SHARD_COMPRESSION
+    shard_compression: ShardCompression = Field(
+        default=DEFAULT_SHARD_COMPRESSION,
+        description="Per-record payload compression policy for new shards.",
+    )
     """Compression policy for payload shards."""
 
-    show_progress: bool = True
+    show_progress: bool = Field(
+        default=True,
+        description="Whether Rust renders cache write progress with samples/s and MB/s.",
+    )
     """Show Rust-owned cache write progress with samples/s and MB/s."""
 
-    validate_cache: bool = False
+    validate_cache: bool = Field(
+        default=False,
+        description="Whether reused existing caches are checksum-validated before loading.",
+    )
     """Validate existing caches during writer reuse before returning them."""
 
-    profiler: WriterProfilerConfig = DEFAULT_WRITER_PROFILER_CONFIG
+    profiler: WriterProfilerConfig = Field(
+        default=DEFAULT_WRITER_PROFILER_CONFIG,
+        description="Optional JSON writer-stage profiler configuration.",
+    )
     """Optional writer-stage profiler output."""
 
 
@@ -115,16 +148,26 @@ class ReaderConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    seed: int
+    seed: int = Field(description="Seed used for deterministic shuffled epoch planning.")
     """Seed used for deterministic epoch sampling."""
 
-    prefetch_size: int = Field(default=64, gt=0)
+    prefetch_size: int = Field(
+        default=64,
+        gt=0,
+        description="Capacity of Rust's bounded reader result queue.",
+    )
     """Capacity of Rust's bounded reader result queue."""
 
-    shuffle: bool = True
+    shuffle: bool = Field(
+        default=True,
+        description="Whether future iterators use deterministic weighted sampling.",
+    )
     """Whether each epoch uses deterministic weighted shuffling."""
 
-    validate_cache: bool = False
+    validate_cache: bool = Field(
+        default=False,
+        description="Whether cache checksums are verified while loading metadata and indexes.",
+    )
     """Verify cache checksums while loading dataset metadata and indexes."""
 
 
@@ -277,12 +320,22 @@ def _format_cache_sources_dataset_error(results: Sequence[CacheWriteResult]) -> 
 
 
 class DatasetRuntime:
-    """Own one explicitly sized Rust worker pool shared by dataset operations."""
+    """Owner of the fixed Rust worker pool used by DatasetRT operations.
+
+    Create one runtime per process or training job, then call its methods to
+    write caches, load datasets, and iterate samples. The worker count is chosen
+    once at construction and reused; per-operation APIs do not resize the pool.
+    """
 
     __slots__ = ("_inner", "_num_workers")
 
     def __init__(self, *, num_workers: int) -> None:
-        """Create exactly `num_workers` reusable Rust worker threads."""
+        """Create exactly `num_workers` reusable Rust worker threads.
+
+        `num_workers` must be positive. Rust validates the value before creating
+        the native pool. The pool is owned by this runtime and kept alive by any
+        datasets loaded through it.
+        """
         self._num_workers = num_workers
         self._inner = _RustDatasetRuntime(num_workers)
 
@@ -298,7 +351,18 @@ class DatasetRuntime:
         *,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
     ) -> list[CacheWriteResult]:
-        """Write one or more immutable caches using this runtime's pool."""
+        """Write one immutable cache per source under `path`.
+
+        `sources` may be one `CacheSource` or a list of sources. Each source
+        must expose a plain `name` and yield `CacheInput` values. Rust writes
+        source `name` under `path / name`, validates a stable metadata schema,
+        stores payload bytes in shards, writes `metadata.arrow` and `index.bin`,
+        then publishes a manifest only after the cache is complete.
+
+        Returns one `CacheWriteSuccess` or `CacheWriteError` per source in input
+        order. Per-source failures are reported as values instead of exceptions
+        when Rust can handle them cleanly.
+        """
         results = _write_cache(
             self._inner,
             sources,
@@ -314,7 +378,16 @@ class DatasetRuntime:
         *,
         reader_config: ReaderConfig,
     ) -> CachedDataset:
-        """Load immutable caches and bind future reads to this runtime's pool."""
+        """Load immutable cache directories into a `CachedDataset`.
+
+        `paths` order defines stable `cache_id` values for the dataset.
+        DatasetRT validates manifests, schemas, metadata/index shape, and shard
+        lengths while loading. Expensive checksum hashing is controlled by
+        `reader_config.validate_cache`.
+
+        The returned dataset keeps this runtime's Rust worker pool alive and
+        uses it for every future iterator.
+        """
         return CachedDataset._load(self._inner, paths, reader_config)
 
     def from_cache_sources(
@@ -325,7 +398,17 @@ class DatasetRuntime:
         reader_config: ReaderConfig,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
     ) -> CacheSourcesDatasetResult:
-        """Create or reuse source caches, then load all successful caches."""
+        """Create or reuse source caches, then load all successful cache paths.
+
+        Existing complete caches under `path / source.name` are reused. Missing
+        caches are written with `writer_config`. The method then loads every
+        successful cache with `reader_config`.
+
+        Returns `CacheSourcesDatasetSuccess` when at least one cache is loaded;
+        returns `CacheSourcesDatasetError` when every source failed or no source
+        was provided. The result always includes per-source write outcomes so
+        callers can audit partial success.
+        """
         results = [
             _cache_write_result(result)
             for result in _write_cache(
@@ -344,10 +427,20 @@ class DatasetRuntime:
 
 
 class CachedDataset:
-    """Synchronous dataset wrapper over Rust-owned cache state."""
+    """Synchronous iterable view over Rust-owned dataset state.
+
+    Users do not construct this class directly; use
+    `DatasetRuntime.cached_dataset` or `DatasetRuntime.from_cache_sources`.
+    Rust owns cache validation, active metadata state, epoch planning, sampling,
+    bounded prefetching, and iterator cancellation.
+    """
 
     cache_paths: list[Path]
+    """Immutable cache directories loaded by this dataset, in `cache_id` order."""
+
     reader_config: ReaderConfig
+    """Reader configuration used when this dataset was loaded."""
+
     _inner: _RustCachedDataset
 
     def __init__(self) -> None:
@@ -376,17 +469,25 @@ class CachedDataset:
         return dataset
 
     def __iter__(self) -> Iterator[CachedSample]:
-        """Create an iterator from the current Rust-side sampling state.
+        """Create an iterator from the current active metadata table.
 
-        With `ReaderConfig.shuffle=True`, Rust snapshots the current weight
-        table and creates a deterministic weighted epoch plan. With
-        `shuffle=False`, iteration follows physical cache order.
+        Iterator construction snapshots Rust runtime state. Later
+        `update_metadata` calls affect future iterators, not this iterator.
+
+        With `ReaderConfig.shuffle=True`, Rust creates a deterministic weighted
+        multinomial sampler over active metadata rows. With `shuffle=False`,
+        iteration follows active metadata table order, including duplicate rows.
         """
         for data, metadata, cache_id, sample_id in self._inner:
             yield CachedSample(data, metadata, cache_id, sample_id)
 
     def __len__(self) -> int:
-        """Return the physical sample count across all loaded caches."""
+        """Return the active metadata row count used by future iterators.
+
+        This value changes after `update_metadata`. Filtered-out rows reduce the
+        length, and duplicate rows increase it. Existing iterators keep their
+        own snapshot even if this value changes mid-epoch.
+        """
         return len(self._inner)
 
     def to_torch_iterable_dataset(self) -> SizedTorchIterableDataset:
@@ -426,23 +527,82 @@ class CachedDataset:
         return DatasetRTTorchIterableDataset()
 
     def samples_metadata(self) -> pl.DataFrame:
-        """Return the current active metadata table."""
+        """Compatibility alias for `get_metadata`.
+
+        Returns the same active metadata table as `get_metadata`. Prefer
+        `get_metadata` in new code.
+        """
         return self.get_metadata()
 
     def get_metadata(self) -> pl.DataFrame:
-        """Return a copy of the active sample table that controls future iteration."""
+        """Return the in-memory metadata table that controls future iterators.
+
+        Contract:
+
+        - Returns a Polars `DataFrame` copy; editing it does not mutate the
+          dataset until the whole frame is passed to `update_metadata`.
+        - Columns are `cache_id`, `sample_id`, every metadata column stored in
+          the cache, `weight`, and any extra columns preserved from the previous
+          `update_metadata` call.
+        - `cache_id` is the cache path position passed to
+          `DatasetRuntime.cached_dataset`; `sample_id` is the physical row
+          inside that cache.
+        - Each row is one active sampling row. Duplicate `(cache_id, sample_id)`
+          rows are allowed and represent repeated entries for the same physical
+          sample.
+        - `len(dataset)` equals the number of active rows returned here,
+          including duplicate rows.
+        - Cache files are not read or rewritten by this method beyond exporting
+          the current Rust-owned in-memory table.
+        """
         return pl.read_ipc(self._inner.metadata_ipc())
 
     def set_samples_metadata(self, metadata: pl.DataFrame) -> None:
-        """Replace the active metadata table using the compatibility method name."""
+        """Compatibility alias for `update_metadata`.
+
+        Applies the same validation and runtime-only update semantics as
+        `update_metadata`. Prefer `update_metadata` in new code.
+        """
         self.update_metadata(metadata)
 
     def update_metadata(self, metadata: pl.DataFrame) -> None:
-        """Replace the active sample table after Rust validates identity and weights.
+        """Replace the Rust-owned active metadata table for future iterators.
 
-        Rows absent from `metadata` are excluded from future iterators. Rust
-        validates that every included `(cache_id, sample_id)` exists once and
-        that each weight is positive and finite.
+        Input contract:
+
+        - `metadata` must be a Polars `DataFrame`.
+        - Required columns are `cache_id`, `sample_id`, every metadata column
+          stored in the cache, and `weight`.
+        - `cache_id` and `sample_id` must be non-null integer columns that map
+          to known physical cache samples.
+        - Stored metadata columns must be present with the same Arrow types as
+          the immutable cache metadata schema.
+        - `weight` must be a non-null numeric column, and every value must be
+          positive and finite.
+        - Extra columns are allowed and preserved in runtime memory; they are
+          returned by the next `get_metadata` call.
+
+        Row semantics:
+
+        - Rows absent from `metadata` are removed from the active sampling
+          space and excluded from future iterators.
+        - Duplicate `(cache_id, sample_id)` rows are allowed. Each duplicate is
+          a separate active row that points to the same immutable physical
+          sample, useful for row-duplication balancing or OHEM.
+        - `len(dataset)` becomes `metadata.height`, including duplicate rows.
+        - With `ReaderConfig(shuffle=False)`, future iterators emit active rows
+          exactly in table order, including duplicates.
+        - With `ReaderConfig.shuffle=True`, future iterators sample with
+          replacement over active rows using each row's `weight`.
+
+        Mutation boundary:
+
+        - Rust validates the full table before replacing runtime state; a
+          validation error leaves the previous active table intact.
+        - The update is runtime-only and does not rewrite `metadata.arrow`,
+          `index.bin`, shards, or manifests.
+        - Iterators created before this call keep their existing snapshot;
+          iterators created after this call use the new active table.
         """
         buffer = metadata.write_ipc(None)
         if buffer is None:

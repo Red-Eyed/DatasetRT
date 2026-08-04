@@ -13,9 +13,9 @@ Given those inputs, the same physical samples are emitted in the same order.
 
 Epoch length equals the number of rows in the active metadata table.
 
-Shuffled sampling is weighted multinomial with replacement. A physical sample can appear more than once in one epoch, and another sample can be absent from that epoch.
+Shuffled sampling is weighted multinomial with replacement over active metadata rows. A physical sample can appear more than once in one epoch, and another sample can be absent from that epoch.
 
-With `ReaderConfig.shuffle=False`, DatasetRT emits each active sample once in active table order. Weights are still stored and editable, but they are not applied until a shuffled iterator is created.
+With `ReaderConfig.shuffle=False`, DatasetRT emits each active row once in active table order. If the same physical `(cache_id, sample_id)` appears in multiple rows, that sample is emitted once for each row. Weights are still stored and editable, but they are not applied until a shuffled iterator is created.
 
 ## Metadata Table
 
@@ -31,13 +31,12 @@ When `update_metadata` is called, Rust validates:
 
 - At least one physical `(cache_id, sample_id)` appears.
 - No unknown physical identity appears.
-- No duplicate physical identity appears.
 - Every stored metadata column must be present.
 - Every weight must be finite.
 - Every weight must be positive.
 
 The all-zero case is unrepresentable because zero is not a valid v0.1 weight.
-Rows removed from the table are excluded from future iterators.
+Rows removed from the table are excluded from future iterators. Duplicate identities are allowed and make the repeated rows part of the active sampling space.
 
 ## Epoch Advancement
 

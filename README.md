@@ -18,9 +18,9 @@ for sample in dataset:
 ```
 
 Rows in the active metadata table are the rows DatasetRT samples from. Remove
-rows for a fast development run, update `weight` for class balancing or OHEM,
-add extra columns for training annotations, and let Rust validate that every row
-still maps to the right immutable cache sample.
+rows for a fast development run, duplicate rows or update `weight` for class
+balancing and OHEM, add extra columns for training annotations, and let Rust
+validate that every row still maps to an immutable cache sample.
 
 ## Why It Exists
 
@@ -79,7 +79,7 @@ already-created iterators keep their snapshot.
 
 With `ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
 multinomial sampling with replacement over the active table. With
-`shuffle=False`, it emits active rows once in table order.
+`shuffle=False`, it emits active rows once in table order, including duplicates.
 
 ## Quickstart
 

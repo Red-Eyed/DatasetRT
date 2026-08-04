@@ -35,9 +35,15 @@ clippy:
 test-python: develop
     {{py}} pytest
 
+sync-api-docs:
+    {{py}} scripts/sync_api_docs.py
+
+api-docs-check:
+    {{py}} scripts/sync_api_docs.py --check
+
 test: test-rust test-python
 
-check: fmt-check lint typecheck test-rust clippy test-python
+check: fmt-check lint typecheck api-docs-check test-rust clippy test-python
 
 smoke: develop
     {{py}} scripts/bench_smoke.py

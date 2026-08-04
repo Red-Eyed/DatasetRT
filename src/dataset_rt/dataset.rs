@@ -231,7 +231,6 @@ impl DatasetState {
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),
             &self.schema,
-            self.total_samples,
         )
     }
 }

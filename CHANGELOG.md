@@ -2,6 +2,15 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.2.6 - 2026-08-04
+
+### Changed
+
+- Allowed duplicate `(cache_id, sample_id)` rows in `update_metadata()` so callers can duplicate rows for balancing, OHEM, or other custom sampling strategies.
+- Made active metadata row count, including duplicates, the dataset length used by future iterators.
+- Documented `get_metadata()` and `update_metadata()` directly from Python API docstrings to keep agent-facing API docs aligned with code.
+- Added an API docs sync check to `just check` so Markdown docs cannot drift from the Python docstrings.
+
 ## 0.2.5 - 2026-08-04
 
 ### Added
@@ -18,7 +27,7 @@ All notable changes to DatasetRT are documented here.
 
 ### Fixed
 
-- Validated metadata updates through Rust before mutating runtime state, including required columns, stable physical sample identities, duplicate rows, unknown rows, and positive finite weights.
+- Validated metadata updates through Rust before mutating runtime state, including required columns, stable physical sample identities, unknown rows, and positive finite weights.
 
 ## 0.2.3 - 2026-07-31
 

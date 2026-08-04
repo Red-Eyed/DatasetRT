@@ -53,11 +53,9 @@ pub fn extract_metadata_ipc(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     schema: &[MetadataField],
-    total_samples: usize,
 ) -> CacheResult<ActiveMetadataTable> {
     let mut weights = Vec::new();
     let mut physical_indices = Vec::new();
-    let mut seen = vec![false; total_samples];
     let mut row_count = 0_usize;
     let reader = FileReader::try_new(Cursor::new(ipc), None)?;
 
@@ -73,7 +71,6 @@ pub fn extract_metadata_ipc(
             cache_offsets,
             &mut physical_indices,
             &mut weights,
-            &mut seen,
         )?;
     }
 
@@ -328,7 +325,6 @@ fn apply_metadata_batch(
     cache_offsets: &[usize],
     physical_indices: &mut Vec<usize>,
     weights: &mut Vec<f64>,
-    seen: &mut [bool],
 ) -> CacheResult<()> {
     let cache_ids = required_column(batch, "cache_id")?;
     let sample_ids = required_column(batch, "sample_id")?;
@@ -340,43 +336,21 @@ fn apply_metadata_batch(
             sample_id: read_u64_cell(sample_ids, row_index, "sample_id")?,
             weight: read_f64_cell(weight_values, row_index, "weight")?,
         };
-        apply_metadata_update(
-            update,
-            caches,
-            cache_offsets,
-            physical_indices,
-            weights,
-            seen,
-        )?;
+        apply_metadata_update(update, caches, cache_offsets, physical_indices, weights)?;
     }
 
     Ok(())
 }
 
-/// Store one active metadata row and reject duplicate identities.
+/// Store one active metadata row after resolving its physical sample identity.
 fn apply_metadata_update(
     update: WeightUpdate,
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     physical_indices: &mut Vec<usize>,
     weights: &mut Vec<f64>,
-    seen: &mut [bool],
 ) -> CacheResult<()> {
     let physical_index = physical_index(caches, cache_offsets, update.cache_id, update.sample_id)?;
-    let already_seen = seen
-        .get(physical_index)
-        .copied()
-        .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
-    if already_seen {
-        return Err(CacheError::InvalidInput(format!(
-            "duplicate samples metadata row for cache_id={} sample_id={}",
-            update.cache_id, update.sample_id
-        )));
-    }
-    let seen_slot = seen
-        .get_mut(physical_index)
-        .ok_or_else(|| CacheError::InvalidCache("weight seen index is out of range".to_string()))?;
-    *seen_slot = true;
     physical_indices.push(physical_index);
     weights.push(update.weight);
     Ok(())
