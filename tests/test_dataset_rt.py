@@ -36,6 +36,14 @@ class TinySource:
         yield CacheInput(memoryview(b"two"), {"label": "c", "index": 2, "score": 3.5, "kept": True})
 
 
+class FiveSource:
+    name = "five"
+
+    def __iter__(self):
+        for index in range(5):
+            yield CacheInput(str(index + 1).encode(), {"index": index, "split": "train"})
+
+
 def success_paths(results: list[CacheWriteResult]) -> list[Path]:
     paths: list[Path] = []
     for result in results:
@@ -66,6 +74,31 @@ def shuffled_tiny_dataset(tiny_cache_paths: list[Path]) -> dataset_rt_api.Cached
         tiny_cache_paths,
         reader_config=ReaderConfig(seed=7, shuffle=True),
     )
+
+
+@pytest.fixture
+def five_cache_paths(tmp_path: Path) -> list[Path]:
+    return success_paths(RUNTIME.write_cache(FiveSource(), tmp_path / "cache"))
+
+
+@pytest.fixture
+def five_dataset(five_cache_paths: list[Path]) -> dataset_rt_api.CachedDataset:
+    return RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=False),
+    )
+
+
+@pytest.fixture
+def shuffled_five_dataset(five_cache_paths: list[Path]) -> dataset_rt_api.CachedDataset:
+    return RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+
+
+def sample_indices(dataset: dataset_rt_api.CachedDataset) -> list[int]:
+    return [cast(int, sample.metadata["index"]) for sample in dataset]
 
 
 def test_write_and_read_cache(tmp_path: Path) -> None:
@@ -440,6 +473,115 @@ def test_reader_config_controls_workers_prefetch_and_shuffle(tmp_path: Path) -> 
     assert [sample.sample_id for sample in dataset] == [0, 1, 2]
 
 
+def test_set_epoch_len_uses_cyclic_windows_for_non_shuffled_reads(
+    five_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    five_dataset.set_epoch_len(2)
+
+    first = sample_indices(five_dataset)
+    second = sample_indices(five_dataset)
+    third = sample_indices(five_dataset)
+
+    assert len(five_dataset) == 2
+    assert first == [0, 1]
+    assert second == [2, 3]
+    assert third == [4, 0]
+
+
+def test_set_epoch_len_cycles_when_longer_than_active_rows(
+    five_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    five_dataset.set_epoch_len(7)
+
+    assert len(five_dataset) == 7
+    assert sample_indices(five_dataset) == [0, 1, 2, 3, 4, 0, 1]
+
+
+def test_set_epoch_len_keeps_shuffled_stream_continuous(
+    five_cache_paths: list[Path],
+) -> None:
+    windowed = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+    whole = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+
+    windowed.set_epoch_len(2)
+    whole.set_epoch_len(6)
+
+    windowed_indices = [index for _ in range(3) for index in sample_indices(windowed)]
+
+    assert windowed_indices == sample_indices(whole)
+
+
+def test_set_epoch_len_keeps_weighted_shuffled_stream_continuous(
+    five_cache_paths: list[Path],
+) -> None:
+    windowed = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+    whole = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+
+    windowed.update_metadata(windowed.get_metadata())
+    whole.update_metadata(whole.get_metadata())
+    windowed.set_epoch_len(2)
+    whole.set_epoch_len(6)
+
+    windowed_indices = [index for _ in range(3) for index in sample_indices(windowed)]
+
+    assert windowed_indices == sample_indices(whole)
+
+
+def test_update_metadata_preserves_epoch_len_and_resets_non_shuffled_cursor(
+    five_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    five_dataset.set_epoch_len(2)
+
+    assert sample_indices(five_dataset) == [0, 1]
+
+    five_dataset.update_metadata(five_dataset.get_metadata())
+
+    assert len(five_dataset) == 2
+    assert sample_indices(five_dataset) == [0, 1]
+
+
+def test_update_metadata_resets_shuffled_stream(
+    five_cache_paths: list[Path],
+) -> None:
+    advanced = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+    reference = RUNTIME.cached_dataset(
+        five_cache_paths,
+        reader_config=ReaderConfig(seed=11, shuffle=True),
+    )
+
+    advanced.set_epoch_len(2)
+    reference.set_epoch_len(2)
+    reference.update_metadata(reference.get_metadata())
+    reference.set_epoch_len(2)
+    sample_indices(advanced)
+    advanced.update_metadata(advanced.get_metadata())
+    advanced.set_epoch_len(2)
+
+    assert sample_indices(advanced) == sample_indices(reference)
+
+
+def test_set_epoch_len_rejects_non_positive_values(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    with pytest.raises(ValueError, match="epoch_len must be at least 1"):
+        tiny_dataset.set_epoch_len(0)
+
+
 def test_reader_config_validation() -> None:
     with pytest.raises(ValidationError):
         ReaderConfig(seed=7, prefetch_size=cast(int, 0))
@@ -486,6 +628,26 @@ def test_torch_adapter_rejects_dataloader_workers(
         iter(torch_dataset)
 
 
+def test_torch_adapter_reports_configured_epoch_len(
+    tiny_dataset: dataset_rt_api.CachedDataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeTorchData:
+        class IterableDataset:
+            pass
+
+        @staticmethod
+        def get_worker_info() -> None:
+            return None
+
+    monkeypatch.setattr(dataset_rt_api, "import_module", lambda name: FakeTorchData)
+
+    tiny_dataset.set_epoch_len(5)
+    torch_dataset = tiny_dataset.to_torch_iterable_dataset()
+
+    assert len(torch_dataset) == 5
+    assert [sample.data for sample in torch_dataset] == [b"zero", b"one", b"two", b"zero", b"one"]
+
+
 def test_get_metadata_returns_polars_table_with_metadata(
     tiny_dataset: dataset_rt_api.CachedDataset,
 ) -> None:
@@ -510,8 +672,8 @@ def test_update_metadata_limits_active_samples(tiny_dataset: dataset_rt_api.Cach
     samples = list(tiny_dataset)
     round_trip = tiny_dataset.get_metadata()
 
-    assert len(tiny_dataset) == 2
-    assert [sample.data for sample in samples] == [b"zero", b"one"]
+    assert len(tiny_dataset) == 3
+    assert [sample.data for sample in samples] == [b"zero", b"one", b"zero"]
     assert round_trip["sample_id"].to_list() == [0, 1]
 
 
@@ -532,9 +694,9 @@ def test_update_metadata_changes_new_iterators_not_existing_iterator(
 
     tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(1))
 
-    assert len(tiny_dataset) == 1
+    assert len(tiny_dataset) == 3
     assert [sample.data for sample in existing_iterator] == [b"one", b"two"]
-    assert [sample.data for sample in tiny_dataset] == [b"two"]
+    assert [sample.data for sample in tiny_dataset] == [b"two", b"two", b"two"]
 
 
 def test_update_metadata_limits_shuffled_sampling_to_active_rows(
@@ -544,8 +706,8 @@ def test_update_metadata_limits_shuffled_sampling_to_active_rows(
         shuffled_tiny_dataset.get_metadata().filter(pl.col("label") == "c")
     )
 
-    assert len(shuffled_tiny_dataset) == 1
-    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two"]
+    assert len(shuffled_tiny_dataset) == 3
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two", b"two"]
 
 
 def test_update_metadata_allows_duplicate_rows_in_active_table(
@@ -575,8 +737,8 @@ def test_update_metadata_samples_duplicate_rows_when_shuffled(
 
     shuffled_tiny_dataset.update_metadata(duplicated)
 
-    assert len(shuffled_tiny_dataset) == 2
-    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two"]
+    assert len(shuffled_tiny_dataset) == 3
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two", b"two"]
 
 
 def test_update_metadata_preserves_optional_columns(
@@ -707,8 +869,8 @@ def test_samples_metadata_and_set_samples_metadata_remain_compatible(
 
     samples = list(tiny_dataset)
 
-    assert len(tiny_dataset) == 1
-    assert [sample.data for sample in samples] == [b"two"]
+    assert len(tiny_dataset) == 3
+    assert [sample.data for sample in samples] == [b"two", b"two", b"two"]
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:

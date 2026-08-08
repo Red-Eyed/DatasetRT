@@ -79,7 +79,13 @@ already-created iterators keep their snapshot.
 
 With `ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
 multinomial sampling with replacement over the active table. With
-`shuffle=False`, it emits active rows once in table order, including duplicates.
+`shuffle=False`, it emits active rows in cyclic table order, including
+duplicates.
+Use `dataset.set_epoch_len(n)` to make future iterators emit a finite window of
+`n` samples. Ordered reads continue through the active table cyclically across
+iterator boundaries, while shuffled reads continue a deterministic multinomial
+draw stream. Updating metadata resets the stream without changing the epoch
+length.
 
 ## Quickstart
 

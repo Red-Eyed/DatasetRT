@@ -4,43 +4,58 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::types::{CacheError, CacheResult};
 
+#[derive(Clone)]
 pub enum EpochSampler {
     Uniform {
-        rng: ChaCha8Rng,
+        seed: u64,
+        next_draw: u64,
         remaining: usize,
         sample_count: usize,
     },
     Weighted {
         distribution: WeightedIndex<f64>,
-        rng: ChaCha8Rng,
+        seed: u64,
+        next_draw: u64,
         remaining: usize,
     },
 }
 
 impl EpochSampler {
     /// Create a uniform replacement sampler without allocating a full weight vector.
-    pub fn uniform(sample_count: usize, seed: u64, epoch: u64) -> CacheResult<Self> {
+    pub fn uniform(
+        sample_count: usize,
+        seed: u64,
+        start_draw: u64,
+        epoch_len: usize,
+    ) -> CacheResult<Self> {
         if sample_count == 0 {
             return Err(CacheError::InvalidInput(
-                "cannot sample an empty epoch".to_string(),
+                "cannot sample from an empty population".to_string(),
             ));
         }
         Ok(Self::Uniform {
-            rng: epoch_rng(seed, epoch),
-            remaining: sample_count,
+            seed,
+            next_draw: start_draw,
+            remaining: epoch_len,
             sample_count,
         })
     }
 
     /// Create a weighted multinomial replacement sampler from a validated weight snapshot.
-    pub fn weighted(weights: &[f64], seed: u64, epoch: u64) -> CacheResult<Self> {
+    pub fn weighted(
+        weights: &[f64],
+        seed: u64,
+        start_draw: u64,
+        epoch_len: usize,
+    ) -> CacheResult<Self> {
         validate_weights(weights, weights.len())?;
         let distribution = WeightedIndex::new(weights)
             .map_err(|error| CacheError::InvalidInput(format!("invalid weights: {error}")))?;
         Ok(Self::Weighted {
             distribution,
-            rng: epoch_rng(seed, epoch),
-            remaining: weights.len(),
+            seed,
+            next_draw: start_draw,
+            remaining: epoch_len,
         })
     }
 
@@ -59,26 +74,32 @@ impl Iterator for EpochSampler {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Uniform {
-                rng,
+                seed,
+                next_draw,
                 remaining,
                 sample_count,
             } => {
                 if *remaining == 0 {
                     return None;
                 }
+                let mut rng = sample_rng(*seed, *next_draw);
+                *next_draw = next_draw.saturating_add(1);
                 *remaining -= 1;
                 Some(rng.gen_range(0..*sample_count))
             }
             Self::Weighted {
                 distribution,
-                rng,
+                seed,
+                next_draw,
                 remaining,
             } => {
                 if *remaining == 0 {
                     return None;
                 }
+                let mut rng = sample_rng(*seed, *next_draw);
+                *next_draw = next_draw.saturating_add(1);
                 *remaining -= 1;
-                Some(distribution.sample(rng))
+                Some(distribution.sample(&mut rng))
             }
         }
     }
@@ -105,13 +126,13 @@ pub fn validate_weights(weights: &[f64], sample_count: usize) -> CacheResult<()>
 
 /// Collect a weighted epoch for tests that need direct sequence comparison.
 #[cfg(test)]
-fn plan_epoch(weights: &[f64], seed: u64, epoch: u64) -> CacheResult<Vec<usize>> {
-    Ok(EpochSampler::weighted(weights, seed, epoch)?.collect())
+fn plan_epoch(weights: &[f64], seed: u64, start_draw: u64) -> CacheResult<Vec<usize>> {
+    Ok(EpochSampler::weighted(weights, seed, start_draw, weights.len())?.collect())
 }
 
-/// Derive the deterministic epoch RNG from the dataset seed and epoch counter.
-fn epoch_rng(seed: u64, epoch: u64) -> ChaCha8Rng {
-    ChaCha8Rng::seed_from_u64(seed ^ epoch.rotate_left(32))
+/// Derive one deterministic draw RNG from the dataset seed and global draw index.
+fn sample_rng(seed: u64, draw: u64) -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(seed ^ draw.rotate_left(32))
 }
 
 #[cfg(test)]

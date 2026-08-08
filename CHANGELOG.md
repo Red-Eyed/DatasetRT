@@ -2,6 +2,19 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.3.0 - 2026-08-08
+
+### Added
+
+- Added `CachedDataset.set_epoch_len()` to control how many samples each future iterator emits.
+- Added cyclic non-shuffled epoch windows so short epochs continue through active rows across iterator boundaries.
+- Added continuous shuffled draw streams so short shuffled epochs split one deterministic multinomial stream.
+
+### Changed
+
+- Made `len(dataset)` report the configured epoch length while metadata updates continue to control only the active sampling population.
+- Reset ordered and shuffled stream positions after `update_metadata()` without changing the configured epoch length.
+
 ## 0.2.6 - 2026-08-04
 
 ### Changed

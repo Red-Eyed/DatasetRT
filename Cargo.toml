@@ -1,6 +1,6 @@
 [package]
 name = "dataset_rt"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 description = "Framework-independent dataset cache runtime"
 license = "MIT"

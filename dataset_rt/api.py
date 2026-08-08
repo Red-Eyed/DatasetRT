@@ -469,26 +469,43 @@ class CachedDataset:
         return dataset
 
     def __iter__(self) -> Iterator[CachedSample]:
-        """Create an iterator from the current active metadata table.
+        """Create an iterator from the current active metadata table and epoch length.
 
-        Iterator construction snapshots Rust runtime state. Later
-        `update_metadata` calls affect future iterators, not this iterator.
+        Iterator construction snapshots Rust runtime state. Later `set_epoch_len`
+        or `update_metadata` calls affect future iterators, not this iterator.
 
         With `ReaderConfig.shuffle=True`, Rust creates a deterministic weighted
-        multinomial sampler over active metadata rows. With `shuffle=False`,
-        iteration follows active metadata table order, including duplicate rows.
+        multinomial stream over active metadata rows. With `shuffle=False`,
+        iteration follows active metadata table order from the current cyclic
+        cursor, including duplicate rows.
         """
         for data, metadata, cache_id, sample_id in self._inner:
             yield CachedSample(data, metadata, cache_id, sample_id)
 
     def __len__(self) -> int:
-        """Return the active metadata row count used by future iterators.
+        """Return the number of samples emitted by each future iterator.
 
-        This value changes after `update_metadata`. Filtered-out rows reduce the
-        length, and duplicate rows increase it. Existing iterators keep their
-        own snapshot even if this value changes mid-epoch.
+        This value changes after `set_epoch_len` or `update_metadata`. Existing
+        iterators keep their own snapshot even if this value changes mid-epoch.
         """
         return len(self._inner)
+
+    def set_epoch_len(self, epoch_len: int) -> None:
+        """Set how many samples each future iterator emits before stopping.
+
+        `epoch_len` must be at least 1. The active metadata table remains the
+        sampling population; this method changes only the finite window length.
+        Existing iterators keep their snapshot.
+
+        With `ReaderConfig.shuffle=False`, future iterators continue from the
+        current cyclic active-row cursor. With `ReaderConfig.shuffle=True`,
+        future iterators continue from the current multinomial draw stream.
+        `update_metadata` resets the cursor or draw stream without changing
+        `epoch_len`.
+        """
+        if epoch_len < 1:
+            raise ValueError("epoch_len must be at least 1")
+        self._inner.set_epoch_len(epoch_len)
 
     def to_torch_iterable_dataset(self) -> SizedTorchIterableDataset:
         """Return a sized `torch.utils.data.IterableDataset` view.
@@ -550,8 +567,8 @@ class CachedDataset:
         - Each row is one active sampling row. Duplicate `(cache_id, sample_id)`
           rows are allowed and represent repeated entries for the same physical
           sample.
-        - `len(dataset)` equals the number of active rows returned here,
-          including duplicate rows.
+        - `len(dataset)` equals the configured epoch length. By default it
+          matches the active row count, including duplicate rows.
         - Cache files are not read or rewritten by this method beyond exporting
           the current Rust-owned in-memory table.
         """
@@ -589,7 +606,7 @@ class CachedDataset:
         - Duplicate `(cache_id, sample_id)` rows are allowed. Each duplicate is
           a separate active row that points to the same immutable physical
           sample, useful for row-duplication balancing or OHEM.
-        - `len(dataset)` becomes `metadata.height`, including duplicate rows.
+        - `len(dataset)` keeps the current epoch length.
         - With `ReaderConfig(shuffle=False)`, future iterators emit active rows
           exactly in table order, including duplicates.
         - With `ReaderConfig.shuffle=True`, future iterators sample with

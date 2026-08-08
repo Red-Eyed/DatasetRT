@@ -110,6 +110,24 @@ impl PrefetchSize {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct EpochLen(usize);
+
+impl EpochLen {
+    pub fn new(value: usize) -> CacheResult<Self> {
+        if value == 0 {
+            return Err(CacheError::InvalidInput(
+                "epoch_len must be at least 1".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct NumWorkers(usize);
 
 impl NumWorkers {

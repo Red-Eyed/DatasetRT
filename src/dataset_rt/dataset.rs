@@ -13,7 +13,7 @@ use crate::samples_metadata::{
 use crate::sampling::EpochSampler;
 use crate::storage::{load_cache, LoadedCache};
 use crate::types::{
-    CacheError, CacheResult, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
+    CacheError, CacheResult, EpochLen, MetadataField, MetadataValue, NumWorkers, PrefetchSize,
 };
 use crate::worker_pool::WorkerPool;
 
@@ -37,7 +37,9 @@ struct DatasetState {
 
 struct MutableDatasetState {
     active: ActiveMetadata,
-    next_epoch: u64,
+    epoch_len: EpochLen,
+    sequential_offset: usize,
+    shuffled_draw_offset: u64,
 }
 
 enum ActiveMetadata {
@@ -72,7 +74,7 @@ impl PyCachedDataset {
     }
 
     fn __len__(&self) -> PyResult<usize> {
-        self.inner.active_len().map_err(CacheError::into_py_err)
+        self.inner.epoch_len().map_err(CacheError::into_py_err)
     }
 
     fn __iter__(&self) -> PyResult<PyDatasetIterator> {
@@ -108,13 +110,20 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        guard.active = ActiveMetadata::Table(active);
+        guard.replace_active(ActiveMetadata::Table(active));
         Ok(())
     }
 
     /// Replace metadata using the compatibility native method name.
     fn set_samples_metadata_ipc(&self, ipc: Bound<'_, PyBytes>) -> PyResult<()> {
         self.update_metadata_ipc(ipc)
+    }
+
+    /// Set the finite number of samples emitted by future iterators.
+    fn set_epoch_len(&self, epoch_len: usize) -> PyResult<()> {
+        self.inner
+            .set_epoch_len(epoch_len)
+            .map_err(CacheError::into_py_err)
     }
 }
 
@@ -156,7 +165,9 @@ impl DatasetState {
             shuffle,
             mutable: Mutex::new(MutableDatasetState {
                 active: ActiveMetadata::Full,
-                next_epoch: 0,
+                epoch_len: EpochLen::new(total_samples)?,
+                sequential_offset: 0,
+                shuffled_draw_offset: 0,
             }),
         })
     }
@@ -176,38 +187,55 @@ impl DatasetState {
     /// Snapshot the active table and construct the epoch plan used by one iterator.
     fn epoch_plan(&self) -> CacheResult<EpochPlan> {
         let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        let epoch_len = guard.epoch_len.as_usize();
         if !self.shuffle {
-            return Ok(match &guard.active {
-                ActiveMetadata::Full => EpochPlan::PhysicalOrder {
-                    len: self.total_samples,
-                },
-                ActiveMetadata::Table(active) => EpochPlan::PhysicalIndices {
-                    physical_indices: active.physical_indices.clone(),
-                },
+            let population_len = active_len(&guard.active, self.total_samples);
+            let start = guard.sequential_offset;
+            guard.sequential_offset = advance_cyclic_offset(start, epoch_len, population_len)?;
+            return Ok(EpochPlan::Sequential {
+                len: epoch_len,
+                start,
+                population_len,
+                physical_indices: active_physical_indices(&guard.active),
             });
         }
 
-        let epoch = guard.next_epoch;
-        guard.next_epoch += 1;
+        let start_draw = guard.shuffled_draw_offset;
+        guard.shuffled_draw_offset = advance_draw_offset(start_draw, epoch_len)?;
         match &guard.active {
             ActiveMetadata::Full => Ok(EpochPlan::Shuffled {
-                sampler: Box::new(EpochSampler::uniform(self.total_samples, self.seed, epoch)?),
+                sampler: Box::new(EpochSampler::uniform(
+                    self.total_samples,
+                    self.seed,
+                    start_draw,
+                    epoch_len,
+                )?),
                 physical_indices: None,
             }),
             ActiveMetadata::Table(active) => Ok(EpochPlan::Shuffled {
-                sampler: Box::new(EpochSampler::weighted(&active.weights, self.seed, epoch)?),
+                sampler: Box::new(EpochSampler::weighted(
+                    &active.weights,
+                    self.seed,
+                    start_draw,
+                    epoch_len,
+                )?),
                 physical_indices: Some(active.physical_indices.clone()),
             }),
         }
     }
 
-    /// Return the row count visible through future dataset iterators.
-    fn active_len(&self) -> CacheResult<usize> {
+    /// Return the finite number of samples emitted by future dataset iterators.
+    fn epoch_len(&self) -> CacheResult<usize> {
         let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
-        Ok(match &guard.active {
-            ActiveMetadata::Full => self.total_samples,
-            ActiveMetadata::Table(active) => active.physical_indices.len(),
-        })
+        Ok(guard.epoch_len.as_usize())
+    }
+
+    /// Set the future iterator length without changing the active sampling population.
+    fn set_epoch_len(&self, epoch_len: usize) -> CacheResult<()> {
+        let epoch_len = EpochLen::new(epoch_len)?;
+        let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        guard.epoch_len = epoch_len;
+        Ok(())
     }
 
     /// Build or return the active metadata table IPC without touching immutable cache files.
@@ -233,6 +261,54 @@ impl DatasetState {
             &self.schema,
         )
     }
+}
+
+impl MutableDatasetState {
+    /// Replace active rows and reset stream positions without changing epoch length.
+    fn replace_active(&mut self, active: ActiveMetadata) {
+        self.active = active;
+        self.sequential_offset = 0;
+        self.shuffled_draw_offset = 0;
+    }
+}
+
+fn active_len(active: &ActiveMetadata, total_samples: usize) -> usize {
+    match active {
+        ActiveMetadata::Full => total_samples,
+        ActiveMetadata::Table(active) => active.physical_indices.len(),
+    }
+}
+
+fn active_physical_indices(active: &ActiveMetadata) -> Option<Arc<Vec<usize>>> {
+    match active {
+        ActiveMetadata::Full => None,
+        ActiveMetadata::Table(active) => Some(active.physical_indices.clone()),
+    }
+}
+
+fn advance_cyclic_offset(start: usize, step: usize, population_len: usize) -> CacheResult<usize> {
+    if population_len == 0 {
+        return Err(CacheError::InvalidInput(
+            "cannot iterate an empty active population".to_string(),
+        ));
+    }
+    let step = step % population_len;
+    let distance_to_wrap = population_len.checked_sub(step).ok_or_else(|| {
+        CacheError::InvalidInput("active population length overflowed usize".to_string())
+    })?;
+    if start >= distance_to_wrap {
+        Ok(start - distance_to_wrap)
+    } else {
+        Ok(start + step)
+    }
+}
+
+fn advance_draw_offset(start: u64, step: usize) -> CacheResult<u64> {
+    let step = u64::try_from(step)
+        .map_err(|_| CacheError::InvalidInput("epoch_len does not fit in u64".to_string()))?;
+    start
+        .checked_add(step)
+        .ok_or_else(|| CacheError::InvalidInput("shuffled draw offset overflowed u64".to_string()))
 }
 
 /// Build prefix offsets that map each cache to its first physical sample index.

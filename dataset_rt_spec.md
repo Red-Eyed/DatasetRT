@@ -150,8 +150,8 @@ dataset.set_samples_metadata(metadata)
 
 -   metadata-driven
 -   weighted multinomial
--   epoch length equals physical sample count
--   deterministic for cache + weights + seed + epoch
+-   epoch length defaults to active sample count and can be changed at runtime
+-   deterministic for cache + weights + seed + stream position
 
 ------------------------------------------------------------------------
 

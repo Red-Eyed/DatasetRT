@@ -22,11 +22,11 @@ struct LoadedResult {
 }
 
 pub enum EpochPlan {
-    PhysicalOrder {
+    Sequential {
         len: usize,
-    },
-    PhysicalIndices {
-        physical_indices: Arc<Vec<usize>>,
+        start: usize,
+        population_len: usize,
+        physical_indices: Option<Arc<Vec<usize>>>,
     },
     Shuffled {
         sampler: Box<EpochSampler>,
@@ -38,8 +38,7 @@ impl EpochPlan {
     /// Return the number of samples the plan will emit without materializing physical order.
     fn len(&self) -> usize {
         match self {
-            Self::PhysicalOrder { len } => *len,
-            Self::PhysicalIndices { physical_indices } => physical_indices.len(),
+            Self::Sequential { len, .. } => *len,
             Self::Shuffled { sampler, .. } => sampler.len(),
         }
     }
@@ -47,8 +46,21 @@ impl EpochPlan {
     /// Return the next physical sample without materializing an epoch-wide task list.
     fn next_physical_index(&mut self, sequence: usize) -> Option<usize> {
         match self {
-            Self::PhysicalOrder { len } => (sequence < *len).then_some(sequence),
-            Self::PhysicalIndices { physical_indices } => physical_indices.get(sequence).copied(),
+            Self::Sequential {
+                len,
+                start,
+                population_len,
+                physical_indices,
+            } => {
+                if sequence >= *len {
+                    return None;
+                }
+                let active_index = wrapping_add_mod(*start, sequence, *population_len)?;
+                match physical_indices {
+                    Some(indices) => indices.get(active_index).copied(),
+                    None => Some(active_index),
+                }
+            }
             Self::Shuffled {
                 sampler,
                 physical_indices,
@@ -60,6 +72,19 @@ impl EpochPlan {
                 }
             }
         }
+    }
+}
+
+fn wrapping_add_mod(start: usize, offset: usize, modulo: usize) -> Option<usize> {
+    if modulo == 0 {
+        return None;
+    }
+    let offset = offset % modulo;
+    let distance_to_wrap = modulo.checked_sub(offset)?;
+    if start >= distance_to_wrap {
+        Some(start - distance_to_wrap)
+    } else {
+        Some(start + offset)
     }
 }
 
