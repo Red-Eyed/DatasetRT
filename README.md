@@ -87,6 +87,20 @@ iterator boundaries, while shuffled reads continue a deterministic multinomial
 draw stream. Updating metadata resets the stream without changing the epoch
 length.
 
+## Installation
+
+DatasetRT supports Python 3.10 through 3.13.
+
+```bash
+uv add dataset-rt
+```
+
+Or with pip:
+
+```bash
+pip install dataset-rt
+```
+
 ## Quickstart
 
 Wrap your existing data source as a Python iterable that yields payload bytes and
