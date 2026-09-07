@@ -2,6 +2,18 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.0rc1 - 2026-09-07
+
+### Added
+
+- Added `WriterConfig(num_processes=...)` to write independent sources with spawned Python processes in both `DatasetRuntime.write_cache()` and `DatasetRuntime.from_cache_sources()`. The default `0` keeps writes in the calling process.
+- Preserved input-order results, native duplicate-path validation, cache reuse, and per-source error handling across process partitions. Each process owns a Rust worker pool using the runtime's `num_workers`.
+
+### Changed
+
+- Limited native progress rendering to the first process partition to prevent overlapping terminal output. Its counts cover that partition; `show_progress=False` disables all bars.
+- Wrote separate numbered profiler files for process partitions when profiling is enabled.
+
 ## 0.3.0 - 2026-08-08
 
 ### Added

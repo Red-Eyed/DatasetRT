@@ -60,6 +60,14 @@ struct SerializedSample {
 
 type CacheWriteRecord = (String, String, String);
 
+/// Reject conflicting cache destinations before independent processes start writing.
+pub fn validate_source_paths(
+    sources: &Bound<'_, PyList>,
+    base_cache_dir: &Path,
+) -> CacheResult<()> {
+    pipeline::ensure_unique_source_paths(sources, base_cache_dir)
+}
+
 pub fn write_cache(
     pool: Arc<WorkerPool>,
     num_workers: NumWorkers,

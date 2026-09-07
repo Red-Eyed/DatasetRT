@@ -70,7 +70,7 @@ pub(super) fn write_source_list(
     complete_write_results(pipeline.finish()?)
 }
 
-fn ensure_unique_source_paths(
+pub(super) fn ensure_unique_source_paths(
     sources: &Bound<'_, PyList>,
     base_cache_dir: &Path,
 ) -> CacheResult<()> {

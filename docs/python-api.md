@@ -94,6 +94,7 @@ class ShardCompression(BaseModel):
     ratio: float = 1.0
 
 class WriterConfig(BaseModel):
+    num_processes: int = 0
     prefetch_size: int = 64
     max_shard_bytes: int = 64 * 1024 * 1024
     shard_compression: ShardCompression = ShardCompression()
@@ -117,6 +118,11 @@ Rules:
 - Every target path must not already contain a completed cache.
 - Source names used as subdirectories must be plain path segments.
 - `prefetch_size` must be greater than zero.
+- `num_processes` must be nonnegative. Zero uses the calling process; positive values split
+  sources into at most that many partitions handled by spawned Python processes. Each process
+  creates its own Rust pool with the runtime's `num_workers`. Results preserve input order.
+  Both `write_cache` and `from_cache_sources` support this option. Profiling writes numbered
+  partition files (`profile.0.json`, `profile.1.json`, ...) instead of a shared file.
 - `validate_cache=True` verifies existing cache checksums before reuse.
 - The source must yield at least one sample.
 - Payload data must be bytes-like.
@@ -486,6 +492,12 @@ Returns one `CacheWriteSuccess` or `CacheWriteError` per source in input
 order. Per-source failures are reported as values instead of exceptions
 when Rust can handle them cleanly.
 
+`writer_config.num_processes` enables a spawned Python process pool.
+Each process uses this runtime's Rust worker count. Profiling writes
+one numbered file per source partition when multiprocessing is enabled.
+Only the first partition renders native progress bars; its displayed
+counts cover that partition, not the entire source list.
+
 #### `DatasetRuntime.cached_dataset(paths: Sequence[str | Path], *, reader_config: ReaderConfig) -> CachedDataset`
 
 Load immutable cache directories into a `CachedDataset`.
@@ -550,6 +562,7 @@ Return the physical sample count visible to PyTorch.
 Configuration for Rust-owned cache writing.
 
 Fields:
+- `num_processes: int`: Python processes for writing independent sources; zero disables the pool.
 - `prefetch_size: int`: Maximum number of writer tasks/results buffered by Rust.
 - `max_shard_bytes: int`: Target shard byte size before Rust rotates to a new shard.
 - `shard_compression: ShardCompression`: Per-record payload compression policy for new shards.

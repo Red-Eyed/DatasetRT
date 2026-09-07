@@ -19,6 +19,14 @@ mod writer;
 use dataset::PyCachedDataset;
 use dataset_runtime::PyDatasetRuntime;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
+
+/// Share native destination validation with Python source-level process orchestration.
+#[pyfunction]
+fn validate_source_paths(sources: Bound<'_, PyList>, base_cache_dir: String) -> PyResult<()> {
+    writer::validate_source_paths(&sources, std::path::Path::new(&base_cache_dir))
+        .map_err(types::CacheError::into_py_err)
+}
 
 #[pyfunction]
 fn write_cache(
@@ -42,6 +50,7 @@ fn write_cache(
 #[pymodule]
 fn _dataset_rt(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_cache, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_source_paths, module)?)?;
     module.add_class::<PyDatasetRuntime>()?;
     module.add_class::<PyCachedDataset>()?;
     Ok(())

@@ -50,6 +50,7 @@ The commit stage owns:
 
 Writer operation settings:
 
+- `num_processes`: opt-in Python source processes; zero (default) uses the calling process.
 - `prefetch_size`: maximum buffered writer task/result capacity.
 - runtime `num_workers`: fixed pool size and maximum active writer jobs.
 - `show_progress`: optional Rust-owned progress rendering with committed samples/s and MB/s for the active source, plus source-count progress and ETA for multi-source writes.
@@ -59,6 +60,15 @@ Writer operation settings:
 If Python iteration is faster than writing, Rust keeps at most `min(num_workers, prefetch_size)` writer jobs active and then commits a completed job before pulling more input. For multi-source writes, the bounded window can span source boundaries while ordered commit keeps manifests and result ordering deterministic.
 
 Each operation's result queue has the same capacity as its active-job limit. Cache commit and publish remain sequential for deterministic manifests and result ordering.
+
+With `WriterConfig(num_processes=N)`, the Python wrapper submits at most N source partitions
+to a spawned process pool. Each process uses an independent Rust runtime with the configured
+`num_workers`; sample data stays inside that process. Rust validates destination uniqueness
+before spawning, and Python collects partition results in input order. Cache memory bounds
+apply per process. Pool shutdown waits for active partitions to finish, including when a
+child propagates an interrupt. Only the first partition renders its existing native progress
+bars, so workers cannot overwrite each other's display. Those counts cover the first partition,
+not the entire job. `show_progress=False` suppresses all bars.
 
 ## Backpressure
 
