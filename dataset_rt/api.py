@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
-from dataset_rt._multiprocessing import CacheWriter
+from dataset_rt._dataset_rt import write_cache as _write_cache
 
 if TYPE_CHECKING:
     from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
@@ -103,13 +103,6 @@ class WriterConfig(BaseModel):
     """Configuration for Rust-owned cache writing."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-
-    num_processes: int = Field(
-        default=0,
-        ge=0,
-        description="Python processes for writing independent sources; zero disables the pool.",
-    )
-    """Split sources across spawned processes; zero writes in the calling process."""
 
     prefetch_size: int = Field(
         default=64,
@@ -334,7 +327,7 @@ class DatasetRuntime:
     once at construction and reused; per-operation APIs do not resize the pool.
     """
 
-    __slots__ = ("_inner", "_num_workers", "_writer")
+    __slots__ = ("_inner", "_num_workers")
 
     def __init__(self, *, num_workers: int) -> None:
         """Create exactly `num_workers` reusable Rust worker threads.
@@ -345,7 +338,6 @@ class DatasetRuntime:
         """
         self._num_workers = num_workers
         self._inner = _RustDatasetRuntime(num_workers)
-        self._writer = CacheWriter(self._inner, num_workers)
 
     @property
     def num_workers(self) -> int:
@@ -370,14 +362,9 @@ class DatasetRuntime:
         Returns one `CacheWriteSuccess` or `CacheWriteError` per source in input
         order. Per-source failures are reported as values instead of exceptions
         when Rust can handle them cleanly.
-
-        `writer_config.num_processes` enables a spawned Python process pool.
-        Each process uses this runtime's Rust worker count. Profiling writes
-        one numbered file per source partition when multiprocessing is enabled.
-        Only the first partition renders native progress bars; its displayed
-        counts cover that partition, not the entire source list.
         """
-        results = self._writer(
+        results = _write_cache(
+            self._inner,
             sources,
             str(path),
             writer_config,
@@ -424,7 +411,8 @@ class DatasetRuntime:
         """
         results = [
             _cache_write_result(result)
-            for result in self._writer(
+            for result in _write_cache(
+                self._inner,
                 sources,
                 str(path),
                 writer_config,
