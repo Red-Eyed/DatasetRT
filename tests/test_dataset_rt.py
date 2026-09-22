@@ -539,7 +539,7 @@ def test_set_epoch_len_keeps_weighted_shuffled_stream_continuous(
     assert windowed_indices == sample_indices(whole)
 
 
-def test_update_metadata_preserves_epoch_len_and_resets_non_shuffled_cursor(
+def test_update_metadata_resets_epoch_len_and_non_shuffled_cursor(
     five_dataset: dataset_rt_api.CachedDataset,
 ) -> None:
     five_dataset.set_epoch_len(2)
@@ -548,8 +548,8 @@ def test_update_metadata_preserves_epoch_len_and_resets_non_shuffled_cursor(
 
     five_dataset.update_metadata(five_dataset.get_metadata())
 
-    assert len(five_dataset) == 2
-    assert sample_indices(five_dataset) == [0, 1]
+    assert len(five_dataset) == 5
+    assert sample_indices(five_dataset) == [0, 1, 2, 3, 4]
 
 
 def test_update_metadata_resets_shuffled_stream(
@@ -672,8 +672,8 @@ def test_update_metadata_limits_active_samples(tiny_dataset: dataset_rt_api.Cach
     samples = list(tiny_dataset)
     round_trip = tiny_dataset.get_metadata()
 
-    assert len(tiny_dataset) == 3
-    assert [sample.data for sample in samples] == [b"zero", b"one", b"zero"]
+    assert len(tiny_dataset) == 2
+    assert [sample.data for sample in samples] == [b"zero", b"one"]
     assert round_trip["sample_id"].to_list() == [0, 1]
 
 
@@ -694,9 +694,9 @@ def test_update_metadata_changes_new_iterators_not_existing_iterator(
 
     tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(1))
 
-    assert len(tiny_dataset) == 3
+    assert len(tiny_dataset) == 1
     assert [sample.data for sample in existing_iterator] == [b"one", b"two"]
-    assert [sample.data for sample in tiny_dataset] == [b"two", b"two", b"two"]
+    assert [sample.data for sample in tiny_dataset] == [b"two"]
 
 
 def test_update_metadata_limits_shuffled_sampling_to_active_rows(
@@ -706,23 +706,30 @@ def test_update_metadata_limits_shuffled_sampling_to_active_rows(
         shuffled_tiny_dataset.get_metadata().filter(pl.col("label") == "c")
     )
 
-    assert len(shuffled_tiny_dataset) == 3
-    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two", b"two"]
+    assert len(shuffled_tiny_dataset) == 1
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two"]
 
 
 def test_update_metadata_allows_duplicate_rows_in_active_table(
     tiny_dataset: dataset_rt_api.CachedDataset,
 ) -> None:
     metadata = tiny_dataset.get_metadata()
-    duplicated = pl.concat([metadata.tail(1), metadata.head(1), metadata.tail(1)])
+    duplicated = pl.concat([metadata.tail(1), metadata.head(1), metadata.tail(1), metadata])
 
     tiny_dataset.update_metadata(duplicated)
 
     round_trip = tiny_dataset.get_metadata()
 
-    assert len(tiny_dataset) == 3
-    assert [sample.data for sample in tiny_dataset] == [b"two", b"zero", b"two"]
-    assert round_trip["sample_id"].to_list() == [2, 0, 2]
+    assert len(tiny_dataset) == 6
+    assert [sample.data for sample in tiny_dataset] == [
+        b"two",
+        b"zero",
+        b"two",
+        b"zero",
+        b"one",
+        b"two",
+    ]
+    assert round_trip["sample_id"].to_list() == [2, 0, 2, 0, 1, 2]
 
 
 def test_update_metadata_samples_duplicate_rows_when_shuffled(
@@ -737,8 +744,8 @@ def test_update_metadata_samples_duplicate_rows_when_shuffled(
 
     shuffled_tiny_dataset.update_metadata(duplicated)
 
-    assert len(shuffled_tiny_dataset) == 3
-    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two", b"two"]
+    assert len(shuffled_tiny_dataset) == 2
+    assert [sample.data for sample in shuffled_tiny_dataset] == [b"two", b"two"]
 
 
 def test_update_metadata_preserves_optional_columns(
@@ -764,8 +771,26 @@ def test_update_metadata_preserves_optional_columns(
 
 
 def test_update_metadata_rejects_empty_table(tiny_dataset: dataset_rt_api.CachedDataset) -> None:
+    """Rejected metadata must preserve the population and explicit epoch length."""
+    tiny_dataset.set_epoch_len(2)
+
     with pytest.raises(ValueError, match="metadata table must include at least one sample"):
         tiny_dataset.update_metadata(tiny_dataset.get_metadata().head(0))
+
+    assert len(tiny_dataset) == 2
+    assert tiny_dataset.get_metadata().height == 3
+    assert [sample.data for sample in tiny_dataset] == [b"zero", b"one"]
+
+
+def test_epoch_len_can_be_overridden_after_metadata_update(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    """An explicit window can override the length inferred from updated metadata."""
+    tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(1))
+    tiny_dataset.set_epoch_len(2)
+
+    assert len(tiny_dataset) == 2
+    assert [sample.data for sample in tiny_dataset] == [b"two", b"two"]
 
 
 @pytest.mark.parametrize("column", ["cache_id", "sample_id", "weight"])
@@ -869,8 +894,8 @@ def test_samples_metadata_and_set_samples_metadata_remain_compatible(
 
     samples = list(tiny_dataset)
 
-    assert len(tiny_dataset) == 3
-    assert [sample.data for sample in samples] == [b"two", b"two", b"two"]
+    assert len(tiny_dataset) == 1
+    assert [sample.data for sample in samples] == [b"two"]
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:

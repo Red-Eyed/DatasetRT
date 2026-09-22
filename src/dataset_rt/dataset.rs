@@ -110,7 +110,9 @@ impl PyCachedDataset {
             .mutable
             .lock()
             .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
-        guard.replace_active(ActiveMetadata::Table(active));
+        guard
+            .replace_active(active)
+            .map_err(CacheError::into_py_err)?;
         Ok(())
     }
 
@@ -264,11 +266,14 @@ impl DatasetState {
 }
 
 impl MutableDatasetState {
-    /// Replace active rows and reset stream positions without changing epoch length.
-    fn replace_active(&mut self, active: ActiveMetadata) {
-        self.active = active;
+    /// Replace the population and epoch length together after validating the row count.
+    fn replace_active(&mut self, active: ActiveMetadataTable) -> CacheResult<()> {
+        let epoch_len = EpochLen::new(active.physical_indices.len())?;
+        self.active = ActiveMetadata::Table(active);
+        self.epoch_len = epoch_len;
         self.sequential_offset = 0;
         self.shuffled_draw_offset = 0;
+        Ok(())
     }
 }
 

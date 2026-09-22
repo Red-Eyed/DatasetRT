@@ -84,8 +84,8 @@ duplicates.
 Use `dataset.set_epoch_len(n)` to make future iterators emit a finite window of
 `n` samples. Ordered reads continue through the active table cyclically across
 iterator boundaries, while shuffled reads continue a deterministic multinomial
-draw stream. Updating metadata resets the stream without changing the epoch
-length.
+draw stream. Updating metadata resets the stream and sets the epoch
+length to the new table row count. Call `set_epoch_len` afterward to override it.
 
 ## Installation
 

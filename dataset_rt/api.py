@@ -500,8 +500,8 @@ class CachedDataset:
         With `ReaderConfig.shuffle=False`, future iterators continue from the
         current cyclic active-row cursor. With `ReaderConfig.shuffle=True`,
         future iterators continue from the current multinomial draw stream.
-        `update_metadata` resets the cursor or draw stream without changing
-        `epoch_len`.
+        `update_metadata` resets the cursor or draw stream and sets `epoch_len`
+        to the new table row count. Call `set_epoch_len` afterward to override it.
         """
         if epoch_len < 1:
             raise ValueError("epoch_len must be at least 1")
@@ -606,7 +606,8 @@ class CachedDataset:
         - Duplicate `(cache_id, sample_id)` rows are allowed. Each duplicate is
           a separate active row that points to the same immutable physical
           sample, useful for row-duplication balancing or OHEM.
-        - `len(dataset)` keeps the current epoch length.
+        - `len(dataset)` becomes the new table row count, replacing any previous
+          `set_epoch_len` override.
         - With `ReaderConfig(shuffle=False)`, future iterators emit active rows
           exactly in table order, including duplicates.
         - With `ReaderConfig.shuffle=True`, future iterators sample with

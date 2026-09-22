@@ -48,7 +48,7 @@ When `update_metadata` is called, Rust validates:
 - Every weight must be positive.
 
 The all-zero case is unrepresentable because zero is not a valid v0.1 weight.
-Rows removed from the table are excluded from future iterators. Duplicate identities are allowed and make the repeated rows part of the active sampling space. Updating metadata resets the ordered cursor or shuffled draw stream without changing epoch length.
+Rows removed from the table are excluded from future iterators. Duplicate identities are allowed and make the repeated rows part of the active sampling space. Updating metadata resets the ordered cursor or shuffled draw stream and sets epoch length to the new table row count. Call `set_epoch_len` afterward to override it.
 
 ## Epoch Advancement
 
