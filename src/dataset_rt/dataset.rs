@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{bounded, Sender};
+use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
 use crate::dataset_runtime::PyDatasetRuntime;
-use crate::runtime::{EpochPlan, RuntimeIterator};
+use crate::runtime::{load_sample_by_identity, EpochPlan, RuntimeIterator};
 use crate::samples_metadata::{
     build_samples_metadata_ipc, extract_metadata_ipc, ActiveMetadataTable, WeightState,
 };
@@ -88,6 +89,23 @@ impl PyCachedDataset {
         })
     }
 
+    /// Read a physical sample independently of active rows and iterator cursors.
+    fn get_item<'py>(
+        &self,
+        py: Python<'py>,
+        cache_id: u64,
+        sample_id: u64,
+    ) -> PyResult<PySampleTuple<'py>> {
+        let sample = self
+            .inner
+            .get_item(cache_id, sample_id)
+            .map_err(|error| match error {
+                CacheError::InvalidInput(message) => PyIndexError::new_err(message),
+                error => error.into_py_err(),
+            })?;
+        sample_to_python(py, &self.inner.schema, sample)
+    }
+
     /// Return Arrow IPC metadata for the current active sample table.
     fn metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let ipc = self.inner.metadata_ipc().map_err(CacheError::into_py_err)?;
@@ -130,6 +148,16 @@ impl PyCachedDataset {
 }
 
 impl DatasetState {
+    /// Schedule one bounded read on the runtime pool without changing mutable dataset state.
+    fn get_item(&self, cache_id: u64, sample_id: u64) -> CacheResult<crate::types::LoadedSample> {
+        let caches = self.caches.clone();
+        let (sender, receiver) = bounded(1);
+        self.pool.submit(sender, move || {
+            load_sample_by_identity(caches.as_ref(), cache_id, sample_id)
+        })?;
+        receiver.recv().map_err(|_| CacheError::WorkerFailed)?
+    }
+
     fn load(
         pool: Arc<WorkerPool>,
         num_workers: NumWorkers,

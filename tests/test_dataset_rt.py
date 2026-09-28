@@ -322,6 +322,75 @@ def test_dataset_loads_multiple_caches_in_constructor_order(tmp_path: Path) -> N
     assert [sample.data for sample in samples] == [b"three", b"four", b"zero", b"one", b"two"]
     assert [sample.cache_id for sample in samples] == [0, 0, 1, 1, 1]
 
+    assert dataset.get_item(0, 1) == samples[1]
+    assert dataset.get_item(1, 2) == samples[4]
+
+
+def test_get_item_reads_filtered_sample_without_advancing_cursor(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+) -> None:
+    tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(2))
+
+    sample = tiny_dataset.get_item(0, 0)
+
+    assert sample == dataset_rt_api.CachedSample(
+        b"zero", {"index": 0, "kept": True, "label": "a", "score": 1.5}, 0, 0
+    )
+    assert [sample.data for sample in tiny_dataset] == [b"one", b"two"]
+
+
+def test_get_item_does_not_advance_shuffled_draws(
+    shuffled_five_dataset: dataset_rt_api.CachedDataset,
+    five_cache_paths: list[Path],
+) -> None:
+    reference = RUNTIME.cached_dataset(
+        five_cache_paths, reader_config=ReaderConfig(seed=11, shuffle=True)
+    )
+
+    assert shuffled_five_dataset.get_item(0, 3).data == b"4"
+    assert sample_indices(shuffled_five_dataset) == sample_indices(reference)
+
+
+def test_get_item_reads_sparse_samples_across_many_rows_and_caches(tmp_path: Path) -> None:
+    class LargeSource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __iter__(self):
+            for sample_id in range(1_024):
+                yield CacheInput(sample_id.to_bytes(2, "little"), {"sample_id": sample_id})
+
+    paths = success_paths(
+        RUNTIME.write_cache(
+            [LargeSource("first"), LargeSource("second")],
+            tmp_path / "caches",
+            writer_config=WriterConfig(show_progress=False),
+        )
+    )
+    dataset = RUNTIME.cached_dataset(paths, reader_config=ReaderConfig(seed=7, shuffle=False))
+
+    for cache_id, sample_id in [(0, 0), (0, 1_023), (1, 0), (1, 1_023)]:
+        sample = dataset.get_item(cache_id, sample_id)
+        assert sample.data == sample_id.to_bytes(2, "little")
+        assert sample.metadata == {"sample_id": sample_id}
+        assert (sample.cache_id, sample.sample_id) == (cache_id, sample_id)
+
+
+@pytest.mark.parametrize("cache_id, sample_id", [(-1, 0), (0, -1), (1, 0), (0, 3), (2**64, 0)])
+def test_get_item_rejects_unknown_identity(
+    tiny_dataset: dataset_rt_api.CachedDataset, cache_id: int, sample_id: int
+) -> None:
+    with pytest.raises(IndexError, match="out of range"):
+        tiny_dataset.get_item(cache_id, sample_id)
+
+
+@pytest.mark.parametrize("cache_id, sample_id", [(True, 0), (0, False), ("0", 0), (0, 1.0)])
+def test_get_item_rejects_non_integer_identity(
+    tiny_dataset: dataset_rt_api.CachedDataset, cache_id: object, sample_id: object
+) -> None:
+    with pytest.raises(TypeError, match="must be integers"):
+        tiny_dataset.get_item(cast(int, cache_id), cast(int, sample_id))
+
 
 def test_multi_source_write_rejects_duplicate_names_before_writing(tmp_path: Path) -> None:
     root = tmp_path / "caches"

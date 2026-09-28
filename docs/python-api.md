@@ -341,6 +341,17 @@ Return the number of samples emitted by each future iterator.
 This value changes after `set_epoch_len` or `update_metadata`. Existing
 iterators keep their own snapshot even if this value changes mid-epoch.
 
+#### `CachedDataset.get_item(cache_id: int, sample_id: int) -> CachedSample`
+
+Read a physical sample without advancing an iterator or sampling cursor.
+
+IDs refer to immutable cache contents, so filtered or duplicated active
+metadata rows do not change which sample this method returns.
+
+Raises:
+    TypeError: If either ID is not a plain integer.
+    IndexError: If either ID is outside the loaded cache range.
+
 #### `CachedDataset.set_epoch_len(epoch_len: int) -> None`
 
 Set how many samples each future iterator emits before stopping.

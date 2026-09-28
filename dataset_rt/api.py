@@ -490,6 +490,28 @@ class CachedDataset:
         """
         return len(self._inner)
 
+    def get_item(self, cache_id: int, sample_id: int) -> CachedSample:
+        """Read a physical sample without advancing an iterator or sampling cursor.
+
+        IDs refer to immutable cache contents, so filtered or duplicated active
+        metadata rows do not change which sample this method returns.
+
+        Raises:
+            TypeError: If either ID is not a plain integer.
+            IndexError: If either ID is outside the loaded cache range.
+        """
+        if type(cache_id) is not int or type(sample_id) is not int:
+            raise TypeError("cache_id and sample_id must be integers")
+        if not 0 <= cache_id <= (1 << 64) - 1:
+            raise IndexError(f"cache_id {cache_id} is out of range")
+        if not 0 <= sample_id <= (1 << 64) - 1:
+            raise IndexError(f"sample_id {sample_id} is out of range")
+
+        data, metadata, resolved_cache_id, resolved_sample_id = self._inner.get_item(
+            cache_id, sample_id
+        )
+        return CachedSample(data, metadata, resolved_cache_id, resolved_sample_id)
+
     def set_epoch_len(self, epoch_len: int) -> None:
         """Set how many samples each future iterator emits before stopping.
 

@@ -271,6 +271,34 @@ fn load_planned_sample(
     })
 }
 
+/// Read one physical identity without consulting or advancing the active sampling state.
+pub fn load_sample_by_identity(
+    caches: &[LoadedCache],
+    cache_id: u64,
+    sample_id: u64,
+) -> CacheResult<LoadedSample> {
+    let cache_index = usize::try_from(cache_id)
+        .map_err(|_| CacheError::InvalidInput(format!("cache_id {cache_id} is out of range")))?;
+    let sample_index = usize::try_from(sample_id)
+        .map_err(|_| CacheError::InvalidInput(format!("sample_id {sample_id} is out of range")))?;
+    let cache = caches
+        .get(cache_index)
+        .ok_or_else(|| CacheError::InvalidInput(format!("cache_id {cache_id} is out of range")))?;
+    if sample_index >= cache.sample_count() {
+        return Err(CacheError::InvalidInput(format!(
+            "sample_id {sample_id} is out of range for cache_id {cache_id}"
+        )));
+    }
+    let sample = SHARD_READERS
+        .with(|readers| cache.read_sample_with_cache(sample_index, &mut readers.borrow_mut()))?;
+    Ok(LoadedSample {
+        data: sample.data,
+        metadata: sample.metadata,
+        cache_id: CacheId::from_position(cache_index)?,
+        sample_id: SampleId::from_position(sample_index)?,
+    })
+}
+
 /// Resolve a compact physical index into cache-local identity for sample materialization.
 fn locate_physical_sample(
     caches: &[LoadedCache],
