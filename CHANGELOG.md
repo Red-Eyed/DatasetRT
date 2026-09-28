@@ -2,6 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.3.2 - 2026-09-28
+
+### Added
+
+- Add `CachedDataset.get_item(cache_id, sample_id)` to read an immutable physical sample directly, including samples excluded from the active metadata table, without advancing an iterator or sampling cursor.
+
 ## 0.3.0 - 2026-08-08
 
 ### Added
