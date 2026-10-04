@@ -13,6 +13,7 @@
 !py.typed
 !/LICENSE
 !/justfile
+!/.vscode/settings.json
 
 /.venv/
 /target/
