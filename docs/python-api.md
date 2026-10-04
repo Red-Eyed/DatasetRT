@@ -230,7 +230,7 @@ Metadata columns are included for ergonomic filtering and auditing. They are not
 
 <!-- BEGIN GENERATED: Public Python API -->
 
-_Generated from public docstrings in `dataset_rt/api.py`._
+_Generated from public docstrings behind the `dataset_rt.api` facade._
 
 ### `CacheInput`
 

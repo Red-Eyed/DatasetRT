@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import dataset_rt
 import dataset_rt.api as api
+from dataset_rt import config, dataset, records, runtime
 
 EXPORTS = (
     "CacheInput",
@@ -39,6 +40,26 @@ def test_facade_preserves_existing_exports_and_identity() -> None:
     assert set(EXPORTS) <= set(dataset_rt.__all__)
     for name in EXPORTS:
         assert getattr(dataset_rt, name) is getattr(api, name)
+
+
+@pytest.mark.parametrize(
+    ("implementation", "names"),
+    [
+        (config, ("ReaderConfig", "WriterConfig", "ShardCompression", "WriterProfilerConfig")),
+        (dataset, ("CachedDataset",)),
+        (runtime, ("DatasetRuntime",)),
+        (records, ("CacheSource", "SizedTorchIterableDataset")),
+    ],
+)
+def test_moved_classes_keep_historical_lookup_paths(
+    implementation: object, names: tuple[str, ...]
+) -> None:
+    """Moving definitions must preserve public class identity and old pickle lookups."""
+    for name in names:
+        public_class = getattr(api, name)
+        assert getattr(implementation, name) is public_class
+        assert public_class.__module__ == "dataset_rt.api"
+        assert pickle.loads(pickle.dumps(public_class)) is public_class
 
 
 @pytest.mark.parametrize(

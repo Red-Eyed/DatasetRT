@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 import dataset_rt.api as dataset_rt_api
+import dataset_rt.integrations.torch as torch_integration
 from dataset_rt import (
     CacheInput,
     CacheSourcesDatasetError,
@@ -668,7 +669,7 @@ def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.Monkey
         assert name == "torch.utils.data"
         raise ImportError("torch is intentionally hidden")
 
-    monkeypatch.setattr(dataset_rt_api, "import_module", import_without_torch)
+    monkeypatch.setattr(torch_integration, "import_module", import_without_torch)
 
     with pytest.raises(ImportError, match="requires PyTorch"):
         dataset.to_torch_iterable_dataset()
@@ -688,7 +689,7 @@ def test_torch_adapter_rejects_dataloader_workers(
         def get_worker_info() -> object:
             return object()
 
-    monkeypatch.setattr(dataset_rt_api, "import_module", lambda name: FakeTorchData)
+    monkeypatch.setattr(torch_integration, "import_module", lambda name: FakeTorchData)
 
     torch_dataset = dataset.to_torch_iterable_dataset()
 
@@ -707,7 +708,7 @@ def test_torch_adapter_reports_configured_epoch_len(
         def get_worker_info() -> None:
             return None
 
-    monkeypatch.setattr(dataset_rt_api, "import_module", lambda name: FakeTorchData)
+    monkeypatch.setattr(torch_integration, "import_module", lambda name: FakeTorchData)
 
     tiny_dataset.set_epoch_len(5)
     torch_dataset = tiny_dataset.to_torch_iterable_dataset()

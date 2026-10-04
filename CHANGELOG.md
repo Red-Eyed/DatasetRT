@@ -12,12 +12,12 @@ All notable changes to DatasetRT are documented here.
 ### Changed
 
 - Include PyTorch and psutil in the optional `dev` dependencies so reader integration tests and resource benchmarks run from the project environment.
+- Split Python implementation into focused modules while preserving public imports, signatures, defaults, and pickle lookup paths. API documentation follows definitions behind the compatibility facade.
 
 ### Fixed
 
 - Make the missing-PyTorch adapter test simulate dependency absence even when another test has already imported PyTorch.
 - Fix fresh native reader/writer runtimes crashing under macOS `fork` after the parent has used DatasetRT. Bounded native queues now wait on their own mutexes and condition variables, avoiding the inherited calling-thread semaphore while preserving backpressure and FIFO transport.
-
 
 ## 0.3.2 - 2026-09-28
 

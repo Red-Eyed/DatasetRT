@@ -109,7 +109,11 @@ Use `uv run --python 3.11 --extra dev ...` for Python commands. Do not call bare
 
 Python package:
 
-- `dataset_rt/api.py` defines the public API, Pydantic configs, typed `NamedTuple` return values, and Polars weight-table helpers.
+- `dataset_rt/api.py` and `__init__.py` are stable public facades; implementation modules never import them.
+- `dataset_rt/config.py` defines frozen Pydantic configs; `records.py` defines payload records, source protocols, and typed outcomes. Public classes retain `dataset_rt.api` pickle paths.
+- `dataset_rt/runtime.py` delegates native worker-pool ownership and cache writing; `dataset.py` delegates reading and authoritative dataset state.
+- `dataset_rt/metadata.py` converts metadata through in-memory columnar Arrow IPC.
+- `dataset_rt/integrations/torch.py` contains the lazy, optional legacy Torch adapter.
 - `dataset_rt/_dataset_rt.pyi` mirrors the Rust extension API for type checking.
 - `dataset_rt/__init__.py` re-exports the public surface.
 

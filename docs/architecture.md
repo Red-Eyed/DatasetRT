@@ -71,6 +71,8 @@ The Python package exposes only:
 - `ShardCompression`
 - `CachedDataset`
 
+Public imports resolve through `dataset_rt` and the stable `dataset_rt.api` facade. Implementation is separated into `config.py` (frozen settings), `records.py` (payloads, protocols, and outcomes), `runtime.py` (native orchestration), `dataset.py` (native dataset delegation), and `metadata.py` (in-memory columnar IPC). The legacy Torch view lives in `integrations/torch.py` and imports Torch only when requested. Public classes retain their historical `dataset_rt.api` pickle lookup paths.
+
 All other implementation details are private.
 
 ## Immutability

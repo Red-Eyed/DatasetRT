@@ -1,8 +1,11 @@
+"""Generate API documentation statically from definitions behind public exports."""
+
 from __future__ import annotations
 
 import ast
 import inspect
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +18,19 @@ END_MARKER = "<!-- END GENERATED: Public Python API -->"
 SPECIAL_METHODS = {"__init__", "__iter__", "__len__"}
 
 
+@dataclass(frozen=True)
+class ApiDefinition:
+    """Keep an AST definition paired with its source for alias rendering."""
+
+    source: str
+    node: ast.AST
+
+
 def main() -> None:
+    """Resolve facade exports statically so optional dependencies stay unloaded."""
     check = parse_check_flag()
-    api_source = API_SOURCE.read_text()
-    api_module = ast.parse(api_source)
-    attach_parents(api_module)
     package_module = ast.parse(PACKAGE_SOURCE.read_text())
-    generated = render_generated_section(api_source, api_module, public_names(package_module))
+    generated = render_generated_section(public_names(package_module))
     update_marked_section(PYTHON_API_DOC, generated, check=check)
 
 
@@ -54,17 +63,48 @@ def literal_string_list(node: ast.AST) -> list[str]:
     return names
 
 
-def render_generated_section(source: str, module: ast.Module, exported_names: list[str]) -> str:
-    sections = [BEGIN_MARKER, "", "_Generated from public docstrings in `dataset_rt/api.py`._", ""]
-    objects = public_api_objects(module)
+def render_generated_section(exported_names: list[str]) -> str:
+    """Render definitions behind the facade in the package's declared export order."""
+    sections = [
+        BEGIN_MARKER,
+        "",
+        "_Generated from public docstrings behind the `dataset_rt.api` facade._",
+        "",
+    ]
+    objects = facade_definitions()
     for name in exported_names:
-        node = objects.get(name)
-        if node is None:
+        definition = objects.get(name)
+        if definition is None:
             raise SystemExit(f"exported object has no API definition: {name}")
-        sections.extend(render_public_object(source, name, node))
+        sections.extend(render_public_object(definition.source, name, definition.node))
         sections.append("")
     sections.append(END_MARKER)
     return "\n".join(sections)
+
+
+def facade_definitions() -> dict[str, ApiDefinition]:
+    """Follow explicit implementation imports without executing package code."""
+    facade = ast.parse(API_SOURCE.read_text())
+    definitions: dict[str, ApiDefinition] = {}
+    modules: dict[str, dict[str, ApiDefinition]] = {}
+    for node in facade.body:
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if not node.module.startswith("dataset_rt."):
+            continue
+        if node.module not in modules:
+            path = PROJECT_ROOT.joinpath(*node.module.split(".")).with_suffix(".py")
+            source = path.read_text()
+            module = ast.parse(source)
+            modules[node.module] = {
+                name: ApiDefinition(source, definition)
+                for name, definition in public_api_objects(module).items()
+            }
+        for alias in node.names:
+            definition = modules[node.module].get(alias.name)
+            if definition is not None:
+                definitions[alias.asname or alias.name] = definition
+    return definitions
 
 
 def public_api_objects(module: ast.Module) -> dict[str, ast.AST]:
@@ -93,6 +133,9 @@ def render_public_object(source: str, name: str, node: ast.AST) -> list[str]:
 
 
 def render_type_alias(source: str, name: str, node: ast.AnnAssign) -> list[str]:
+    """Require an initialized alias and its adjacent source documentation."""
+    if node.value is None:
+        raise SystemExit(f"type alias value not found: {name}")
     annotation = ast.get_source_segment(source, node.value)
     if annotation is None:
         raise SystemExit(f"type alias source not found: {name}")
@@ -101,7 +144,7 @@ def render_type_alias(source: str, name: str, node: ast.AnnAssign) -> list[str]:
         "",
         f"```python\n{name} = {annotation}\n```",
         "",
-        node_docstring(name, node),
+        node_docstring(source, name, node),
     ]
 
 
@@ -213,15 +256,17 @@ def format_docstring(node: ast.ClassDef | ast.FunctionDef) -> str:
     return inspect.cleandoc(docstring)
 
 
-def node_docstring(name: str, node: ast.AST) -> str:
-    parent = getattr(node, "parent", None)
-    if not isinstance(parent, ast.Module):
-        raise SystemExit(f"cannot resolve docstring for {name}")
-    index = parent.body.index(node)
-    doc = following_docstring(parent.body, index)
-    if doc is None:
-        raise SystemExit(f"type alias is missing docstring: {name}")
-    return doc
+def node_docstring(source: str, name: str, node: ast.AnnAssign) -> str:
+    """Resolve alias documentation without attaching untyped fields to AST nodes."""
+    body = ast.parse(source).body
+    for index, statement in enumerate(body):
+        if statement.lineno != node.lineno:
+            continue
+        doc = following_docstring(body, index)
+        if doc is not None:
+            return doc
+        break
+    raise SystemExit(f"type alias is missing docstring: {name}")
 
 
 def following_docstring(body: list[ast.stmt], index: int) -> str | None:
@@ -234,12 +279,6 @@ def following_docstring(body: list[ast.stmt], index: int) -> str | None:
     if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
         return None
     return inspect.cleandoc(node.value.value)
-
-
-def attach_parents(module: ast.Module) -> None:
-    for parent in ast.walk(module):
-        for child in ast.iter_child_nodes(parent):
-            child.parent = parent
 
 
 def update_marked_section(path: Path, generated: str, *, check: bool) -> None:
