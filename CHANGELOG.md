@@ -19,7 +19,7 @@ All notable changes to DatasetRT are documented here.
 
 ### Tracked Regressions
 
-- Process-local reader feasibility fails with `fork` on the tested macOS ARM64 environment: a worker crashes in native thread parking during fresh dataset construction after the parent initializes native readers. Serial, spawn, and forkserver cases pass. The `fork` test remains a failing acceptance gate; production APIs and native code are unchanged.
+- On the tested macOS ARM64 environment, `fork` reader construction inside `__iter__` passes with a cold parent or a parent that only creates a runtime, but crashes in native thread parking after the parent loads and reads a dataset. Workers receive only a recipe and construct their own native runtime; native objects reject pickling and copying. Serial, spawn, and forkserver cases pass in all three parent states. Enable `DATASETRT_TRACE_FORK=1` for construction-stage logs. The initialized-reader `fork` case remains a failing acceptance gate; production APIs and native code are unchanged.
 
 ## 0.3.2 - 2026-09-28
 
