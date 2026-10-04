@@ -77,7 +77,7 @@ dataset.update_metadata(balanced)
 `index.bin`, shards, or manifests. Future iterators use the updated active table;
 already-created iterators keep their snapshot.
 
-With `ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
+With `drt.ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
 multinomial sampling with replacement over the active table. With
 `shuffle=False`, it emits active rows in cyclic table order, including
 duplicates.
@@ -109,12 +109,7 @@ primitive metadata.
 ```python
 from pathlib import Path
 
-from dataset_rt import (
-    CacheInput,
-    CacheSourcesDatasetSuccess,
-    DatasetRuntime,
-    ReaderConfig,
-)
+import dataset_rt as drt
 
 
 class Images:
@@ -122,21 +117,21 @@ class Images:
 
     def __iter__(self):
         for image_id, image_bytes, label in load_my_images():
-            yield CacheInput(
+            yield drt.CacheInput(
                 data=image_bytes,
                 metadata={"image_id": image_id, "label": label},
             )
 
 
-runtime = DatasetRuntime(num_workers=4)
+runtime = drt.DatasetRuntime(num_workers=4)
 result = runtime.from_cache_sources(
     Images(),
     Path("cache"),
-    reader_config=ReaderConfig(seed=42, shuffle=True),
+    reader_config=drt.ReaderConfig(seed=42, shuffle=True),
 )
 
 match result:
-    case CacheSourcesDatasetSuccess(dataset, results):
+    case drt.CacheSourcesDatasetSuccess(dataset, results):
         pass
     case error:
         raise RuntimeError(error)
