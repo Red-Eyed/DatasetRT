@@ -35,6 +35,7 @@ dependencies = [
 dev = [
     "maturin[zig]>=1.7,<2",
     "pytest>=8",
+    "pytest-xdist>=3.8",
     "ruff>=0.16.9",
     "pyrefly>=1.3.1",
     "pydantic-settings>=2",
