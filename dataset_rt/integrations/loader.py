@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from dataset_rt.integrations.loading import capture_replica, reader_seed, worker_rows
-from dataset_rt.metadata import encode_metadata, slice_metadata
-from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
+from dataset_rt.metadata import decode_metadata, encode_metadata
+from dataset_rt.records import CachedSample, MetadataSnapshot, OriginalMetadata, ReaderRecipe
 from dataset_rt.runtime import DatasetRuntime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from multiprocessing.context import BaseContext
 
     from dataset_rt.dataset import CachedDataset
     from dataset_rt.integrations.loading import ReplicaIdentity
@@ -25,6 +26,13 @@ T = TypeVar("T")
 @dataclass(frozen=True)
 class PendingReader:
     """No native resources exist before first consumption."""
+
+
+@dataclass(frozen=True)
+class EmptyPartition:
+    """Setup completed in this PID; no assigned rows require a native reader."""
+
+    pid: int
 
 
 @dataclass
@@ -48,6 +56,7 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         native_num_workers: int,
         sample_transform_fn: Callable[[CachedSample], T] | None,
         row_count: int,
+        partitions: tuple[ReaderRecipe, ...],
     ) -> None:
         """Store immutable inputs; construction neither reads nor creates native state."""
         self.recipe = recipe
@@ -57,31 +66,39 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         self.native_num_workers = native_num_workers
         self.sample_transform_fn = sample_transform_fn
         self.row_count = row_count
-        self._state: PendingReader | LocalReader = PendingReader()
+        self.partitions = partitions
+        self._state: PendingReader | EmptyPartition | LocalReader = PendingReader()
 
     def setup(self) -> None:
         """Create native state once in the consuming PID and reject inherited reuse."""
         match self._state:
-            case LocalReader(pid=pid):
+            case LocalReader(pid=pid) | EmptyPartition(pid=pid):
                 if pid != os.getpid():
                     raise RuntimeError("DatasetRT loader native state belongs to another PID")
                 return
             case PendingReader():
                 pass
-        if get_worker_info() is not None:
-            raise RuntimeError("multiprocess DataLoader support is not enabled yet")
-        if not self.shuffle and self.row_count == 0:
+        info = get_worker_info()
+        worker_id = 0 if info is None else info.id
+        worker_count = 1 if info is None else info.num_workers
+        recipe = self.recipe
+        if not self.shuffle:
+            if worker_count != len(self.partitions):
+                raise RuntimeError("DataLoader worker count differs from prepared partitions")
+            recipe = self.partitions[worker_id]
+        if not self.shuffle and recipe.sample_count == 0:
+            self._state = EmptyPartition(os.getpid())
             return
         config = replace(
-            self.recipe,
-            reader_config=self.recipe.reader_config.model_copy(
+            recipe,
+            reader_config=recipe.reader_config.model_copy(
                 update={
                     "shuffle": self.shuffle,
                     "seed": reader_seed(
                         shuffle=self.shuffle,
                         seed=self.seed,
                         rank_id=self.replica.rank,
-                        worker_id=0,
+                        worker_id=worker_id,
                     ),
                 }
             ),
@@ -91,15 +108,17 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         match config.metadata:
             case MetadataSnapshot() as snapshot:
                 dataset._restore_metadata(snapshot)
-        dataset.set_epoch_len(config.sample_count if self.shuffle else self.row_count)
+        dataset.set_epoch_len(config.sample_count)
         self._state = LocalReader(os.getpid(), dataset, iter(dataset))
 
     def __iter__(self) -> Iterator[CachedSample | T]:
         """Reuse native state; keep unfinished shuffled windows across iterator calls."""
         self.setup()
         match self._state:
-            case PendingReader():
+            case EmptyPartition():
                 return
+            case PendingReader():
+                raise RuntimeError("DatasetRT reader setup did not complete")
             case LocalReader() as state:
                 if not self.shuffle:
                     for sample in state.dataset:
@@ -129,6 +148,7 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
             self.native_num_workers,
             self.sample_transform_fn,
             self.row_count,
+            self.partitions,
         )
 
 
@@ -138,6 +158,48 @@ class ValidationAdapter(ReaderAdapter[T]):
     def __len__(self) -> int:
         """Report the prepared partition count without touching native state."""
         return self.row_count
+
+
+@dataclass(frozen=True)
+class WorkerInitializer:
+    """Compose native setup with an ordinary picklable caller initialization hook."""
+
+    callback: Callable[[int], None] | None
+
+    def __call__(self, worker_id: int) -> None:
+        """Initialize native state before user code can inspect its worker dataset."""
+        info = get_worker_info()
+        if info is None or not isinstance(info.dataset, ReaderAdapter):
+            raise RuntimeError("DatasetRT initialization requires its DataLoader worker")
+        info.dataset.setup()
+        if self.callback is not None:
+            self.callback(worker_id)
+
+
+def validation_partitions(
+    dataset: CachedDataset, recipe: ReaderRecipe, replica: ReplicaIdentity, num_workers: int
+) -> tuple[ReaderRecipe, ...]:
+    """Decode once in the parent and encode disjoint slices in O(rows × columns).
+
+    Workers restore the selected IPC directly in Rust. Repeated decoding of the
+    full table per worker would scale with workers and could deadlock after fork.
+    """
+    match recipe.metadata:
+        case MetadataSnapshot(ipc=ipc):
+            frame = decode_metadata(ipc)
+        case _:
+            frame = dataset.get_metadata()
+    recipes = []
+    for worker in range(max(1, num_workers)):
+        span = worker_rows(frame.height, replica, num_workers=num_workers, worker_id=worker)
+        recipes.append(
+            replace(
+                recipe,
+                sample_count=span.length,
+                metadata=MetadataSnapshot(encode_metadata(frame.slice(span.offset, span.length))),
+            )
+        )
+    return tuple(recipes)
 
 
 def make_dataloader(
@@ -153,35 +215,43 @@ def make_dataloader(
     pin_memory: bool,
     timeout: float,
     native_num_workers: int,
+    multiprocessing_context: str | BaseContext | None,
+    worker_init_fn: Callable[[int], None] | None,
+    prefetch_factor: int | None,
+    persistent_workers: bool,
 ) -> DataLoader[CachedSample | T]:
     """Snapshot in the training process; delegate batching and lifecycle to Torch."""
-    if type(num_workers) is not int or num_workers != 0:
-        raise ValueError("to_torch_dataloader currently requires num_workers=0")
+    if type(num_workers) is not int or num_workers < 0:
+        raise ValueError("num_workers must be a nonnegative integer")
     if type(native_num_workers) is not int or native_num_workers < 1:
         raise ValueError("native_num_workers must be a positive integer")
-    if timeout != 0:
+    if num_workers == 0 and timeout != 0:
         raise ValueError("timeout must be zero with num_workers=0")
+    if prefetch_factor is not None and (type(prefetch_factor) is not int or prefetch_factor < 1):
+        raise ValueError("prefetch_factor must be a positive integer")
     if shuffle and seed is not None:
         # Validate an explicit seed now without drawing entropy for omitted seeds.
         reader_seed(shuffle=True, seed=seed, rank_id=0, worker_id=0)
     replica = capture_replica()
     recipe = dataset._reader_recipe()
     row_count = recipe.sample_count
+    partitions: tuple[ReaderRecipe, ...] = ()
     adapter_type = ReaderAdapter if shuffle else ValidationAdapter
     if not shuffle:
-        # Sequential validation requires an explicit columnar snapshot. No such
-        # export is needed for ordinary shuffled loaders with original metadata.
-        snapshot = recipe.metadata
-        if not isinstance(snapshot, MetadataSnapshot):
-            snapshot = MetadataSnapshot(encode_metadata(dataset.get_metadata()))
-        from dataset_rt.metadata import decode_metadata
-
-        count = decode_metadata(snapshot.ipc).height
-        span = worker_rows(count, replica, num_workers=0, worker_id=0)
-        recipe = replace(recipe, metadata=slice_metadata(snapshot, span))
-        row_count = span.length
+        partitions = validation_partitions(dataset, recipe, replica, num_workers)
+        row_count = sum(partition.sample_count for partition in partitions)
+        # Prepared partitions replace the override for validation. Keeping the
+        # original global IPC too would duplicate unrelated rank rows in workers.
+        recipe = replace(recipe, metadata=OriginalMetadata())
     adapter = adapter_type(
-        recipe, replica, shuffle, seed, native_num_workers, sample_transform_fn, row_count
+        recipe,
+        replica,
+        shuffle,
+        seed,
+        native_num_workers,
+        sample_transform_fn,
+        row_count,
+        partitions,
     )
     return DataLoader(
         adapter,
@@ -191,4 +261,8 @@ def make_dataloader(
         drop_last=drop_last,
         pin_memory=pin_memory,
         timeout=timeout,
+        multiprocessing_context=multiprocessing_context,
+        worker_init_fn=WorkerInitializer(worker_init_fn),
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
     )

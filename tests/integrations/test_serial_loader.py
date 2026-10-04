@@ -252,7 +252,7 @@ def test_transform_errors_propagate(dataset: CachedDataset) -> None:
 @pytest.mark.parametrize(
     "options",
     [
-        InvalidOptions(num_workers=1),
+        InvalidOptions(num_workers=-1),
         InvalidOptions(native_num_workers=0),
         InvalidOptions(timeout=1),
         InvalidOptions(seed=-1),

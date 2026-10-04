@@ -6,7 +6,7 @@ All notable changes to DatasetRT are documented here.
 
 ### Added
 
-- Add `CachedDataset.to_torch_dataloader()` for zero-worker PyTorch loading, with one-time process-local reader setup, optional sample transforms, infinite weighted shuffled streams, and finite sequential validation partitions. Multiprocess loading and real distributed acceptance remain follow-up work.
+- Add `CachedDataset.to_torch_dataloader()` with one-time process-local reader setup, optional sample transforms, infinite weighted shuffled streams, and finite sequential validation partitions. Support zero-worker loading and caller-selected fork/spawn/forkserver workers, including persistent readers and composed worker initialization. Real distributed acceptance remains follow-up work.
 - Add `scripts/bench_parallel.py` to record reproducible serial preparation and transformation baselines with explicit workload sizes, JSON output, startup and cleanup timings, and process resource measurements.
 - Add compatibility checks for existing imports, record pickle paths, configuration, and lazy PyTorch imports, plus process-local reader feasibility tests for serial, spawn, fork, and forkserver execution.
 

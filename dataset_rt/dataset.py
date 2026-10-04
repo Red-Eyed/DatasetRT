@@ -20,6 +20,7 @@ from dataset_rt.records import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
+    from multiprocessing.context import BaseContext
 
     import polars as pl
     from torch.utils.data import DataLoader
@@ -184,6 +185,10 @@ class CachedDataset:
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
     ) -> DataLoader[CachedSample | T]:
         """Return a native PyTorch DataLoader with process-local reader setup.
 
@@ -196,8 +201,11 @@ class CachedDataset:
 
         Construction snapshots inputs without creating a consuming native reader.
         Setup creates it once on first consumption. Transform failures propagate.
-        This initial implementation requires num_workers=0. PyTorch is optional
-        until this method is called; native_num_workers controls Rust read threads.
+        With workers, internal initialization calls setup before worker_init_fn.
+        Persistent workers reuse native state and seeds. Context, prefetch, and
+        worker lifetime follow ordinary PyTorch semantics; callbacks must be
+        picklable for spawn/forkserver. Parent edits do not update worker snapshots.
+        PyTorch is optional until called; native_num_workers controls Rust threads.
         """
         from dataset_rt.integrations.loader import make_dataloader
 
@@ -213,6 +221,10 @@ class CachedDataset:
             pin_memory=pin_memory,
             timeout=timeout,
             native_num_workers=native_num_workers,
+            multiprocessing_context=multiprocessing_context,
+            worker_init_fn=worker_init_fn,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
         )
 
     def samples_metadata(self) -> pl.DataFrame:

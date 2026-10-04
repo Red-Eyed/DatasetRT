@@ -377,7 +377,7 @@ it with `DataLoader` while keeping domain decoding in Python.
 Raises:
     ImportError: If PyTorch is not installed in the active environment.
 
-#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, batch_size: int | None = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[..., object] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, batch_size: int | None = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[..., object] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: str | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
 
 Return a native PyTorch DataLoader with process-local reader setup.
 
@@ -390,8 +390,11 @@ method. Batching and collation are owned by PyTorch.
 
 Construction snapshots inputs without creating a consuming native reader.
 Setup creates it once on first consumption. Transform failures propagate.
-This initial implementation requires num_workers=0. PyTorch is optional
-until this method is called; native_num_workers controls Rust read threads.
+With workers, internal initialization calls setup before worker_init_fn.
+Persistent workers reuse native state and seeds. Context, prefetch, and
+worker lifetime follow ordinary PyTorch semantics; callbacks must be
+picklable for spawn/forkserver. Parent edits do not update worker snapshots.
+PyTorch is optional until called; native_num_workers controls Rust threads.
 
 #### `CachedDataset.samples_metadata() -> pl.DataFrame`
 
