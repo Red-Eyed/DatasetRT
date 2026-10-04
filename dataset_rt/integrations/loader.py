@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from dataset_rt.integrations.loading import ReplicaIdentity
 
 T = TypeVar("T")
+BatchT = TypeVar("BatchT")
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,13 @@ def make_dataloader(
     batch_size: int | None,
     num_workers: int,
     sample_transform_fn: Callable[[CachedSample], T] | None,
-    collate_fn: Callable[..., object] | None,
+    collate_fn: (
+        Callable[[list[T]], BatchT]
+        | Callable[[T], BatchT]
+        | Callable[[list[CachedSample]], BatchT]
+        | Callable[[CachedSample], BatchT]
+        | None
+    ),
     drop_last: bool,
     pin_memory: bool,
     timeout: float,
@@ -257,7 +264,8 @@ def make_dataloader(
         adapter,
         batch_size=batch_size,
         num_workers=num_workers,
-        collate_fn=collate_fn,
+        # Torch types only batched collation, but passes one sample when batch_size=None.
+        collate_fn=collate_fn,  # pyrefly: ignore[bad-argument-type]
         drop_last=drop_last,
         pin_memory=pin_memory,
         timeout=timeout,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, overload
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from dataset_rt.config import ReaderConfig
 
 T = TypeVar("T")
+BatchT = TypeVar("BatchT")
 
 
 class CachedDataset:
@@ -172,6 +173,116 @@ class CachedDataset:
         """
         return to_torch_iterable_dataset(self)
 
+    @overload
+    def to_torch_dataloader(
+        self,
+        *,
+        batch_size: int = 1,
+        sample_transform_fn: Callable[[CachedSample], T],
+        collate_fn: Callable[[list[T]], BatchT],
+        shuffle: bool = True,
+        seed: int | None = None,
+        num_workers: int = 0,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+    ) -> DataLoader[CachedSample | T]:
+        """Collate lists of transformed samples into a caller-defined result."""
+        ...
+
+    @overload
+    def to_torch_dataloader(
+        self,
+        *,
+        batch_size: None,
+        sample_transform_fn: Callable[[CachedSample], T],
+        collate_fn: Callable[[T], BatchT],
+        shuffle: bool = True,
+        seed: int | None = None,
+        num_workers: int = 0,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+    ) -> DataLoader[CachedSample | T]:
+        """Collate individual transformed samples when automatic batching is disabled."""
+        ...
+
+    @overload
+    def to_torch_dataloader(
+        self,
+        *,
+        batch_size: int = 1,
+        sample_transform_fn: None = None,
+        collate_fn: Callable[[list[CachedSample]], BatchT],
+        shuffle: bool = True,
+        seed: int | None = None,
+        num_workers: int = 0,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+    ) -> DataLoader[CachedSample | T]:
+        """Collate lists of cache records without a sample transform."""
+        ...
+
+    @overload
+    def to_torch_dataloader(
+        self,
+        *,
+        batch_size: None,
+        sample_transform_fn: None = None,
+        collate_fn: Callable[[CachedSample], BatchT],
+        shuffle: bool = True,
+        seed: int | None = None,
+        num_workers: int = 0,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+    ) -> DataLoader[CachedSample | T]:
+        """Collate individual cache records when automatic batching is disabled."""
+        ...
+
+    @overload
+    def to_torch_dataloader(
+        self,
+        *,
+        batch_size: int | None = 1,
+        sample_transform_fn: Callable[[CachedSample], T] | None = None,
+        collate_fn: None = None,
+        shuffle: bool = True,
+        seed: int | None = None,
+        num_workers: int = 0,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+        multiprocessing_context: str | BaseContext | None = None,
+        worker_init_fn: Callable[[int], None] | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+    ) -> DataLoader[CachedSample | T]:
+        """Delegate to Torch default collation when no custom callback is supplied."""
+        ...
+
     def to_torch_dataloader(
         self,
         *,
@@ -180,7 +291,13 @@ class CachedDataset:
         batch_size: int | None = 1,
         num_workers: int = 0,
         sample_transform_fn: Callable[[CachedSample], T] | None = None,
-        collate_fn: Callable[..., object] | None = None,
+        collate_fn: (
+            Callable[[list[T]], BatchT]
+            | Callable[[T], BatchT]
+            | Callable[[list[CachedSample]], BatchT]
+            | Callable[[CachedSample], BatchT]
+            | None
+        ) = None,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
@@ -198,6 +315,10 @@ class CachedDataset:
         of active metadata rows; seed and the source epoch-length override are
         ignored. Capture an initialized distributed group before calling this
         method. Batching and collation are owned by PyTorch.
+
+        Collation receives a list of transformed samples when batching, or one
+        transformed sample with batch_size=None. Without a transform it receives
+        CachedSample values. Callback annotations are optional at runtime.
 
         Construction snapshots inputs without creating a consuming native reader.
         Setup creates it once on first consumption. Transform failures propagate.
