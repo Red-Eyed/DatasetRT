@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 import psutil
 import torch
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 Context = Literal["serial", "fork", "spawn", "forkserver"]
 Workload = Literal["heavy", "cheap"]
+BoundaryT = TypeVar("BoundaryT")
 
 
 class Record(BaseModel):
@@ -317,17 +318,19 @@ def native_batches(
         yield tuple(batch)
 
 
-def checked_batch(value: object) -> tuple[Output, ...]:
+def checked_batch(value: BoundaryT) -> tuple[Output, ...]:
     """Narrow Torch's untyped collator return to a validated bounded output batch."""
     if not isinstance(value, tuple) or not value:
         raise TypeError("expected a nonempty transformed batch")
     for item in value:
         if not isinstance(item, Output) or len(item.digest) != 32:
             raise TypeError("invalid transformed output")
-    return value
+    return cast("tuple[Output, ...]", value)
 
 
-def measure_pass(batches: Iterable[object], config: Benchmark, shuffle: bool) -> PassMeasurement:
+def measure_pass(
+    batches: Iterable[tuple[Output, ...]], config: Benchmark, shuffle: bool
+) -> PassMeasurement:
     """Consume exact useful work; discarded prefetched outputs are not counted."""
     observer = ResourceObserver()
     thread = threading.Thread(target=observer.run, name="reader-benchmark-resources")
@@ -399,19 +402,22 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
     assert next(iter(dataset)).data
     dataset.set_epoch_len(config.samples_per_cache * config.caches)
     transform = Transform(config.transform_rounds if spec.workload == "heavy" else 0)
-    loader: Iterable[object]
+    loader: Iterable[tuple[Output, ...]]
     if spec.case.mode == "loader":
-        loader = dataset.to_torch_dataloader(
-            shuffle=spec.shuffle,
-            seed=config.seed,
-            batch_size=config.batch_size,
-            num_workers=spec.case.workers,
-            sample_transform_fn=transform,
-            collate_fn=collate,
-            native_num_workers=config.native_workers,
-            multiprocessing_context=spec.case.context if spec.case.workers else None,
-            prefetch_factor=config.prefetch_factor if spec.case.workers else None,
-            persistent_workers=config.persistent_workers and spec.case.workers > 0,
+        loader = cast(
+            "Iterable[tuple[Output, ...]]",
+            dataset.to_torch_dataloader(
+                shuffle=spec.shuffle,
+                seed=config.seed,
+                batch_size=config.batch_size,
+                num_workers=spec.case.workers,
+                sample_transform_fn=transform,
+                collate_fn=collate,
+                native_num_workers=config.native_workers,
+                multiprocessing_context=spec.case.context if spec.case.workers else None,
+                prefetch_factor=config.prefetch_factor if spec.case.workers else None,
+                persistent_workers=config.persistent_workers and spec.case.workers > 0,
+            ),
         )
     else:
         loader = ()

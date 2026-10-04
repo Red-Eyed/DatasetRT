@@ -11,6 +11,7 @@ select = [
     "B",              # Common bug patterns, including mutable defaults.
     "ANN",            # Explicit function annotations, including rejection of Any.
     "TC",             # Typing-specific checks.
+    "TID251",         # Ban broad type imports throughout project code.
     "RUF100",         # Stale noqa suppressions.
     "PGH003",         # Unqualified type: ignore comments.
     "PGH004",         # Unqualified noqa comments.
@@ -21,6 +22,11 @@ allow-star-arg-any = false
 ignore-fully-untyped = false
 suppress-none-returning = false
 suppress-dummy-args = false
+
+[lint.flake8-tidy-imports.banned-api]
+"typing.Any" = { msg = "Use a concrete type, precise union, or protocol." }
+"typing_extensions.Any" = { msg = "Use a concrete type, precise union, or protocol." }
+"builtins.object" = { msg = "Use a concrete type, precise union, or protocol." }
 
 [format]
 quote-style = "double"

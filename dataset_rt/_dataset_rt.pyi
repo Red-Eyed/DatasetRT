@@ -1,6 +1,9 @@
 from collections.abc import Iterator, Sequence
 from typing import NamedTuple
 
+from dataset_rt.config import WriterConfig
+from dataset_rt.records import CacheSource
+
 MetadataValue = bool | int | float | str
 
 class CacheWriteRecord(NamedTuple):
@@ -34,8 +37,8 @@ class CachedDataset:
 
 def write_cache(
     runtime: DatasetRuntime,
-    sources: object,
+    sources: CacheSource | list[CacheSource],
     base_cache_dir: str,
-    writer_config: object,
+    writer_config: WriterConfig,
     reuse_existing: bool,
 ) -> list[CacheWriteRecord]: ...

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -39,12 +39,12 @@ def tensor_from_bytes(data: bytes) -> Tensor:
     """Reject non-tensor values at the deserialization boundary."""
     buffer = io.BytesIO(data)
     try:
-        value: object = torch.load(buffer, weights_only=True)
+        value: Tensor = torch.load(buffer, weights_only=True)
     except TypeError:
         buffer.seek(0)
         value = torch.load(buffer)
     assert isinstance(value, torch.Tensor)
-    return cast("Tensor", value)
+    return value
 
 
 def test_dataset_rt_streams_into_pytorch_iterable_dataset(tmp_path: Path) -> None:

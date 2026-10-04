@@ -44,6 +44,9 @@ jobs:
       - name: Ruff lint
         run: uv run --python 3.11 --extra dev ruff check dataset_rt tests scripts
 
+      - name: Precise type policy
+        run: uv run --python 3.11 --extra dev scripts/check_precise_types.py
+
       - name: Pyrefly
         run: uv run --python 3.11 --extra dev pyrefly check
 

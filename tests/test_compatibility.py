@@ -7,6 +7,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +15,9 @@ from pydantic import ValidationError
 import dataset_rt
 import dataset_rt.api as api
 from dataset_rt import config, dataset, records, runtime
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 EXPORTS = (
     "CacheInput",
@@ -52,7 +56,7 @@ def test_facade_preserves_existing_exports_and_identity() -> None:
     ],
 )
 def test_moved_classes_keep_historical_lookup_paths(
-    implementation: object, names: tuple[str, ...]
+    implementation: ModuleType, names: tuple[str, ...]
 ) -> None:
     """Moving definitions must preserve public class identity and old pickle lookups."""
     for name in names:
@@ -104,7 +108,17 @@ def test_record_lookup_paths_and_fields(
         api.WriterProfilerConfig(),
     ],
 )
-def test_public_values_round_trip_through_pickle(value: object) -> None:
+def test_public_values_round_trip_through_pickle(
+    value: api.CacheInput
+    | api.CachedSample
+    | api.CacheWriteSuccess
+    | api.CacheWriteError
+    | api.CacheSourcesDatasetError
+    | api.ReaderConfig
+    | api.WriterConfig
+    | api.ShardCompression
+    | api.WriterProfilerConfig,
+) -> None:
     """Serializable records/configuration preserve their exact public type."""
     restored = pickle.loads(pickle.dumps(value))
     assert type(restored) is type(value)

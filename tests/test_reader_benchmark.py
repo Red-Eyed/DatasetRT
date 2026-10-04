@@ -85,7 +85,7 @@ def test_transform_uses_delivered_bytes() -> None:
 
 
 @pytest.mark.parametrize("value", [(), (b"untransformed",), ["wrong batch representation"]])
-def test_collator_boundary(value: object) -> None:
+def test_collator_boundary(value: tuple[bytes, ...] | list[str]) -> None:
     """Reject malformed outputs before they can inflate benchmark work counts."""
     with pytest.raises(TypeError):
         checked_batch(value)

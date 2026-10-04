@@ -15,7 +15,7 @@ from datetime import timedelta
 from itertools import islice
 from pathlib import Path
 from tempfile import gettempdir
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import polars as pl
 import pytest
@@ -78,7 +78,7 @@ def collate(samples: list[Observation]) -> Batch:
     return Batch(torch.tensor([[item.sample / 12] for item in samples]), tuple(samples))
 
 
-def checked_batches(loader: Iterable[object]) -> Iterator[Batch]:
+def checked_batches(loader: Iterable[Batch]) -> Iterator[Batch]:
     """Validate the custom collator's output at Torch's loosely typed boundary."""
     for batch in loader:
         assert isinstance(batch, Batch)
@@ -190,7 +190,7 @@ def parameters(model: DistributedDataParallel) -> tuple[float, ...]:
 
 
 def run_training(
-    model: DistributedDataParallel, loader: Iterable[object], shuffle: bool
+    model: DistributedDataParallel, loader: Iterable[Batch], shuffle: bool
 ) -> tuple[tuple[Observation, ...], int]:
     """Run real optimizer steps; the application handles finite uneven inputs."""
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
@@ -229,22 +229,25 @@ def restore_dataset(recipe: ReaderRecipe, rows: int) -> CachedDataset:
 
 def make_loader(
     dataset: CachedDataset, case: Case, *, failing: bool = False
-) -> torch.utils.data.DataLoader[CachedSample | Observation]:
+) -> torch.utils.data.DataLoader[Batch]:
     """Apply one caller-owned configuration consistently to fresh/replayed loaders."""
-    return dataset.to_torch_dataloader(
-        shuffle=case.shuffle,
-        seed=7,
-        batch_size=4,
-        num_workers=case.workers,
-        multiprocessing_context=case.context if case.workers else None,
-        sample_transform_fn=fail_transform if failing else observe,
-        collate_fn=collate,
-        prefetch_factor=1 if case.workers else None,
-        persistent_workers=case.persistent,
+    return cast(
+        "torch.utils.data.DataLoader[Batch]",
+        dataset.to_torch_dataloader(
+            shuffle=case.shuffle,
+            seed=7,
+            batch_size=4,
+            num_workers=case.workers,
+            multiprocessing_context=case.context if case.workers else None,
+            sample_transform_fn=fail_transform if failing else observe,
+            collate_fn=collate,
+            prefetch_factor=1 if case.workers else None,
+            persistent_workers=case.persistent,
+        ),
     )
 
 
-def prefix(loader: Iterable[object]) -> tuple[Observation, ...]:
+def prefix(loader: Iterable[Batch]) -> tuple[Observation, ...]:
     """Drop a real partial iterator while retaining only bounded test evidence."""
     iterator = checked_batches(loader)
     try:

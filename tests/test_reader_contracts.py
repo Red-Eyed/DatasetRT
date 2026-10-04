@@ -8,7 +8,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Never
 
 import polars as pl
 import pytest
@@ -31,6 +31,14 @@ from dataset_rt.records import MetadataSnapshot, OriginalMetadata, ReaderRecipe
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from multiprocessing.connection import Connection
+
+
+class NativeStateSentinel:
+    """Reject accidental native access after immutable recipe capture."""
+
+
+class WorkerSentinel:
+    """Signal worker context without constructing a loader."""
 
 
 class ContractSource:
@@ -80,7 +88,7 @@ def test_original_recipe_never_accesses_native_state(
     expected = dataset._reader_recipe()
     dataset.cache_paths.reverse()
     dataset.reader_config = ReaderConfig(seed=99)
-    monkeypatch.setattr(dataset, "_inner", object())
+    monkeypatch.setattr(dataset, "_inner", NativeStateSentinel())
     assert dataset._reader_recipe() is expected
     assert isinstance(expected.metadata, OriginalMetadata)
     assert expected.sample_count == 2000
@@ -181,7 +189,7 @@ def test_many_row_partitions_stay_columnar(
     frame = pl.concat([dataset.get_metadata()] * 8).with_row_index("position")
     dataset.update_metadata(frame)
 
-    def forbidden(*args: object, **kwargs: object) -> None:
+    def forbidden(*args: Never, **kwargs: Never) -> None:
         """Make accidental row-object bridges fail in the scalable partition path."""
         raise AssertionError("metadata rows expanded into Python")
 
@@ -230,7 +238,7 @@ def test_capture_replica_in_training_process(
     monkeypatch.setattr(distributed, "get_world_size", lambda: 2)
     expected = ReplicaIdentity(rank=1, world_size=2) if initialized else ReplicaIdentity()
     assert capture_replica() == expected
-    monkeypatch.setattr(torch_data, "get_worker_info", lambda: object())
+    monkeypatch.setattr(torch_data, "get_worker_info", lambda: WorkerSentinel())
     with pytest.raises(RuntimeError, match="before DataLoader workers"):
         capture_replica()
 

@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from dataset_rt.records import Metadata
+
 RUNTIME = DatasetRuntime(num_workers=4)
 
 
@@ -75,7 +77,8 @@ def read_u64(bytes_: bytes) -> int:
     return int.from_bytes(bytes_, "little")
 
 
-def replace_first_embedded_metadata(cache_path: Path, metadata: dict[str, object]) -> None:
+def replace_first_embedded_metadata(cache_path: Path, metadata: Metadata) -> None:
+    """Replace same-length metadata while retaining a valid shard checksum."""
     manifest = read_manifest(cache_path)
     index = (cache_path / "index.bin").read_bytes()
     shard_id = read_u64(index[:8])

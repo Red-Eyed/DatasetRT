@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Never, cast
 
 import polars as pl
 import pytest
@@ -28,6 +28,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 RUNTIME = DatasetRuntime(num_workers=4)
+
+
+class InvalidPayload:
+    """Exercise Rust payload validation with a non-buffer value."""
+
+
+class WorkerSentinel:
+    """Signal worker presence without constructing Torch worker state."""
 
 
 class TinySource:
@@ -395,7 +403,9 @@ def test_get_item_rejects_unknown_identity(
 
 @pytest.mark.parametrize("cache_id, sample_id", [(True, 0), (0, False), ("0", 0), (0, 1.0)])
 def test_get_item_rejects_non_integer_identity(
-    tiny_dataset: dataset_rt_api.CachedDataset, cache_id: object, sample_id: object
+    tiny_dataset: dataset_rt_api.CachedDataset,
+    cache_id: int | str | float,
+    sample_id: int | str | float,
 ) -> None:
     with pytest.raises(TypeError, match="must be integers"):
         tiny_dataset.get_item(cast("int", cache_id), cast("int", sample_id))
@@ -474,7 +484,7 @@ def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) 
 
         def __iter__(self) -> Iterator[CacheInput]:
             """Stream cache inputs for this test scenario."""
-            yield CacheInput(cast("bytes", object()), {"label": "bad"})
+            yield CacheInput(cast("bytes", InvalidPayload()), {"label": "bad"})
 
     root = tmp_path / "caches"
 
@@ -677,7 +687,7 @@ def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.Monkey
     written = success_paths(RUNTIME.write_cache(TinySource(), tmp_path / "cache"))
     dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
 
-    def import_without_torch(name: str) -> object:
+    def import_without_torch(name: str) -> Never:
         """Simulate the optional dependency being absent at the adapter boundary."""
         assert name == "torch.utils.data"
         raise ImportError("torch is intentionally hidden")
@@ -699,8 +709,9 @@ def test_torch_adapter_rejects_dataloader_workers(
             pass
 
         @staticmethod
-        def get_worker_info() -> object:
-            return object()
+        def get_worker_info() -> WorkerSentinel:
+            """Simulate a worker without native or Torch resources."""
+            return WorkerSentinel()
 
     def import_fake_torch(name: str) -> type[FakeTorchData]:
         """Supply the test adapter without importing the optional dependency."""

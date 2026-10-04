@@ -22,6 +22,7 @@ fmt-check:
 
 lint:
     {{py}} ruff check dataset_rt tests scripts
+    {{py}} scripts/check_precise_types.py
 
 typecheck:
     {{py}} pyrefly check
