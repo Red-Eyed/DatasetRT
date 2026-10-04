@@ -178,6 +178,63 @@ supervise rank sessions with deadlines and terminate their loading workers too.
 This evidence covers CPU Gloo on this Mac; it does not establish GPU, FSDP,
 DeepSpeed, multi-host, or custom-subgroup behavior.
 
+## Reader performance measurements
+
+`scripts/bench_reader.py` measures `sample_transform_fn` in actual DataLoader
+worker processes. It creates immutable fixture caches automatically and compares
+direct native iteration, a zero-worker loader, and one/two/four-worker loaders.
+The benchmark supports Linux and macOS and defaults to fork; the helper's
+own default remains PyTorch's platform default.
+
+```bash
+uv run --python 3.11 --extra dev scripts/bench_reader.py --output plan/evidence/reader-fork.json
+uv run --python 3.11 --extra dev scripts/bench_reader.py --contexts '["spawn","forkserver"]' --workloads '["cheap"]' --output plan/evidence/reader-startup.json
+```
+
+Both shuffle modes run five paired rounds by default, with case order rotated
+each round. Each trial runs in a fresh process, constructs its own native source
+dataset, warms a native read before worker launch, and consumes a complete first
+pass followed by a repeated pass. Persistent workers are enabled in this
+benchmark by default; `--no-persistent-workers` measures reconstruction instead.
+The first pass supplies warmup and cold-start evidence. Timing gates use the
+repeated pass and normalize by actually consumed samples after its first batch.
+Construction, iterator creation, first-batch latency, and final cleanup remain
+separate fields. Outer trial-process import/startup is outside these timings.
+
+The heavy workload hashes delivered payload bytes in an explicit Python loop;
+the cheap control performs only the initial checksum. Every mode uses the same
+transform and compact checksum outputs, batch size, useful sample count, and
+payload byte count. Sequential passes must end exactly at their assigned total;
+shuffled passes stop at the caller's fixed count. Native prefetch and Torch
+prefetch may compute additional outputs beyond a stopped shuffled prefix; those
+outputs are not counted as accepted work. Weighted physical repeats are normal
+sampling behavior. This synthetic workload does not establish image-decoding,
+large-tensor IPC, cold-disk, or GPU training throughput.
+
+Acceptance targets remain at least 2× four-worker throughput relative to the
+zero-worker loader for the heavy workload, and at most 10% zero-worker serial
+regression relative to the direct-native control. The report retains each
+paired ratio and its median, reports failed targets without changing thresholds,
+and requires at least five pairs before a gate can pass. Small smoke runs check
+correctness only. Historical T01 JSON files remain separate; the current gates
+use fresh paired controls rather than comparing unrelated historical timings.
+
+Resource observation samples the trial's entire process tree, including context
+service processes, every 50 ms and after timed consumption. These are sampled
+maxima, not exact peaks. RSS is summed and can count shared fork pages more than
+once. Thread counts include the benchmark observer. Native queues, Torch result
+prefetch, cache indexes, metadata, and worker memory still multiply according to
+the reader budgets described above. The benchmark retains only bounded output
+batches, a bounded set of consumer PIDs, and per-trial measurement records; it
+does not preload the payload population.
+
+JSON records identify framework versions, Git revision, dirty-worktree state,
+and source fingerprints. Reader or benchmark source changes during a matrix
+invalidate that run. Trial timeouts and interruption terminate the benchmark's
+owned process session, including its loading workers. `--quiet` suppresses
+progress while retaining JSON output. Timing targets are not pytest assertions;
+default validation runs bounded benchmark correctness smoke tests.
+
 ## Ordering
 
 Output order is deterministic. Workers may complete out of order, but the reorder stage publishes samples in the sampler's planned order.
