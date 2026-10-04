@@ -86,7 +86,7 @@ The pure contiguous-span helper divides rows across ranks and then local workers
 
 ## PyTorch DataLoader helper
 
-`CachedDataset.to_torch_dataloader()` returns a standard PyTorch DataLoader supporting zero-worker loading and caller-selected fork/spawn/forkserver contexts. Real multi-rank DDP acceptance is subsequent work. The legacy `to_torch_iterable_dataset()` retains its original behavior.
+`CachedDataset.to_torch_dataloader()` returns a standard PyTorch DataLoader supporting zero-worker loading and caller-selected fork/spawn/forkserver contexts. The legacy `to_torch_iterable_dataset()` retains its original behavior.
 
 The internal adapter's idempotent `setup()` creates one consuming runtime/dataset, records its PID, and reuses it. With workers, internal `worker_init_fn` runs setup before the caller's initialization callback; with zero workers, iteration supplies the fallback. Construction and length queries do not create a consuming reader. Empty validation partitions complete setup without a native reader. Native state never enters serialized adapter state; a serialized initialized adapter reconstructs an independent stream. An initialized adapter inherited into a different PID cannot reuse its native objects.
 
@@ -119,6 +119,64 @@ validation_loader = dataset.to_torch_dataloader(
 for batch in validation_loader:
     validate_batch(batch)
 ```
+
+## CPU DDP composition on macOS
+
+Initialize the application's default distributed group **before** calling
+`to_torch_dataloader()` in each rank. The helper captures that group's rank and
+size once. Loading workers receive the captured identity, never query the group,
+and create their own native reader during worker setup. Rank launch and loader
+worker launch are separate choices: the acceptance tests spawn ranks, then use
+the caller-selected fork, spawn, or forkserver context for loading workers.
+
+For shuffled training, all ranks/workers retain the full active weighted
+population. Pass the same explicit base seed to each rank; the helper derives
+distinct native seeds from the base seed, captured rank, and actual worker ID.
+The application chooses a common finite training step count for the infinite
+stream. Reconstructing a loader replays its explicit seeds; persistent workers
+instead retain their reader state. Metadata changes require a new loader.
+
+For sequential validation, contiguous active-row positions are split across
+ranks and then local workers, without padding. Intentional duplicate physical
+identities remain separate positions. Rank-local lengths and batch counts can
+differ, and a rank can have no samples. Validation code must handle that when
+scheduling collectives and reducing metrics; the loader does not equalize steps.
+The finite training demonstration uses DDP's `join()` context to handle uneven
+forward/backward iterations. `join()` does not automatically cover arbitrary
+application collectives or metric reduction.
+
+The self-contained example writes a small temporary fixture cache, initializes
+real CPU Gloo ranks, and performs forward/backward/optimizer steps. No manual
+cache preparation is required:
+
+```bash
+uv run --python 3.11 --extra dev examples/ddp_loading.py --ranks 2 --workers 2 --worker-context fork
+uv run --python 3.11 --extra dev examples/ddp_loading.py --ranks 4 --workers 2 --worker-context forkserver --no-shuffle
+```
+
+The example's `--gloo-interface lo0` default explicitly selects this Mac's
+loopback interface for single-host communication. Automatic interface selection
+on the acceptance Mac timed out during DDP construction, before loader use;
+explicit loopback selection succeeds. This is an application networking setting,
+not a loader context override. See PyTorch's
+[Gloo interface configuration](https://github.com/pytorch/pytorch/blob/main/docs/source/distributed.md).
+The example also accepts `--quiet` and `--json-output` (one JSON record per rank).
+
+Reader resources replicate across ranks. With R ranks and W loading workers per
+rank, there are R × W consuming native datasets (R when W=0), in addition to any
+source datasets retained by rank code. Each consuming dataset loads cache
+indexes, owns native metadata and `native_num_workers` read threads, and retains
+bounded native prefetch state. Torch also prefetches worker batches according to
+`prefetch_factor` and `batch_size`; these bounds multiply across ranks/workers.
+Sequential IPC-copy costs described above also multiply across ranks. The tests
+bound their fixture observations and serialize multi-rank cases across pytest
+workers to avoid turning correctness tests into unbounded process fan-out.
+
+Transform failures remain terminal. A failing rank may leave peers waiting for
+collectives; application launchers own peer termination. The integration tests
+supervise rank sessions with deadlines and terminate their loading workers too.
+This evidence covers CPU Gloo on this Mac; it does not establish GPU, FSDP,
+DeepSpeed, multi-host, or custom-subgroup behavior.
 
 ## Ordering
 
