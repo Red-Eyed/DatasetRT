@@ -76,13 +76,42 @@ Readers and writer reuse skip checksum validation by default. Dataset constructi
 
 ## Internal Reader Reconstruction Contracts
 
-Python keeps an immutable internal recipe containing original ordered cache paths, reader settings, the configured sample count, and either original-cache metadata or accepted metadata IPC. Recipe export does not create a native reader, read payloads, or export a default full metadata table. It does not copy an active iterator's cursor. Public DataLoader construction is a later feature; these are its internal prerequisites.
+Python keeps an immutable internal recipe containing original ordered cache paths, reader settings, the configured sample count, and either original-cache metadata or accepted metadata IPC. Recipe export does not create a native reader, read payloads, or export a default full metadata table. It does not copy an active iterator's cursor.
 
 Metadata updates retain the exact IPC only after Rust accepts it. Failed updates preserve the previous recipe; prior exported recipes remain immutable snapshots. Retaining an override costs its IPC byte size in addition to native metadata state. Default datasets retain only O(cache paths) construction inputs, with no eager metadata export or per-row Python objects.
 
 Reconstruction restores accepted IPC directly into Rust. It must not decode/re-encode snapshots through Polars in a forked child: inherited Polars thread-pool state can block even when the child creates a fresh DatasetRT runtime. Prepare sequential columnar row slices in the training process before worker launch and select them using the actual worker identity; empty slices yield nothing without native construction. Original cache IDs and intentional duplicate metadata rows remain intact.
 
-The pure contiguous-span helper divides rows across ranks and then local workers without batch-size input, padding, or added duplicates. Zero DataLoader workers means one local consumer. For a fixed base seed, reader-seed derivation version 1 packs u32 rank/worker IDs and uses a seed-keyed SplitMix64 permutation; distinct rank/worker pairs cannot collide. The seed is unused for sequential reading. Omitted shuffled seeds use fresh OS randomness at the consuming iterator boundary. Rank/group-size capture runs in the training process, with single-rank fallback when no group is initialized; loading workers do not query process groups.
+The pure contiguous-span helper divides rows across ranks and then local workers without batch-size input, padding, or added duplicates. Zero DataLoader workers means one local consumer. For a fixed base seed, reader-seed derivation version 1 packs u32 rank/worker IDs and uses a seed-keyed SplitMix64 permutation; distinct rank/worker pairs cannot collide. The seed is unused for sequential reading. Omitted shuffled seeds use fresh OS randomness once during process-local setup. Rank/group-size capture runs in the training process, with single-rank fallback when no group is initialized; loading workers do not query process groups.
+
+## PyTorch DataLoader helper
+
+`CachedDataset.to_torch_dataloader()` returns a standard PyTorch DataLoader. The initial implementation accepts `num_workers=0`; multiprocessing support and real multi-rank DDP acceptance are subsequent work. The legacy `to_torch_iterable_dataset()` retains its original behavior.
+
+The internal adapter's idempotent `setup()` creates one consuming runtime/dataset on first consumption, records its PID, and reuses it. Construction and length queries do not create a consuming reader. Native state never enters serialized adapter state; a serialized initialized adapter reconstructs an independent stream. An initialized adapter inherited into a different PID cannot reuse its native objects.
+
+With `shuffle=True` (the helper default), reading is infinite weighted sampling with replacement over the full active population. Explicit seeds reproduce newly initialized streams; omitted seeds draw OS randomness once at setup. Repeated iterator calls continue the retained draw iterator, including unfinished native windows, without resetting the seed. Source `set_epoch_len()` controls native window size, not a training sample quota; an infinite loader has no finite length. Retaining a paused loader retains its bounded native prefetch state.
+
+With `shuffle=False`, validation traverses each rank's contiguous active-row partition once per iterator. It uses active row count, ignoring source epoch-length overrides and seed, and never pads partitions. Subsequent passes reuse the same native dataset. Preparation takes O(active rows × metadata columns) columnar work; original duplicates, weights, extras, and physical IDs remain intact. Empty rank partitions have zero length and create no native reader. Shuffled construction instead retains only O(cache paths) inputs plus any existing metadata snapshot. Native startup and queues retain their existing costs and bounds.
+
+PyTorch owns `batch_size`, collation, `drop_last`, and pinning. `sample_transform_fn` receives a `CachedSample` after native delivery and returns a domain value; exceptions propagate. Without a transform or collator, Torch's ordinary conversion/collation rules apply to the sample fields. `native_num_workers` controls Rust read threads, separately from DataLoader workers.
+
+```python
+loader = dataset.to_torch_dataloader(
+    shuffle=True, seed=123, batch_size=32,
+    sample_transform_fn=decode_sample,
+)
+for step, batch in enumerate(loader):
+    train_step(batch)
+    if step + 1 == training_steps:
+        break
+
+validation_loader = dataset.to_torch_dataloader(
+    shuffle=False, batch_size=32, sample_transform_fn=decode_sample,
+)
+for batch in validation_loader:
+    validate_batch(batch)
+```
 
 ## Ordering
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
@@ -19,11 +19,14 @@ from dataset_rt.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     import polars as pl
+    from torch.utils.data import DataLoader
 
     from dataset_rt.config import ReaderConfig
+
+T = TypeVar("T")
 
 
 class CachedDataset:
@@ -167,6 +170,50 @@ class CachedDataset:
             ImportError: If PyTorch is not installed in the active environment.
         """
         return to_torch_iterable_dataset(self)
+
+    def to_torch_dataloader(
+        self,
+        *,
+        shuffle: bool = True,
+        seed: int | None = None,
+        batch_size: int | None = 1,
+        num_workers: int = 0,
+        sample_transform_fn: Callable[[CachedSample], T] | None = None,
+        collate_fn: Callable[..., object] | None = None,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        native_num_workers: int = 1,
+    ) -> DataLoader[CachedSample | T]:
+        """Return a native PyTorch DataLoader with process-local reader setup.
+
+        Shuffled sampling is infinite and weighted with replacement. An optional
+        seed reproduces newly initialized streams; iterator calls continue the
+        existing stream. Sequential validation reads a finite rank-local partition
+        of active metadata rows; seed and the source epoch-length override are
+        ignored. Capture an initialized distributed group before calling this
+        method. Batching and collation are owned by PyTorch.
+
+        Construction snapshots inputs without creating a consuming native reader.
+        Setup creates it once on first consumption. Transform failures propagate.
+        This initial implementation requires num_workers=0. PyTorch is optional
+        until this method is called; native_num_workers controls Rust read threads.
+        """
+        from dataset_rt.integrations.loader import make_dataloader
+
+        return make_dataloader(
+            self,
+            shuffle=shuffle,
+            seed=seed,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            sample_transform_fn=sample_transform_fn,
+            collate_fn=collate_fn,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            timeout=timeout,
+            native_num_workers=native_num_workers,
+        )
 
     def samples_metadata(self) -> pl.DataFrame:
         """Compatibility alias for `get_metadata`.

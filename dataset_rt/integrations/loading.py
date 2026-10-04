@@ -60,7 +60,7 @@ def derive_seed(base_seed: int, rank_id: int, worker_id: int) -> int:
 
 
 def reader_seed(*, shuffle: bool, seed: int | None, rank_id: int, worker_id: int) -> int:
-    """Select a seed inside the consuming iterator; sequential mode ignores it.
+    """Select a seed during process-local setup; sequential mode ignores it.
 
     None is the optional API input, converted here into fresh OS randomness.
     No random seed is generated during recipe creation in the parent process.
