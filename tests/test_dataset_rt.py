@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import json
 from pathlib import Path
 from typing import cast
@@ -660,16 +659,16 @@ def test_reader_config_validation() -> None:
 
 
 def test_torch_adapter_requires_torch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test the lazy import boundary even when another test already imported Torch."""
     written = success_paths(RUNTIME.write_cache(TinySource(), tmp_path / "cache"))
     dataset = RUNTIME.cached_dataset(written, reader_config=ReaderConfig(seed=7))
-    original_import = builtins.__import__
 
-    def import_without_torch(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "torch":
-            raise ImportError("torch is intentionally hidden")
-        return original_import(name, globals, locals, fromlist, level)
+    def import_without_torch(name: str) -> object:
+        """Simulate the optional dependency being absent at the adapter boundary."""
+        assert name == "torch.utils.data"
+        raise ImportError("torch is intentionally hidden")
 
-    monkeypatch.setattr(builtins, "__import__", import_without_torch)
+    monkeypatch.setattr(dataset_rt_api, "import_module", import_without_torch)
 
     with pytest.raises(ImportError, match="requires PyTorch"):
         dataset.to_torch_iterable_dataset()

@@ -2,6 +2,25 @@
 
 All notable changes to DatasetRT are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Add `scripts/bench_parallel.py` to record reproducible serial preparation and transformation baselines with explicit workload sizes, JSON output, startup and cleanup timings, and process resource measurements.
+- Add compatibility checks for existing imports, record pickle paths, configuration, and lazy PyTorch imports, plus process-local reader feasibility tests for serial, spawn, fork, and forkserver execution.
+
+### Changed
+
+- Include PyTorch and psutil in the optional `dev` dependencies so reader integration tests and resource benchmarks run from the project environment.
+
+### Fixed
+
+- Make the missing-PyTorch adapter test simulate dependency absence even when another test has already imported PyTorch.
+
+### Tracked Regressions
+
+- Process-local reader feasibility fails with `fork` on the tested macOS ARM64 environment: a worker crashes in native thread parking during fresh dataset construction after the parent initializes native readers. Serial, spawn, and forkserver cases pass. The `fork` test remains a failing acceptance gate; production APIs and native code are unchanged.
+
 ## 0.3.2 - 2026-09-28
 
 ### Added
