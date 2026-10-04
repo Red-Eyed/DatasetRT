@@ -2,7 +2,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crate::channel::{bounded, Receiver, Sender};
 
 use crate::types::{CacheError, CacheResult, NumWorkers};
 
@@ -19,7 +19,7 @@ impl WorkerPool {
     pub fn new(num_workers: NumWorkers) -> CacheResult<Arc<Self>> {
         let worker_count = num_workers.as_usize();
         let queue_capacity = worker_count.saturating_mul(QUEUED_JOBS_PER_WORKER).max(1);
-        let (sender, receiver) = bounded(queue_capacity);
+        let (sender, receiver) = bounded(queue_capacity)?;
 
         for worker_index in 0..worker_count {
             spawn_worker(worker_index, receiver.clone())?;
@@ -29,7 +29,7 @@ impl WorkerPool {
     }
 
     /// Submit one finite job and guarantee one result even if its implementation unwinds.
-    pub fn submit<T>(
+    pub(crate) fn submit<T>(
         &self,
         result_sender: Sender<CacheResult<T>>,
         job: impl FnOnce() -> CacheResult<T> + Send + 'static,
@@ -54,7 +54,7 @@ fn spawn_worker(worker_index: usize, receiver: Receiver<Job>) -> CacheResult<()>
     thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            for job in receiver {
+            while let Ok(job) = receiver.recv() {
                 job();
             }
         })

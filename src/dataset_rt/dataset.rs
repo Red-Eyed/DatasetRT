@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::{bounded, Sender};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
 
+use crate::channel::{bounded, Sender};
 use crate::dataset_runtime::PyDatasetRuntime;
 use crate::runtime::{load_sample_by_identity, EpochPlan, RuntimeIterator};
 use crate::samples_metadata::{
@@ -151,7 +151,7 @@ impl DatasetState {
     /// Schedule one bounded read on the runtime pool without changing mutable dataset state.
     fn get_item(&self, cache_id: u64, sample_id: u64) -> CacheResult<crate::types::LoadedSample> {
         let caches = self.caches.clone();
-        let (sender, receiver) = bounded(1);
+        let (sender, receiver) = bounded(1)?;
         self.pool.submit(sender, move || {
             load_sample_by_identity(caches.as_ref(), cache_id, sample_id)
         })?;
@@ -400,7 +400,7 @@ fn load_caches(
 ) -> CacheResult<Vec<LoadedCache>> {
     let total = paths.len();
     let parallelism = num_workers.as_usize().min(total);
-    let (result_sender, result_receiver) = bounded(parallelism);
+    let (result_sender, result_receiver) = bounded(parallelism)?;
     let mut paths = paths.into_iter().enumerate();
     let mut scheduled = 0_usize;
 

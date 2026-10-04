@@ -136,5 +136,16 @@ No live native object is serialized or supplied to the worker. Pickling and
 copying the native objects are rejected. Fork itself still inherits process
 memory; Python copy restrictions cannot prevent that.
 
-This investigation does not fix the runtime or remove fork from the support
-contract. It identifies the synchronization mechanism that a fix must address.
+## Runtime fix
+
+DatasetRT now uses bounded queues backed by channel-local mutexes and condition
+variables for task submission and reader/writer results. A freshly constructed
+child runtime no longer waits through the inherited calling-thread parker.
+Native object reuse after fork is still unsupported; construct the runtime in
+the consuming process, inside the reader adapter's `__iter__`.
+
+All twelve serial/fork/spawn/forkserver reader cases pass on the tested Mac,
+covering cold, runtime-only and previously-used-reader parents. Forked single-
+and multi-source writer cases also pass, including direct and streaming reads.
+The full Python suite has 116 passing tests. The C failure remains reproducible:
+the fix avoids that synchronization path rather than changing macOS behavior.

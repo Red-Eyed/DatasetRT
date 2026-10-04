@@ -26,7 +26,7 @@ Important external tools:
 - **maturin**: Builds and installs the mixed Rust/Python package during development and release.
 - **Polars**: Columnar DataFrame engine used by the Python API for metadata-aware weight editing.
 - **Apache Arrow IPC**: Columnar file format used for `metadata.arrow` and in-memory samples metadata transfer.
-- **crossbeam-channel**: Bounded Rust channels used for reader/writer backpressure.
+- **channel.rs**: Bounded Rust channels with operation-local mutex/condition-variable waits for reader/writer backpressure; fresh child runtimes must not use an inherited thread parker.
 - **indicatif**: Progress bar rendering for cache writes.
 - **lz4_flex**: Per-record LZ4 compression for random-access payload reads.
 - **uv**: Python environment and command runner. Use it for every Python command.

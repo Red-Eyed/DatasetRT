@@ -10,6 +10,7 @@ import pickle
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -17,7 +18,14 @@ import polars as pl
 import pytest
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig, WriterConfig
+from dataset_rt import (
+    CacheInput,
+    CacheSource,
+    CacheWriteSuccess,
+    DatasetRuntime,
+    ReaderConfig,
+    WriterConfig,
+)
 
 ParentState = Literal["cold", "runtime", "reader"]
 RUNTIME_CONSTRUCTIONS = 0
@@ -216,11 +224,16 @@ def test_process_local_weighted_streams(
     case = mp.get_context("spawn").Process(
         target=run_reader_case, args=(recipe, context, parent_state)
     )
+    verify_process(case, f"{context}/{parent_state}")
+
+
+def verify_process(case: BaseProcess, label: str) -> None:
+    """Reap a supervised case with a finite deadline even when native code fails."""
     case.start()
     try:
         case.join(60)
-        assert not case.is_alive(), f"{context}/{parent_state} exceeded its deadline"
-        assert case.exitcode == 0, f"{context}/{parent_state} failed: exit code {case.exitcode}"
+        assert not case.is_alive(), f"{label} exceeded its deadline"
+        assert case.exitcode == 0, f"{label} failed: exit code {case.exitcode}"
     finally:
         if case.is_alive():
             case.terminate()
@@ -229,3 +242,68 @@ def test_process_local_weighted_streams(
             case.kill()
             case.join(5)
         case.close()
+
+
+@dataclass
+class ForkWriteSource:
+    """Enough streamed inputs to exercise bounded writer credits and shard rotation."""
+
+    name: str
+    samples: int = 1000
+
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Keep fixture payloads independent of worker launch and parent native state."""
+        for index in range(self.samples):
+            yield CacheInput(b"x" * 1024, {"index": index})
+
+
+def write_and_read_in_fork_child(destination: Path, list_mode: bool) -> None:
+    """Fresh child-owned runtimes cover both writer pipelines and direct result waits."""
+    trace_stage(f"writer.child.begin list={list_mode}")
+    runtime = DatasetRuntime(num_workers=2)
+    sources: CacheSource | list[CacheSource] = ForkWriteSource("one")
+    if list_mode:
+        sources = [ForkWriteSource("one"), ForkWriteSource("two")]
+    results = runtime.write_cache(
+        sources,
+        destination,
+        writer_config=WriterConfig(prefetch_size=2, max_shard_bytes=64 * 1024, show_progress=False),
+    )
+    paths = []
+    for result in results:
+        match result:
+            case CacheWriteSuccess(path=path):
+                paths.append(path)
+            case error:
+                raise AssertionError(error)
+    dataset = runtime.cached_dataset(
+        paths, reader_config=ReaderConfig(seed=17, prefetch_size=2, validate_cache=True)
+    )
+    assert dataset.get_item(0, 999).data == b"x" * 1024
+    assert sum(len(sample.data) for sample in dataset) == len(paths) * 1000 * 1024
+    del dataset, runtime
+    trace_stage("writer.child.end")
+
+
+def run_fork_writer_case(recipe: ReaderRecipe, destination: Path, list_mode: bool) -> None:
+    """Warm the parent before launching a child that receives only paths and flags."""
+    parent = DatasetRuntime(num_workers=1)
+    parent_dataset = parent.cached_dataset(recipe.paths, reader_config=ReaderConfig(seed=3))
+    assert next(iter(parent_dataset)).data
+    child = mp.get_context("fork").Process(
+        target=write_and_read_in_fork_child, args=(destination, list_mode)
+    )
+    verify_process(child, f"fork writer list={list_mode}")
+
+
+@pytest.mark.parametrize("list_mode", [False, True])
+def test_fresh_fork_writer_after_parent_read(
+    recipe: ReaderRecipe, tmp_path: Path, list_mode: bool
+) -> None:
+    """Verify forked single/multi-source writing plus fresh streaming/direct readers."""
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("fork unavailable on this platform")
+    case = mp.get_context("spawn").Process(
+        target=run_fork_writer_case, args=(recipe, tmp_path / "fork-writer", list_mode)
+    )
+    verify_process(case, f"fork writer supervisor list={list_mode}")

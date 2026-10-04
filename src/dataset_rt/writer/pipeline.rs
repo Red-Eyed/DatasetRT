@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
 use indicatif::MultiProgress;
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList};
@@ -15,6 +14,7 @@ use super::{
     success_write_result, CacheWriteRecord, ProfileStage, WriterConfig, WriterInput,
     WriterProfiler,
 };
+use crate::channel::{bounded, Receiver, Sender};
 use crate::storage::{load_cache, CacheBuilder};
 use crate::types::{CacheError, CacheResult};
 use crate::worker_pool::WorkerPool;
@@ -60,7 +60,7 @@ pub(super) fn write_source_list(
         committer,
         config.prefetch_size,
         config.num_workers,
-    );
+    )?;
     if let Err(error) =
         ingest_source_list(sources, base_cache_dir, config, &mut pipeline, &profiler)
     {
@@ -315,10 +315,10 @@ impl SourceListWritePipeline {
         committer: PipelineCommitter,
         prefetch_size: crate::types::PrefetchSize,
         num_workers: crate::types::NumWorkers,
-    ) -> Self {
+    ) -> CacheResult<Self> {
         let parallelism = prefetch_size.as_usize().min(num_workers.as_usize());
-        let (result_sender, result_receiver) = bounded(parallelism);
-        Self {
+        let (result_sender, result_receiver) = bounded(parallelism)?;
+        Ok(Self {
             pool,
             result_sender,
             result_receiver,
@@ -327,7 +327,7 @@ impl SourceListWritePipeline {
             next_sequence: 0,
             in_flight: 0,
             parallelism,
-        }
+        })
     }
 
     /// Submit one finite pipeline event after freeing an operation-local credit.

@@ -16,10 +16,8 @@ All notable changes to DatasetRT are documented here.
 ### Fixed
 
 - Make the missing-PyTorch adapter test simulate dependency absence even when another test has already imported PyTorch.
+- Fix fresh native reader/writer runtimes crashing under macOS `fork` after the parent has used DatasetRT. Bounded native queues now wait on their own mutexes and condition variables, avoiding the inherited calling-thread semaphore while preserving backpressure and FIFO transport.
 
-### Tracked Regressions
-
-- On the tested macOS ARM64 environment, `fork` reader construction inside `__iter__` passes with a cold parent or a parent that only creates a runtime, but crashes in native thread parking after the parent loads and reads a dataset. Workers receive only a recipe and construct their own native runtime; native objects reject pickling and copying. Serial, spawn, and forkserver cases pass in all three parent states. Enable `DATASETRT_TRACE_FORK=1` for construction-stage logs. The initialized-reader `fork` case remains a failing acceptance gate; production APIs and native code are unchanged.
 
 ## 0.3.2 - 2026-09-28
 

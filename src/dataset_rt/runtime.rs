@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crate::channel::{bounded, Receiver, Sender};
 
 use crate::sampling::EpochSampler;
 use crate::storage::{LoadedCache, ShardReaderCache};
@@ -119,7 +119,7 @@ impl RuntimeIterator {
             .as_usize()
             .min(prefetch_size.as_usize())
             .min(total);
-        let (output_sender, output) = bounded(parallelism);
+        let (output_sender, output) = bounded(parallelism)?;
         let mut iterator = Self {
             pool,
             caches,

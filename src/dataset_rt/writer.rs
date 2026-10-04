@@ -4,12 +4,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender};
 use indicatif::MultiProgress;
 use pyo3::exceptions::{PyKeyboardInterrupt, PySystemExit};
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
 
+use crate::channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use crate::storage::{load_cache, CacheBuilder, FinishStats, PushSampleStats};
 use crate::types::{
     CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumWorkers,
@@ -230,7 +230,7 @@ fn write_with_pipeline(
         profiler.clone(),
         config.prefetch_size,
         config.num_workers,
-    );
+    )?;
     ingest_python_samples(iterator, &mut pipeline, source_name, &profiler)?;
     pipeline.finish()
 }
@@ -343,10 +343,10 @@ impl SampleWritePipeline {
         profiler: WriterProfiler,
         prefetch_size: PrefetchSize,
         num_workers: NumWorkers,
-    ) -> Self {
+    ) -> CacheResult<Self> {
         let parallelism = prefetch_size.as_usize().min(num_workers.as_usize());
-        let (result_sender, result_receiver) = bounded(parallelism);
-        Self {
+        let (result_sender, result_receiver) = bounded(parallelism)?;
+        Ok(Self {
             pool,
             builder,
             result_sender,
@@ -358,7 +358,7 @@ impl SampleWritePipeline {
             progress,
             source_name,
             profiler,
-        }
+        })
     }
 
     /// Submit one finite serialization job after freeing an operation-local credit.
@@ -417,10 +417,10 @@ fn receive_worker_result<T>(receiver: &Receiver<CacheResult<T>>) -> CacheResult<
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(result) => return result,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            Err(RecvTimeoutError::Timeout) => {
                 Python::attach(|py| py.check_signals()).map_err(py_error)?;
             }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            Err(RecvTimeoutError::Disconnected) => {
                 return Err(CacheError::WorkerFailed);
             }
         }
