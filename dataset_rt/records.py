@@ -3,11 +3,49 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeAlias
 
+from dataset_rt.config import ReaderConfig
+
 if TYPE_CHECKING:
     from dataset_rt.dataset import CachedDataset
+
+
+@dataclass(frozen=True)
+class OriginalMetadata:
+    """Use immutable cache metadata; no active-table override has been applied."""
+
+
+@dataclass(frozen=True)
+class MetadataSnapshot:
+    """Immutable in-memory columnar IPC accepted by the native dataset."""
+
+    ipc: bytes
+
+
+@dataclass(frozen=True)
+class RowSpan:
+    """Contiguous active-row positions; original physical IDs remain unchanged."""
+
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True)
+class ReaderRecipe:
+    """Internal reconstruction inputs with no runtime, reader, or cursor state.
+
+    Cache order fixes physical cache IDs. The finite count reflects the current
+    dataset length; metadata remains original unless Rust accepted an override.
+    """
+
+    cache_paths: tuple[Path, ...]
+    reader_config: ReaderConfig
+    sample_count: int
+    metadata: OriginalMetadata | MetadataSnapshot
+
 
 MetadataValue: TypeAlias = bool | int | float | str
 """Primitive metadata value accepted by the Rust cache writer."""

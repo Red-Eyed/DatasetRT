@@ -74,6 +74,16 @@ Dropping the last receiver disconnects producers, wakes blocked submissions, and
 
 Readers and writer reuse skip checksum validation by default. Dataset construction still reads manifests, metadata, indexes, and shard file lengths, but it does not hash metadata, index, or payload shard contents unless `validate_cache=True` is set on the relevant config. This keeps restart time tied to cache metadata size instead of payload size.
 
+## Internal Reader Reconstruction Contracts
+
+Python keeps an immutable internal recipe containing original ordered cache paths, reader settings, the configured sample count, and either original-cache metadata or accepted metadata IPC. Recipe export does not create a native reader, read payloads, or export a default full metadata table. It does not copy an active iterator's cursor. Public DataLoader construction is a later feature; these are its internal prerequisites.
+
+Metadata updates retain the exact IPC only after Rust accepts it. Failed updates preserve the previous recipe; prior exported recipes remain immutable snapshots. Retaining an override costs its IPC byte size in addition to native metadata state. Default datasets retain only O(cache paths) construction inputs, with no eager metadata export or per-row Python objects.
+
+Reconstruction restores accepted IPC directly into Rust. It must not decode/re-encode snapshots through Polars in a forked child: inherited Polars thread-pool state can block even when the child creates a fresh DatasetRT runtime. Prepare sequential columnar row slices in the training process before worker launch and select them using the actual worker identity; empty slices yield nothing without native construction. Original cache IDs and intentional duplicate metadata rows remain intact.
+
+The pure contiguous-span helper divides rows across ranks and then local workers without batch-size input, padding, or added duplicates. Zero DataLoader workers means one local consumer. For a fixed base seed, reader-seed derivation version 1 packs u32 rank/worker IDs and uses a seed-keyed SplitMix64 permutation; distinct rank/worker pairs cannot collide. The seed is unused for sequential reading. Omitted shuffled seeds use fresh OS randomness at the consuming iterator boundary. Rank/group-size capture runs in the training process, with single-rank fallback when no group is initialized; loading workers do not query process groups.
+
 ## Ordering
 
 Output order is deterministic. Workers may complete out of order, but the reorder stage publishes samples in the sampler's planned order.

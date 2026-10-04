@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import polars as pl
@@ -12,7 +13,13 @@ from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
 from dataset_rt.config import ReaderConfig
 from dataset_rt.integrations.torch import to_torch_iterable_dataset
 from dataset_rt.metadata import decode_metadata, encode_metadata
-from dataset_rt.records import CachedSample, SizedTorchIterableDataset
+from dataset_rt.records import (
+    CachedSample,
+    MetadataSnapshot,
+    OriginalMetadata,
+    ReaderRecipe,
+    SizedTorchIterableDataset,
+)
 
 
 class CachedDataset:
@@ -34,6 +41,7 @@ class CachedDataset:
     """Reader configuration used when this dataset was loaded."""
 
     _inner: _RustCachedDataset
+    _recipe: ReaderRecipe
 
     def __init__(self) -> None:
         """Reject direct construction because every dataset requires a runtime."""
@@ -58,7 +66,29 @@ class CachedDataset:
             reader_config.shuffle,
             reader_config.validate_cache,
         )
+        # Freeze original construction inputs: public path lists can be edited,
+        # but a future worker must reconstruct the same physical cache IDs.
+        dataset._recipe = ReaderRecipe(
+            tuple(dataset.cache_paths), reader_config, len(dataset._inner), OriginalMetadata()
+        )
         return dataset
+
+    def _reader_recipe(self) -> ReaderRecipe:
+        """Snapshot accepted reconstruction inputs without exporting default metadata.
+
+        The immutable recipe can cross process boundaries. It neither creates a
+        new native reader nor advances the existing native sampling cursor.
+        """
+        return self._recipe
+
+    def _restore_metadata(self, snapshot: MetadataSnapshot) -> None:
+        """Validate IPC directly in Rust without entering Polars in forked workers.
+
+        Snapshots are already columnar. Decoding and re-encoding them in a child
+        is unnecessary and can wait on Polars thread-pool state inherited by fork.
+        """
+        self._inner.update_metadata_ipc(snapshot.ipc)
+        self._recipe = replace(self._recipe, sample_count=len(self._inner), metadata=snapshot)
 
     def __iter__(self) -> Iterator[CachedSample]:
         """Create an iterator from the current active metadata table and epoch length.
@@ -120,6 +150,7 @@ class CachedDataset:
         if epoch_len < 1:
             raise ValueError("epoch_len must be at least 1")
         self._inner.set_epoch_len(epoch_len)
+        self._recipe = replace(self._recipe, sample_count=len(self._inner))
 
     def to_torch_iterable_dataset(self) -> SizedTorchIterableDataset:
         """Return a sized `torch.utils.data.IterableDataset` view.
@@ -212,4 +243,7 @@ class CachedDataset:
         - Iterators created before this call keep their existing snapshot;
           iterators created after this call use the new active table.
         """
-        self._inner.update_metadata_ipc(encode_metadata(metadata))
+        ipc = encode_metadata(metadata)
+        # Retain the exact accepted IPC without another export or row expansion.
+        # Rejected updates leave both native state and this snapshot unchanged.
+        self._restore_metadata(MetadataSnapshot(ipc))
