@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from importlib import import_module
 from typing import TYPE_CHECKING, cast
 
-from dataset_rt.records import CachedSample, SizedTorchIterableDataset
-
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from dataset_rt.dataset import CachedDataset
+    from dataset_rt.records import CachedSample, SizedTorchIterableDataset
 
 
 def to_torch_iterable_dataset(dataset: CachedDataset) -> SizedTorchIterableDataset:
@@ -21,7 +21,7 @@ def to_torch_iterable_dataset(dataset: CachedDataset) -> SizedTorchIterableDatas
             "CachedDataset.to_torch_iterable_dataset requires PyTorch to be installed"
         ) from error
 
-    iterable_dataset = cast(type[object], torch_data.IterableDataset)
+    iterable_dataset = cast("type[object]", torch_data.IterableDataset)
 
     class DatasetRTTorchIterableDataset(iterable_dataset):
         """Sized PyTorch iterable view over a `CachedDataset`."""

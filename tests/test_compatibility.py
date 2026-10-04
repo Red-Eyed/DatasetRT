@@ -73,7 +73,17 @@ def test_moved_classes_keep_historical_lookup_paths(
         (api.CacheSourcesDatasetError, ("results", "message")),
     ],
 )
-def test_record_lookup_paths_and_fields(record: type[tuple], fields: tuple[str, ...]) -> None:
+def test_record_lookup_paths_and_fields(
+    record: type[
+        api.CacheInput
+        | api.CachedSample
+        | api.CacheWriteSuccess
+        | api.CacheWriteError
+        | api.CacheSourcesDatasetSuccess
+        | api.CacheSourcesDatasetError
+    ],
+    fields: tuple[str, ...],
+) -> None:
     """Pickled record classes retain the historical facade lookup path."""
     assert record.__module__ == "dataset_rt.api"
     assert record._fields == fields

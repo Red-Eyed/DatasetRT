@@ -4,11 +4,14 @@ import os
 import platform
 import shutil
 import subprocess
-from collections.abc import Sequence
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = PROJECT_ROOT / "dist"

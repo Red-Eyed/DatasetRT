@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import polars as pl
 import pytest
@@ -24,13 +23,18 @@ from dataset_rt import (
     WriterProfilerConfig,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
 RUNTIME = DatasetRuntime(num_workers=4)
 
 
 class TinySource:
     name = "tiny"
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Stream cache inputs for this test scenario."""
         yield CacheInput(b"zero", {"label": "a", "index": 0, "score": 1.5, "kept": True})
         yield CacheInput(bytearray(b"one"), {"label": "b", "index": 1, "score": 2.5, "kept": False})
         yield CacheInput(memoryview(b"two"), {"label": "c", "index": 2, "score": 3.5, "kept": True})
@@ -39,7 +43,8 @@ class TinySource:
 class FiveSource:
     name = "five"
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Stream cache inputs for this test scenario."""
         for index in range(5):
             yield CacheInput(str(index + 1).encode(), {"index": index, "split": "train"})
 
@@ -98,7 +103,7 @@ def shuffled_five_dataset(five_cache_paths: list[Path]) -> dataset_rt_api.Cached
 
 
 def sample_indices(dataset: dataset_rt_api.CachedDataset) -> list[int]:
-    return [cast(int, sample.metadata["index"]) for sample in dataset]
+    return [cast("int", sample.metadata["index"]) for sample in dataset]
 
 
 def test_write_and_read_cache(tmp_path: Path) -> None:
@@ -171,7 +176,8 @@ def test_writer_lz4_compresses_payloads_and_reads_original_bytes(tmp_path: Path)
     class CompressibleSource:
         name = "compressible"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             yield CacheInput(b"a" * 10_000, {"label": "first"})
             yield CacheInput(b"b" * 10_000, {"label": "second"})
 
@@ -263,7 +269,8 @@ def test_writer_profiler_flushes_on_keyboard_interrupt(tmp_path: Path) -> None:
     class InterruptedSource:
         name = "interrupted_profile"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             yield CacheInput(b"first", {"label": "ok"})
             raise KeyboardInterrupt("stop")
 
@@ -306,7 +313,8 @@ def test_dataset_loads_multiple_caches_in_constructor_order(tmp_path: Path) -> N
     class OtherSource:
         name = "other"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             yield CacheInput(b"three", {"label": "d", "index": 3, "score": 4.5, "kept": False})
             yield CacheInput(b"four", {"label": "e", "index": 4, "score": 5.5, "kept": True})
 
@@ -356,7 +364,8 @@ def test_get_item_reads_sparse_samples_across_many_rows_and_caches(tmp_path: Pat
         def __init__(self, name: str) -> None:
             self.name = name
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             for sample_id in range(1_024):
                 yield CacheInput(sample_id.to_bytes(2, "little"), {"sample_id": sample_id})
 
@@ -389,7 +398,7 @@ def test_get_item_rejects_non_integer_identity(
     tiny_dataset: dataset_rt_api.CachedDataset, cache_id: object, sample_id: object
 ) -> None:
     with pytest.raises(TypeError, match="must be integers"):
-        tiny_dataset.get_item(cast(int, cache_id), cast(int, sample_id))
+        tiny_dataset.get_item(cast("int", cache_id), cast("int", sample_id))
 
 
 def test_multi_source_write_rejects_duplicate_names_before_writing(tmp_path: Path) -> None:
@@ -403,7 +412,7 @@ def test_multi_source_write_rejects_duplicate_names_before_writing(tmp_path: Pat
 
 def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
-        WriterConfig(prefetch_size=cast(int, 0))
+        WriterConfig(prefetch_size=cast("int", 0))
 
     with pytest.raises(ValidationError):
         WriterConfig.model_validate({"num_threads": 4})
@@ -437,12 +446,13 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
         RUNTIME.write_cache(
             TinySource(),
             tmp_path / "zstd",
-            writer_config=cast(WriterConfig, UnsupportedWriterConfig()),
+            writer_config=cast("WriterConfig", UnsupportedWriterConfig()),
         )
 
 
 def test_dataset_keeps_runtime_pool_alive(tmp_path: Path) -> None:
-    def load_dataset():
+    def load_dataset() -> dataset_rt_api.CachedDataset:
+        """Return a dataset whose local runtime owner has left scope."""
         runtime = DatasetRuntime(num_workers=1)
         written = success_paths(runtime.write_cache(TinySource(), tmp_path / "cache"))
         return runtime.cached_dataset(
@@ -462,8 +472,9 @@ def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) 
     class BadSource:
         name = "bad"
 
-        def __iter__(self):
-            yield CacheInput(cast(bytes, object()), {"label": "bad"})
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
+            yield CacheInput(cast("bytes", object()), {"label": "bad"})
 
     root = tmp_path / "caches"
 
@@ -482,7 +493,8 @@ def test_empty_source_is_reported_as_write_error(tmp_path: Path) -> None:
     class EmptySource:
         name = "empty"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             return
             yield CacheInput(b"never", {"label": "empty"})
 
@@ -502,7 +514,8 @@ def test_keyboard_interrupt_is_not_reported_as_write_error(tmp_path: Path) -> No
     class InterruptedSource:
         name = "interrupted"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             raise KeyboardInterrupt
             yield CacheInput(b"never", {"label": "interrupted"})
 
@@ -653,7 +666,7 @@ def test_set_epoch_len_rejects_non_positive_values(
 
 def test_reader_config_validation() -> None:
     with pytest.raises(ValidationError):
-        ReaderConfig(seed=7, prefetch_size=cast(int, 0))
+        ReaderConfig(seed=7, prefetch_size=cast("int", 0))
 
     with pytest.raises(ValidationError):
         ReaderConfig.model_validate({"seed": 7, "num_workers": 4})
@@ -689,7 +702,12 @@ def test_torch_adapter_rejects_dataloader_workers(
         def get_worker_info() -> object:
             return object()
 
-    monkeypatch.setattr(torch_integration, "import_module", lambda name: FakeTorchData)
+    def import_fake_torch(name: str) -> type[FakeTorchData]:
+        """Supply the test adapter without importing the optional dependency."""
+        assert name == "torch.utils.data"
+        return FakeTorchData
+
+    monkeypatch.setattr(torch_integration, "import_module", import_fake_torch)
 
     torch_dataset = dataset.to_torch_iterable_dataset()
 
@@ -708,7 +726,12 @@ def test_torch_adapter_reports_configured_epoch_len(
         def get_worker_info() -> None:
             return None
 
-    monkeypatch.setattr(torch_integration, "import_module", lambda name: FakeTorchData)
+    def import_fake_torch(name: str) -> type[FakeTorchData]:
+        """Supply the test adapter without importing the optional dependency."""
+        assert name == "torch.utils.data"
+        return FakeTorchData
+
+    monkeypatch.setattr(torch_integration, "import_module", import_fake_torch)
 
     tiny_dataset.set_epoch_len(5)
     torch_dataset = tiny_dataset.to_torch_iterable_dataset()
@@ -971,7 +994,8 @@ def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
     class ExplodingSource:
         name = "tiny"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             raise AssertionError("existing caches should be reused before iteration")
             yield CacheInput(b"never", {"label": "x", "index": 9, "score": 0.0, "kept": False})
 
@@ -1010,7 +1034,8 @@ def test_from_cache_sources_returns_dataset_with_write_errors(tmp_path: Path) ->
     class EmptySource:
         name = "empty"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             return
             yield CacheInput(b"never", {"label": "empty"})
 
@@ -1035,7 +1060,8 @@ def test_from_cache_sources_returns_error_when_no_cache_was_written(tmp_path: Pa
     class EmptySource:
         name = "empty"
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Stream cache inputs for this test scenario."""
             return
             yield CacheInput(b"never", {"label": "empty"})
 

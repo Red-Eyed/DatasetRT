@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeAlias
 
-from dataset_rt.config import ReaderConfig
-
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dataset_rt.config import ReaderConfig
     from dataset_rt.dataset import CachedDataset
 
 

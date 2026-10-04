@@ -8,11 +8,8 @@ import multiprocessing as mp
 import os
 import pickle
 from collections import Counter
-from collections.abc import Iterator
 from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
-from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import polars as pl
 import pytest
@@ -26,6 +23,11 @@ from dataset_rt import (
     ReaderConfig,
     WriterConfig,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from multiprocessing.process import BaseProcess
+    from pathlib import Path
 
 ParentState = Literal["cold", "runtime", "reader"]
 RUNTIME_CONSTRUCTIONS = 0

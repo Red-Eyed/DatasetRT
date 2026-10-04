@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import time
-from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dataset_rt import (
     CacheInput,
@@ -13,6 +13,9 @@ from dataset_rt import (
     ReaderConfig,
     WriterConfig,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 SAMPLE_COUNT = 10_000
 PAYLOAD_BYTES = 1024

@@ -9,10 +9,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psutil
 from pydantic import Field
@@ -26,6 +26,9 @@ from dataset_rt import (
     ReaderConfig,
     WriterConfig,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @dataclass
@@ -96,7 +99,7 @@ class Benchmark(BaseSettings):
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
         ).stdout.strip()
         report = {
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "recorded_at": datetime.now(UTC).isoformat(),
             "revision": revision,
             "platform": platform.platform(),
             "machine": platform.machine(),

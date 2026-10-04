@@ -1,0 +1,27 @@
+required-version = ">=0.16.9"
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E4", "E7", "E9", # Syntax and structural errors; formatting handles layout.
+    "F",              # Undefined names, unused imports, and related mistakes.
+    "I",              # Consistent import ordering.
+    "UP",             # Modern Python typing syntax.
+    "B",              # Common bug patterns, including mutable defaults.
+    "ANN",            # Explicit function annotations, including rejection of Any.
+    "TC",             # Typing-specific checks.
+    "RUF100",         # Stale noqa suppressions.
+    "PGH003",         # Unqualified type: ignore comments.
+    "PGH004",         # Unqualified noqa comments.
+]
+
+[lint.flake8-annotations]
+allow-star-arg-any = false
+ignore-fully-untyped = false
+suppress-none-returning = false
+suppress-dummy-args = false
+
+[format]
+quote-style = "double"
+indent-style = "space"

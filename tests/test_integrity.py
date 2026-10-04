@@ -2,19 +2,45 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
 RUNTIME = DatasetRuntime(num_workers=4)
+
+
+class ShardManifest(BaseModel):
+    """Validate edited shard fields while preserving the remaining native manifest."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+    name: str
+    sha256: str
+
+
+class Manifest(BaseModel):
+    """Type corruption-test edits without duplicating Rust's format validation."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+    sample_count: int
+    metadata_sha256: str
+    index_sha256: str
+    shards: list[ShardManifest]
 
 
 class IntegritySource:
     name = "integrity"
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Stream cache inputs for this test scenario."""
         yield CacheInput(b"alpha", {"split": "train", "index": 0})
         yield CacheInput(b"beta", {"split": "train", "index": 1})
 
@@ -35,12 +61,14 @@ def load_cache(cache_path: Path) -> CachedDataset:
     )
 
 
-def read_manifest(cache_path: Path) -> dict[str, object]:
-    return json.loads((cache_path / "manifest.json").read_text())
+def read_manifest(cache_path: Path) -> Manifest:
+    """Validate the editable fields once when loading a native test artifact."""
+    return Manifest.model_validate_json((cache_path / "manifest.json").read_text())
 
 
-def write_manifest(cache_path: Path, manifest: dict[str, object]) -> None:
-    (cache_path / "manifest.json").write_text(json.dumps(manifest))
+def write_manifest(cache_path: Path, manifest: Manifest) -> None:
+    """Retain native fields while publishing deliberate corruption-test edits."""
+    (cache_path / "manifest.json").write_text(manifest.model_dump_json())
 
 
 def read_u64(bytes_: bytes) -> int:
@@ -53,11 +81,8 @@ def replace_first_embedded_metadata(cache_path: Path, metadata: dict[str, object
     shard_id = read_u64(index[:8])
     offset = read_u64(index[8:16])
     byte_len = read_u64(index[16:24])
-    shards = manifest["shards"]
-    assert isinstance(shards, list)
-    shard = shards[shard_id]
-    assert isinstance(shard, dict)
-    shard_path = cache_path / "shards" / str(shard["name"])
+    shard = manifest.shards[shard_id]
+    shard_path = cache_path / "shards" / shard.name
     shard_bytes = bytearray(shard_path.read_bytes())
     record = bytes(shard_bytes[offset : offset + byte_len])
     metadata_len = read_u64(record[:8])
@@ -66,7 +91,7 @@ def replace_first_embedded_metadata(cache_path: Path, metadata: dict[str, object
     assert len(encoded_metadata) == metadata_len
     shard_bytes[offset + 8 : offset + 8 + metadata_len] = encoded_metadata
     shard_path.write_bytes(shard_bytes)
-    shard["sha256"] = hashlib.sha256(shard_bytes).hexdigest()
+    shard.sha256 = hashlib.sha256(shard_bytes).hexdigest()
     write_manifest(cache_path, manifest)
 
 
@@ -89,7 +114,7 @@ def test_corrupt_manifest_is_rejected(tmp_path: Path) -> None:
 def test_metadata_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
     cache_path = write_integrity_cache(tmp_path)
     manifest = read_manifest(cache_path)
-    manifest["metadata_sha256"] = "0" * 64
+    manifest.metadata_sha256 = "0" * 64
     write_manifest(cache_path, manifest)
 
     with pytest.raises(ValueError, match="checksum mismatch"):
@@ -99,7 +124,7 @@ def test_metadata_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
 def test_checksum_validation_is_optional_for_dataset_load(tmp_path: Path) -> None:
     cache_path = write_integrity_cache(tmp_path)
     manifest = read_manifest(cache_path)
-    manifest["metadata_sha256"] = "0" * 64
+    manifest.metadata_sha256 = "0" * 64
     write_manifest(cache_path, manifest)
 
     dataset = RUNTIME.cached_dataset(
@@ -113,7 +138,7 @@ def test_checksum_validation_is_optional_for_dataset_load(tmp_path: Path) -> Non
 def test_index_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
     cache_path = write_integrity_cache(tmp_path)
     manifest = read_manifest(cache_path)
-    manifest["index_sha256"] = "0" * 64
+    manifest.index_sha256 = "0" * 64
     write_manifest(cache_path, manifest)
 
     with pytest.raises(ValueError, match="checksum mismatch"):
@@ -140,7 +165,7 @@ def test_missing_shard_is_returned_as_runtime_error(tmp_path: Path) -> None:
 def test_manifest_sample_count_mismatch_is_rejected(tmp_path: Path) -> None:
     cache_path = write_integrity_cache(tmp_path)
     manifest = read_manifest(cache_path)
-    manifest["sample_count"] = 999
+    manifest.sample_count = 999
     write_manifest(cache_path, manifest)
 
     with pytest.raises(ValueError, match="row count does not match manifest"):

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from torch import Tensor
 
 torch = pytest.importorskip("torch")
 
@@ -13,7 +19,8 @@ torch = pytest.importorskip("torch")
 class TensorSource:
     name = "tensors"
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Stream cache inputs for this test scenario."""
         for index in range(4):
             yield CacheInput(
                 tensor_to_bytes(torch.tensor([index, index + 1])),
@@ -21,19 +28,23 @@ class TensorSource:
             )
 
 
-def tensor_to_bytes(tensor) -> bytes:
+def tensor_to_bytes(tensor: Tensor) -> bytes:
+    """Serialize the tensor fixture without interpreting its storage."""
     buffer = io.BytesIO()
     torch.save(tensor, buffer)
     return buffer.getvalue()
 
 
-def tensor_from_bytes(data: bytes):
+def tensor_from_bytes(data: bytes) -> Tensor:
+    """Reject non-tensor values at the deserialization boundary."""
     buffer = io.BytesIO(data)
     try:
-        return torch.load(buffer, weights_only=True)
+        value: object = torch.load(buffer, weights_only=True)
     except TypeError:
         buffer.seek(0)
-        return torch.load(buffer)
+        value = torch.load(buffer)
+    assert isinstance(value, torch.Tensor)
+    return cast("Tensor", value)
 
 
 def test_dataset_rt_streams_into_pytorch_iterable_dataset(tmp_path: Path) -> None:

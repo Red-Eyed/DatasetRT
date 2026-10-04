@@ -7,10 +7,8 @@ import os
 import pickle
 import subprocess
 import sys
-from collections.abc import Iterator
-from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import polars as pl
 import pytest
@@ -29,6 +27,10 @@ from dataset_rt.integrations.loading import (
 )
 from dataset_rt.metadata import decode_metadata, slice_metadata
 from dataset_rt.records import MetadataSnapshot, OriginalMetadata, ReaderRecipe
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from multiprocessing.connection import Connection
 
 
 class ContractSource:

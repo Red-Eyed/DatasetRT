@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +20,8 @@ from dataset_rt.records import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
 
 

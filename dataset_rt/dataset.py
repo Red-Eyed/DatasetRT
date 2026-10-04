@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
-
-import polars as pl
+from typing import TYPE_CHECKING
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
-from dataset_rt.config import ReaderConfig
 from dataset_rt.integrations.torch import to_torch_iterable_dataset
 from dataset_rt.metadata import decode_metadata, encode_metadata
 from dataset_rt.records import (
@@ -20,6 +17,13 @@ from dataset_rt.records import (
     ReaderRecipe,
     SizedTorchIterableDataset,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+    import polars as pl
+
+    from dataset_rt.config import ReaderConfig
 
 
 class CachedDataset:
