@@ -2,7 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
-## [Unreleased]
+## 0.4.0rc2 - 2026-10-08
+
+This release candidate adds process-local PyTorch loading to the 0.3.2 API.
+Parallel cache writing is still pending. The earlier 0.4.0rc1 writer experiment
+was reverted; users of that candidate should remove `WriterConfig.num_processes`
+and use the serial writer API for this release.
 
 ### Added
 
@@ -16,6 +21,7 @@ All notable changes to DatasetRT are documented here.
 
 - Include PyTorch and psutil in the optional `dev` dependencies so reader integration tests and resource benchmarks run from the project environment.
 - Split Python implementation into focused modules while preserving public imports, signatures, defaults, and pickle lookup paths. API documentation follows definitions behind the compatibility facade.
+- Enforce precise Python annotations with dedicated Ruff, pyrefly, and broad-type checks; run ordinary Python tests in parallel with pytest-xdist.
 
 ### Fixed
 
