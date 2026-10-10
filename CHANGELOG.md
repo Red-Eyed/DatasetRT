@@ -4,8 +4,22 @@ All notable changes to DatasetRT are documented here.
 
 ## [Unreleased]
 
+## 0.4.0rc3 - 2026-10-10
+
+This candidate makes loader epochs finite, adds compact worker reconstruction,
+and restores optional source-process cache writing. CPU acceptance is verified;
+CUDA and physical multi-host validation remain pending on suitable hardware.
+
 ### Added
 
+- Add optional spawned cache-source writers with `WriterConfig.num_processes`;
+  zero preserves serial writing. Sources must be picklable and importable.
+  Bound dispatch, preserve input-order outcomes, and stop without retries on
+  worker death or timeout. Add `scripts/bench_writer.py` for paired measurements.
+- Add `CachedDataset.update_manifests(version=3)` with typed migration outcomes.
+  Construct legacy datasets in their original cache order before migration to
+  preserve identities used by saved metadata tables. Migration is explicit,
+  resumable, and leaves sample files unchanged.
 - Add `python -m dataset_rt.run_benchmark` with automatic local rank launch,
   external `torchrun` support, CPU/Gloo and CUDA/NCCL execution, generated or
   existing caches, finite correctness checks, and JSON performance/resource
@@ -27,6 +41,10 @@ All notable changes to DatasetRT are documented here.
 
 ### Backwards Incompatible Changes
 
+- Write new caches with v3 manifests and persistent name-derived `cache_id`
+  values, so identities survive reordered cache paths. V2 caches remain readable
+  with positional IDs until explicit migration. Treat IDs as opaque values;
+  replace code that indexes cache arrays directly with `cache_id`.
 - Reject invalid DataLoader worker combinations before metadata preparation,
   including zero-worker persistence, contexts, and prefetch, nonfinite timeouts,
   and nonboolean flags. Bound inherited and explicit sample budgets by
