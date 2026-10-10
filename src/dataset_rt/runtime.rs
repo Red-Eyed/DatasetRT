@@ -7,9 +7,7 @@ use crate::channel::{bounded, Receiver, Sender};
 
 use crate::sampling::EpochSampler;
 use crate::storage::{LoadedCache, ShardReaderCache};
-use crate::types::{
-    CacheError, CacheId, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId,
-};
+use crate::types::{CacheError, CacheResult, LoadedSample, NumWorkers, PrefetchSize, SampleId};
 use crate::worker_pool::WorkerPool;
 
 thread_local! {
@@ -266,7 +264,7 @@ fn load_planned_sample(
     Ok(LoadedSample {
         data: sample.data,
         metadata: sample.metadata,
-        cache_id: CacheId::from_position(cache_index)?,
+        cache_id: cache.cache_id,
         sample_id: SampleId::from_position(sample_index)?,
     })
 }
@@ -274,11 +272,14 @@ fn load_planned_sample(
 /// Read one physical identity without consulting or advancing the active sampling state.
 pub fn load_sample_by_identity(
     caches: &[LoadedCache],
+    cache_lookup: &std::collections::HashMap<u64, usize>,
     cache_id: u64,
     sample_id: u64,
 ) -> CacheResult<LoadedSample> {
-    let cache_index = usize::try_from(cache_id)
-        .map_err(|_| CacheError::InvalidInput(format!("cache_id {cache_id} is out of range")))?;
+    let cache_index = cache_lookup
+        .get(&cache_id)
+        .copied()
+        .ok_or_else(|| CacheError::InvalidInput(format!("cache_id {cache_id} is out of range")))?;
     let sample_index = usize::try_from(sample_id)
         .map_err(|_| CacheError::InvalidInput(format!("sample_id {sample_id} is out of range")))?;
     let cache = caches
@@ -294,7 +295,7 @@ pub fn load_sample_by_identity(
     Ok(LoadedSample {
         data: sample.data,
         metadata: sample.metadata,
-        cache_id: CacheId::from_position(cache_index)?,
+        cache_id: cache.cache_id,
         sample_id: SampleId::from_position(sample_index)?,
     })
 }

@@ -1,0 +1,47 @@
+{
+  "format_version": 2,
+  "source_name": "legacy-é",
+  "sample_count": 4,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    }
+  ],
+  "metadata_sha256": "68151a8762381f745b1114ad1dd13dd807eea9b0e977c62e975c26ef22eaeae1",
+  "index_sha256": "9428a435ce97f226c687f992283d60a237f17037e4d7b4e4b1f9264f9ad17365",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 280,
+      "byte_len": 191,
+      "compression": {
+        "algo": "lz4",
+        "ratio": 1.0
+      },
+      "sha256": "f8ad420ba1483f489a8cd539f124034ba357ff485a11276e61d123883f4b787d"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 280,
+      "byte_len": 191,
+      "compression": {
+        "algo": "lz4",
+        "ratio": 1.0
+      },
+      "sha256": "98088a9e323a9c6dc4256331db8ba9107f6d384a4d8603c2e580efda715a3197"
+    }
+  ]
+}

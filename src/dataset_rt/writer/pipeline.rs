@@ -198,7 +198,7 @@ fn existing_cache_result(
         return success_write_result(source_name, cache_path);
     }
 
-    match load_cache(cache_path.clone(), true) {
+    match load_cache(cache_path.clone(), true, 0) {
         Ok(_) => success_write_result(source_name, cache_path),
         Err(error) => error_write_result(source_name, error),
     }

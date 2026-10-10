@@ -4,13 +4,76 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Generic, Literal, NamedTuple, Protocol, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from dataset_rt.config import ReaderConfig
     from dataset_rt.dataset import CachedDataset
+
+T = TypeVar("T")
+E = TypeVar("E")
+
+
+@dataclass(frozen=True)
+class Ok(Generic[T]):
+    """Carry a successful outcome that callers narrow with pattern matching."""
+
+    value: T
+    """Accepted value, available after narrowing this outcome to Ok."""
+
+
+@dataclass(frozen=True)
+class Err(Generic[E]):
+    """Carry an expected failure without converting it into exception control flow."""
+
+    error: E
+    """Typed rejection, available after narrowing this outcome to Err."""
+
+
+Result: TypeAlias = Ok[T] | Err[E]
+"""Typed expected success/failure contract; interrupts and unexpected bugs may unwind."""
+
+
+@dataclass(frozen=True)
+class ManifestUpdateEntry:
+    """Describe a replacement or unchanged manifest; durability may be unconfirmed."""
+
+    path: Path
+    """Resolved manifest file that was replaced or left unchanged."""
+    cache_id: int
+    """Dataset identity retained in the persisted manifest."""
+    status: Literal["updated", "unchanged", "durability_unknown"]
+    """Replacement state; durability_unknown means rename succeeded but directory sync failed."""
+
+
+@dataclass(frozen=True)
+class ManifestUpdateReport:
+    """One entry per cache after a complete, identity-preserving migration."""
+
+    entries: tuple[ManifestUpdateEntry, ...]
+    """Immutable input-ordered outcomes for every cache in the completed request."""
+
+
+@dataclass(frozen=True)
+class AbsentManifestTarget:
+    """A rejected request has no individual filesystem target."""
+
+    reason: str
+    """Why the rejected request cannot identify an individual manifest."""
+
+
+@dataclass(frozen=True)
+class ManifestUpdateError:
+    """Retain completed replacements so callers can safely inspect and retry."""
+
+    path: Path | AbsentManifestTarget
+    """Failed manifest target, or a reason-carrying absence for invalid requests."""
+    message: str
+    """Boundary diagnostic describing the expected validation or filesystem failure."""
+    entries: tuple[ManifestUpdateEntry, ...] = ()
+    """Completed or durability-uncertain outcomes before the request stopped."""
 
 
 @dataclass(frozen=True)
@@ -37,7 +100,7 @@ class RowSpan:
 class ReaderRecipe:
     """Internal reconstruction inputs with no runtime, reader, or cursor state.
 
-    Cache order fixes physical cache IDs. The finite count reflects the current
+    Cache order fixes traversal and legacy v2 IDs. The finite count reflects the current
     dataset length; metadata remains original unless Rust accepted an override.
     """
 
@@ -91,7 +154,7 @@ class CachedSample(NamedTuple):
     """Metadata row associated with this physical sample."""
 
     cache_id: int
-    """Position of the source cache passed to `DatasetRuntime.cached_dataset`."""
+    """Stored v3 cache identity, or the supplied cache-path position for legacy v2."""
 
     sample_id: int
     """Physical sample row within the source cache."""

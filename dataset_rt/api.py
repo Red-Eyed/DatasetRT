@@ -26,6 +26,9 @@ from dataset_rt.config import (
 )
 from dataset_rt.dataset import CachedDataset as CachedDataset
 from dataset_rt.records import (
+    AbsentManifestTarget as AbsentManifestTarget,
+)
+from dataset_rt.records import (
     BytesLike as BytesLike,
 )
 from dataset_rt.records import (
@@ -56,10 +59,28 @@ from dataset_rt.records import (
     CacheWriteSuccess as CacheWriteSuccess,
 )
 from dataset_rt.records import (
+    Err as Err,
+)
+from dataset_rt.records import (
+    ManifestUpdateEntry as ManifestUpdateEntry,
+)
+from dataset_rt.records import (
+    ManifestUpdateError as ManifestUpdateError,
+)
+from dataset_rt.records import (
+    ManifestUpdateReport as ManifestUpdateReport,
+)
+from dataset_rt.records import (
     Metadata as Metadata,
 )
 from dataset_rt.records import (
     MetadataValue as MetadataValue,
+)
+from dataset_rt.records import (
+    Ok as Ok,
+)
+from dataset_rt.records import (
+    Result as Result,
 )
 from dataset_rt.records import (
     SizedTorchIterableDataset as SizedTorchIterableDataset,

@@ -290,7 +290,11 @@ def test_recipe_reconstruction_in_actual_process(
         assert receive.poll(30), f"{context} child did not report"
         pid, identities, seed = receive.recv()
         assert pid != os.getpid()
-        assert identities == [(1, 1), (0, 0), (1, 1)]
+        assert identities == [
+            (1_600_601_599_791_221_249, 1),
+            (2_851_758_661_582_890_383, 0),
+            (1_600_601_599_791_221_249, 1),
+        ]
         assert seed == derive_seed(7, 1, 0)
         child.join(30)
         assert child.exitcode == 0

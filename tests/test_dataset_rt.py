@@ -28,6 +28,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 RUNTIME = DatasetRuntime(num_workers=4)
+TINY_ID = 671_225_450_407_077_731
+FIVE_ID = 2_462_074_631_277_705_190
+OTHER_ID = 6_424_818_148_262_835_032
+FIRST_ID = 2_851_758_661_582_890_383
+SECOND_ID = 1_600_601_599_791_221_249
 
 
 class InvalidPayload:
@@ -139,7 +144,7 @@ def test_write_and_read_cache(tmp_path: Path) -> None:
 
     assert len(samples) == 3
     assert {sample.data for sample in samples}.issubset({b"zero", b"one", b"two"})
-    assert {sample.cache_id for sample in samples} == {0}
+    assert {sample.cache_id for sample in samples} == {TINY_ID}
     assert all(sample.metadata["label"] in {"a", "b", "c"} for sample in samples)
 
 
@@ -176,7 +181,7 @@ def test_shard_records_embed_metadata_for_debugging(tmp_path: Path) -> None:
     metadata_len = int.from_bytes(first_record[:8], "little")
     embedded_metadata = json.loads(first_record[8 : 8 + metadata_len])
 
-    assert manifest["format_version"] == 2
+    assert manifest["format_version"] == 3
     assert embedded_metadata == {"index": 0, "kept": True, "label": "a", "score": 1.5}
 
 
@@ -336,10 +341,16 @@ def test_dataset_loads_multiple_caches_in_constructor_order(tmp_path: Path) -> N
     samples = list(dataset)
 
     assert [sample.data for sample in samples] == [b"three", b"four", b"zero", b"one", b"two"]
-    assert [sample.cache_id for sample in samples] == [0, 0, 1, 1, 1]
+    assert [sample.cache_id for sample in samples] == [
+        OTHER_ID,
+        OTHER_ID,
+        TINY_ID,
+        TINY_ID,
+        TINY_ID,
+    ]
 
-    assert dataset.get_item(0, 1) == samples[1]
-    assert dataset.get_item(1, 2) == samples[4]
+    assert dataset.get_item(OTHER_ID, 1) == samples[1]
+    assert dataset.get_item(TINY_ID, 2) == samples[4]
 
 
 def test_get_item_reads_filtered_sample_without_advancing_cursor(
@@ -347,10 +358,10 @@ def test_get_item_reads_filtered_sample_without_advancing_cursor(
 ) -> None:
     tiny_dataset.update_metadata(tiny_dataset.get_metadata().tail(2))
 
-    sample = tiny_dataset.get_item(0, 0)
+    sample = tiny_dataset.get_item(TINY_ID, 0)
 
     assert sample == dataset_rt_api.CachedSample(
-        b"zero", {"index": 0, "kept": True, "label": "a", "score": 1.5}, 0, 0
+        b"zero", {"index": 0, "kept": True, "label": "a", "score": 1.5}, TINY_ID, 0
     )
     assert [sample.data for sample in tiny_dataset] == [b"one", b"two"]
 
@@ -363,7 +374,7 @@ def test_get_item_does_not_advance_shuffled_draws(
         five_cache_paths, reader_config=ReaderConfig(seed=11, shuffle=True)
     )
 
-    assert shuffled_five_dataset.get_item(0, 3).data == b"4"
+    assert shuffled_five_dataset.get_item(FIVE_ID, 3).data == b"4"
     assert sample_indices(shuffled_five_dataset) == sample_indices(reference)
 
 
@@ -386,14 +397,21 @@ def test_get_item_reads_sparse_samples_across_many_rows_and_caches(tmp_path: Pat
     )
     dataset = RUNTIME.cached_dataset(paths, reader_config=ReaderConfig(seed=7, shuffle=False))
 
-    for cache_id, sample_id in [(0, 0), (0, 1_023), (1, 0), (1, 1_023)]:
+    for cache_id, sample_id in [
+        (FIRST_ID, 0),
+        (FIRST_ID, 1_023),
+        (SECOND_ID, 0),
+        (SECOND_ID, 1_023),
+    ]:
         sample = dataset.get_item(cache_id, sample_id)
         assert sample.data == sample_id.to_bytes(2, "little")
         assert sample.metadata == {"sample_id": sample_id}
         assert (sample.cache_id, sample.sample_id) == (cache_id, sample_id)
 
 
-@pytest.mark.parametrize("cache_id, sample_id", [(-1, 0), (0, -1), (1, 0), (0, 3), (2**64, 0)])
+@pytest.mark.parametrize(
+    "cache_id, sample_id", [(-1, 0), (TINY_ID, -1), (1, 0), (TINY_ID, 3), (2**64, 0)]
+)
 def test_get_item_rejects_unknown_identity(
     tiny_dataset: dataset_rt_api.CachedDataset, cache_id: int, sample_id: int
 ) -> None:

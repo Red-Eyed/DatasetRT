@@ -14,6 +14,7 @@
 !/LICENSE
 !/justfile
 !/.vscode/settings.json
+!/tests/fixtures/manifest-v2/**
 
 /.venv/
 /target/

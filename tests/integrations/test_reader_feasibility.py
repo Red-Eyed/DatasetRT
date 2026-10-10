@@ -281,7 +281,7 @@ def write_and_read_in_fork_child(destination: Path, list_mode: bool) -> None:
     dataset = runtime.cached_dataset(
         paths, reader_config=ReaderConfig(seed=17, prefetch_size=2, validate_cache=True)
     )
-    assert dataset.get_item(0, 999).data == b"x" * 1024
+    assert dataset.get_item(8_544_106_591_765_445_504, 999).data == b"x" * 1024
     assert sum(len(sample.data) for sample in dataset) == len(paths) * 1000 * 1024
     del dataset, runtime
     trace_stage("writer.child.end")

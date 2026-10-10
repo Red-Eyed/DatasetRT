@@ -78,15 +78,23 @@ class Output:
     digest: bytes
 
 
+class BenchmarkManifest(BaseModel):
+    """Read only persistent identity from Rust-validated new benchmark fixtures."""
+
+    cache_id: int
+
+
 @dataclass(frozen=True)
 class Transform:
     """Spend explicit CPU work on delivered bytes, with identical work in every mode."""
 
     rounds: int
+    cache_ids: tuple[int, ...]
 
     def __call__(self, sample: CachedSample) -> Output:
         """Check physical identity before hashing; never operate on preloaded samples."""
-        assert int.from_bytes(sample.data[:8], "little") == sample.cache_id
+        position = int.from_bytes(sample.data[:8], "little")
+        assert self.cache_ids[position] == sample.cache_id
         assert int.from_bytes(sample.data[8:16], "little") == sample.sample_id
         digest = hashlib.sha256(sample.data).digest()
         for _ in range(self.rounds):
@@ -99,14 +107,14 @@ class Source:
     """Stream deterministic fixed-size payloads without retaining a full fixture."""
 
     name: str
-    cache_id: int
+    cache_position: int
     samples: int
     payload_bytes: int
 
     def __iter__(self) -> Iterator[CacheInput]:
         """Encode physical identity independently of the cache writer's metadata."""
         for index in range(self.samples):
-            header = self.cache_id.to_bytes(8, "little") + index.to_bytes(8, "little")
+            header = self.cache_position.to_bytes(8, "little") + index.to_bytes(8, "little")
             payload = (header * ((self.payload_bytes + 15) // 16))[: self.payload_bytes]
             yield CacheInput(payload, {"index": index})
 
@@ -401,7 +409,11 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
     # exercises the production case where fork follows existing native activity.
     assert next(iter(dataset)).data
     dataset.set_epoch_len(config.samples_per_cache * config.caches)
-    transform = Transform(config.transform_rounds if spec.workload == "heavy" else 0)
+    cache_ids = tuple(
+        BenchmarkManifest.model_validate_json((path / "manifest.json").read_text()).cache_id
+        for path in spec.paths
+    )
+    transform = Transform(config.transform_rounds if spec.workload == "heavy" else 0, cache_ids)
     loader: Iterable[tuple[Output, ...]]
     if spec.case.mode == "loader":
         loader = cast(

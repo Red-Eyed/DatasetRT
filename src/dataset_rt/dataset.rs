@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +27,7 @@ pub struct PyCachedDataset {
 struct DatasetState {
     pool: Arc<WorkerPool>,
     caches: Arc<Vec<LoadedCache>>,
+    cache_lookup: Arc<HashMap<u64, usize>>,
     cache_offsets: Arc<Vec<usize>>,
     total_samples: usize,
     schema: Vec<MetadataField>,
@@ -50,6 +52,33 @@ enum ActiveMetadata {
 
 #[pymethods]
 impl PyCachedDataset {
+    /// Persist resolved cache IDs without replacing active dataset state or sample files.
+    fn update_manifests(&self, py: Python<'_>, version: u32) -> PyResult<ManifestUpdateTuple> {
+        let mut signal_error = None;
+        let outcome = crate::storage::migration::update_manifests(
+            self.inner.caches.as_ref(),
+            version,
+            || {
+                py.check_signals().map_err(|error| {
+                    signal_error = Some(error);
+                    CacheError::WorkerFailed
+                })
+            },
+        );
+        if let Some(error) = signal_error {
+            return Err(error);
+        }
+        Ok(match outcome {
+            Ok(entries) => (true, migration_entries(entries), None, String::new()),
+            Err(error) => (
+                false,
+                migration_entries(error.entries),
+                error.path.map(|path| path.to_string_lossy().into_owned()),
+                error.message,
+            ),
+        })
+    }
+
     #[new]
     fn new(
         runtime: PyRef<'_, PyDatasetRuntime>,
@@ -151,9 +180,10 @@ impl DatasetState {
     /// Schedule one bounded read on the runtime pool without changing mutable dataset state.
     fn get_item(&self, cache_id: u64, sample_id: u64) -> CacheResult<crate::types::LoadedSample> {
         let caches = self.caches.clone();
+        let cache_lookup = self.cache_lookup.clone();
         let (sender, receiver) = bounded(1)?;
         self.pool.submit(sender, move || {
-            load_sample_by_identity(caches.as_ref(), cache_id, sample_id)
+            load_sample_by_identity(caches.as_ref(), cache_lookup.as_ref(), cache_id, sample_id)
         })?;
         receiver.recv().map_err(|_| CacheError::WorkerFailed)?
     }
@@ -175,6 +205,7 @@ impl DatasetState {
 
         let prefetch_size = PrefetchSize::new(prefetch_size)?;
         let caches = load_caches(pool.clone(), paths, validate_cache, num_workers)?;
+        let cache_lookup = cache_lookup(&caches)?;
         let schema = common_schema(&caches)?;
         let (cache_offsets, total_samples) = collect_cache_offsets(&caches)?;
         if total_samples == 0 {
@@ -186,6 +217,7 @@ impl DatasetState {
         Ok(Self {
             pool,
             caches: Arc::new(caches),
+            cache_lookup: Arc::new(cache_lookup),
             cache_offsets: Arc::new(cache_offsets),
             total_samples,
             schema,
@@ -288,6 +320,7 @@ impl DatasetState {
             ipc,
             self.caches.as_ref(),
             self.cache_offsets.as_ref(),
+            self.cache_lookup.as_ref(),
             &self.schema,
         )
     }
@@ -360,6 +393,23 @@ fn cache_offsets(caches: &[LoadedCache]) -> CacheResult<Vec<usize>> {
 }
 
 type PySampleTuple<'py> = (Bound<'py, PyBytes>, Bound<'py, PyDict>, u64, u64);
+type ManifestUpdateTuple = (bool, Vec<(String, u64, String)>, Option<String>, String);
+
+/// Keep the Python boundary column-free: one bounded outcome record per cache directory.
+fn migration_entries(
+    entries: Vec<crate::storage::migration::UpdateEntry>,
+) -> Vec<(String, u64, String)> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path.to_string_lossy().into_owned(),
+                entry.cache_id,
+                entry.status.to_string(),
+            )
+        })
+        .collect()
+}
 
 #[pyclass]
 pub struct PyDatasetIterator {
@@ -438,12 +488,12 @@ fn submit_next_cache_load(
     let path = PathBuf::from(path);
     let result_sender = result_sender.clone();
     pool.submit(result_sender, move || {
-        let cache = load_cache(path, validate_cache)?;
+        let cache = load_cache(path, validate_cache, position)?;
         Ok(CacheLoadResult { position, cache })
     })
 }
 
-/// Restore constructor path order so `cache_id` remains stable under parallel loading.
+/// Restore physical traversal order and legacy IDs after parallel loading.
 fn order_loaded_caches(results: Vec<CacheLoadResult>) -> CacheResult<Vec<LoadedCache>> {
     let mut ordered = results
         .into_iter()
@@ -454,21 +504,36 @@ fn order_loaded_caches(results: Vec<CacheLoadResult>) -> CacheResult<Vec<LoadedC
     Ok(ordered.into_iter().map(|(_, cache)| cache).collect())
 }
 
+/// Reject ambiguous identities once, before accepting any sample or metadata lookup.
+fn cache_lookup(caches: &[LoadedCache]) -> CacheResult<HashMap<u64, usize>> {
+    let mut lookup = HashMap::with_capacity(caches.len());
+    for (position, cache) in caches.iter().enumerate() {
+        let id = cache.cache_id.as_u64();
+        if lookup.insert(id, position).is_some() {
+            return Err(CacheError::InvalidCache(format!("duplicate cache_id {id}")));
+        }
+    }
+    Ok(lookup)
+}
+
 fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
     let first = caches
         .first()
         .ok_or_else(|| CacheError::InvalidInput("no caches provided".to_string()))?;
     for cache in caches.iter().skip(1) {
-        if cache.manifest.metadata_schema.len() != first.manifest.metadata_schema.len() {
+        if cache.manifest.fields().metadata_schema.len()
+            != first.manifest.fields().metadata_schema.len()
+        {
             return Err(CacheError::InvalidCache(
                 "all caches must share the same metadata schema".to_string(),
             ));
         }
         for (left, right) in cache
             .manifest
+            .fields()
             .metadata_schema
             .iter()
-            .zip(first.manifest.metadata_schema.iter())
+            .zip(first.manifest.fields().metadata_schema.iter())
         {
             if left.name != right.name || left.kind != right.kind {
                 return Err(CacheError::InvalidCache(
@@ -477,7 +542,7 @@ fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
             }
         }
     }
-    Ok(first.manifest.metadata_schema.clone())
+    Ok(first.manifest.fields().metadata_schema.clone())
 }
 
 /// Build compact dataset identity state from loaded cache sample counts.

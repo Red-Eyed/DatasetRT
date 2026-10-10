@@ -49,6 +49,8 @@ Case = Literal[
     "native-error",
 ]
 INIT_CALLS = 0
+FIRST_ID = 2_851_758_661_582_890_383
+SECOND_ID = 1_600_601_599_791_221_249
 
 
 class Source:
@@ -216,7 +218,7 @@ def run_many_case(recipe: ReaderRecipe, context: Context) -> None:
         collate_fn=identity,
     )
     counts = [0, 0]
-    expected = [(0, 7), (1, 2), (0, 7)]
+    expected = [(FIRST_ID, 7), (SECOND_ID, 2), (FIRST_ID, 7)]
     for row in loader:
         position = row.worker * 5000 + counts[row.worker]
         assert (row.cache, row.sample) == expected[position % 3]
@@ -361,9 +363,11 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
 def verify_validation(rows: list[Observation], *, empty: bool) -> None:
     """Check assigned row order including intentional duplicate physical IDs."""
     assert [(r.cache, r.sample) for r in rows if r.worker == 0] == (
-        [(0, 7)] if empty else [(0, 7), (1, 2)]
+        [(FIRST_ID, 7)] if empty else [(FIRST_ID, 7), (SECOND_ID, 2)]
     )
-    assert [(r.cache, r.sample) for r in rows if r.worker == 1] == ([] if empty else [(0, 7)])
+    assert [(r.cache, r.sample) for r in rows if r.worker == 1] == (
+        [] if empty else [(FIRST_ID, 7)]
+    )
     assert all(row.seed == 0 for row in rows)
 
 
@@ -374,16 +378,16 @@ def verify_shuffled(
     for worker in range(workers):
         rows = [row for row in observations if row.worker == worker]
         assert rows and all(row.window == 3 for row in rows)
-        assert {(row.cache, row.sample) for row in rows} <= {(0, 7), (1, 2)}
+        assert {(row.cache, row.sample) for row in rows} <= {(FIRST_ID, 7), (SECOND_ID, 2)}
         if weighted:
-            assert {(row.cache, row.sample) for row in rows} == {(0, 7), (1, 2)}
+            assert {(row.cache, row.sample) for row in rows} == {(FIRST_ID, 7), (SECOND_ID, 2)}
         assert len({row.seed for row in rows}) == 1
         if seed is not None:
             assert rows[0].seed == derive_seed(seed, 0, worker)
     assert len({row.seed for row in observations}) == workers
     if weighted:
         counts = Counter((row.cache, row.sample) for row in observations)
-        assert 0.85 < counts[(0, 7)] / len(observations) < 0.95
+        assert 0.85 < counts[(FIRST_ID, 7)] / len(observations) < 0.95
 
 
 def reject_inherited(adapter: ReaderAdapter[Observation]) -> None:

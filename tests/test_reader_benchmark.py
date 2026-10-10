@@ -75,11 +75,11 @@ def test_reader_trial(
 def test_transform_uses_delivered_bytes() -> None:
     """Verify the workload checksum rather than only counting callback invocations."""
     payload = (3).to_bytes(8, "little") + (7).to_bytes(8, "little") + b"domain payload"
-    sample = CachedSample(payload, {}, 3, 7)
+    sample = CachedSample(payload, {}, 99, 7)
     expected = hashlib.sha256(payload).digest()
     expected = hashlib.sha256(expected).digest()
     expected = hashlib.sha256(expected).digest()
-    output = Transform(2)(sample)
+    output = Transform(2, (11, 12, 13, sample.cache_id))(sample)
     assert output.digest == expected and output.bytes_read == len(payload)
     assert checked_batch((output,)) == (output,)
 

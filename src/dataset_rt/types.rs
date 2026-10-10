@@ -47,6 +47,11 @@ pub type CacheResult<T> = Result<T, CacheError>;
 pub struct CacheId(u64);
 
 impl CacheId {
+    /// Accept a persisted identity without treating it as an array position.
+    pub fn from_u64(id: u64) -> Self {
+        Self(id)
+    }
+
     pub fn from_position(position: usize) -> CacheResult<Self> {
         let id = u64::try_from(position)
             .map_err(|_| CacheError::InvalidInput("cache id does not fit in u64".to_string()))?;

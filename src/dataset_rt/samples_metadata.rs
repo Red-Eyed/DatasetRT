@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -52,6 +53,7 @@ pub fn extract_metadata_ipc(
     ipc: &[u8],
     caches: &[LoadedCache],
     cache_offsets: &[usize],
+    cache_lookup: &HashMap<u64, usize>,
     schema: &[MetadataField],
 ) -> CacheResult<ActiveMetadataTable> {
     let mut weights = Vec::new();
@@ -69,6 +71,7 @@ pub fn extract_metadata_ipc(
             &batch,
             caches,
             cache_offsets,
+            cache_lookup,
             &mut physical_indices,
             &mut weights,
         )?;
@@ -129,7 +132,7 @@ fn samples_metadata_batches(
             let physical_offset = physical_offset(cache_offset, sample_start)?;
             let weights = weight_slice(weights, physical_offset, row_count);
             output_batches.push(samples_metadata_batch(
-                cache_index,
+                cache.cache_id.as_u64(),
                 sample_start,
                 arrow_schema,
                 metadata_schema,
@@ -210,7 +213,7 @@ fn weight_slice(_weights: &WeightState, _offset: usize, len: usize) -> WeightSli
 
 /// Build one output batch by reusing metadata arrays and adding identity plus weight columns.
 fn samples_metadata_batch(
-    cache_index: usize,
+    cache_id: u64,
     sample_start: usize,
     arrow_schema: &Arc<Schema>,
     metadata_schema: &[MetadataField],
@@ -218,8 +221,6 @@ fn samples_metadata_batch(
     weights: WeightSlice,
 ) -> CacheResult<RecordBatch> {
     let row_count = metadata_batch.num_rows();
-    let cache_id = u64::try_from(cache_index)
-        .map_err(|_| CacheError::InvalidInput("cache_id does not fit in u64".to_string()))?;
     if row_count != weight_len(&weights) {
         return Err(CacheError::InvalidCache(
             "metadata and weight row counts diverged".to_string(),
@@ -323,6 +324,7 @@ fn apply_metadata_batch(
     batch: &RecordBatch,
     caches: &[LoadedCache],
     cache_offsets: &[usize],
+    cache_lookup: &HashMap<u64, usize>,
     physical_indices: &mut Vec<usize>,
     weights: &mut Vec<f64>,
 ) -> CacheResult<()> {
@@ -336,7 +338,14 @@ fn apply_metadata_batch(
             sample_id: read_u64_cell(sample_ids, row_index, "sample_id")?,
             weight: read_f64_cell(weight_values, row_index, "weight")?,
         };
-        apply_metadata_update(update, caches, cache_offsets, physical_indices, weights)?;
+        apply_metadata_update(
+            update,
+            caches,
+            cache_offsets,
+            cache_lookup,
+            physical_indices,
+            weights,
+        )?;
     }
 
     Ok(())
@@ -347,10 +356,17 @@ fn apply_metadata_update(
     update: WeightUpdate,
     caches: &[LoadedCache],
     cache_offsets: &[usize],
+    cache_lookup: &HashMap<u64, usize>,
     physical_indices: &mut Vec<usize>,
     weights: &mut Vec<f64>,
 ) -> CacheResult<()> {
-    let physical_index = physical_index(caches, cache_offsets, update.cache_id, update.sample_id)?;
+    let physical_index = physical_index(
+        caches,
+        cache_offsets,
+        cache_lookup,
+        update.cache_id,
+        update.sample_id,
+    )?;
     physical_indices.push(physical_index);
     weights.push(update.weight);
     Ok(())
@@ -360,11 +376,15 @@ fn apply_metadata_update(
 fn physical_index(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
+    cache_lookup: &HashMap<u64, usize>,
     cache_id: u64,
     sample_id: u64,
 ) -> CacheResult<usize> {
-    let cache_index = usize::try_from(cache_id)
-        .map_err(|_| CacheError::InvalidInput("cache_id does not fit in usize".to_string()))?;
+    let cache_index = cache_lookup.get(&cache_id).copied().ok_or_else(|| {
+        CacheError::InvalidInput(format!(
+            "unknown samples metadata row identity cache_id={cache_id} sample_id={sample_id}"
+        ))
+    })?;
     let sample_index = usize::try_from(sample_id)
         .map_err(|_| CacheError::InvalidInput("sample_id does not fit in usize".to_string()))?;
     let cache = caches.get(cache_index).ok_or_else(|| {

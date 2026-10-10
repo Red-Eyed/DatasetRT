@@ -158,7 +158,8 @@ class DatasetRuntime:
     ) -> CachedDataset:
         """Load immutable cache directories into a `CachedDataset`.
 
-        `paths` order defines stable `cache_id` values for the dataset.
+        V3 manifests define persistent `cache_id` values. Legacy v2 IDs remain
+        positions in `paths` until explicit `update_manifests(version=3)` migration.
         DatasetRT validates manifests, schemas, metadata/index shape, and shard
         lengths while loading. Expensive checksum hashing is controlled by
         `reader_config.validate_cache`.
@@ -188,8 +189,8 @@ class DatasetRuntime:
         callers can audit partial success.
 
         Parallel execution follows `write_cache`'s process, timeout, ownership,
-        and serialization contract. Successful paths still define cache IDs in
-        input source order, regardless of worker completion order.
+        and serialization contract. Successful paths preserve input source order,
+        regardless of completion order; IDs come from v3 manifests or v2 positions.
         """
         results = self._write_sources(sources, Path(path), writer_config, reuse_existing=True)
         cache_paths = _successful_cache_paths(results)

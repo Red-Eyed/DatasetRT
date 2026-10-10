@@ -102,11 +102,15 @@ def test_many_samples_and_caches_stream_without_output_materialization(
     for sample in islice(loader, 10000):
         assert sample.data == str(sample.sample_id).encode()
         if not shuffle:
-            assert (sample.cache_id, sample.sample_id) == divmod(count, 5000)
+            position, sample_id = divmod(count, 5000)
+            assert (sample.cache_id, sample.sample_id) == (
+                (2_851_758_661_582_890_383, 1_600_601_599_791_221_249)[position],
+                sample_id,
+            )
         seen_caches.add(sample.cache_id)
         count += 1
     assert count == 10000
-    assert seen_caches == {0, 1}
+    assert seen_caches == {2_851_758_661_582_890_383, 1_600_601_599_791_221_249}
 
 
 def sample_index(sample: CachedSample) -> int:

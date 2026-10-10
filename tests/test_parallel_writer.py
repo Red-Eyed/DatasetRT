@@ -142,7 +142,7 @@ def test_ordered_sources_and_integrity(
     count = 0
     pids: set[int] = set()
     for sample in result.dataset:
-        assert sample.data == f"source-{sample.cache_id}:{sample.sample_id}".encode()
+        assert sample.data == f"source-{count // 1000}:{sample.sample_id}".encode()
         pids.add(int(sample.metadata["pid"]))
         count += 1
     assert count == 5000

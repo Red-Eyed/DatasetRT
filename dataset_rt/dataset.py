@@ -4,17 +4,24 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, overload
+from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
 from dataset_rt.integrations.torch import to_torch_iterable_dataset
 from dataset_rt.metadata import decode_metadata, encode_metadata
 from dataset_rt.records import (
+    AbsentManifestTarget,
     CachedSample,
+    Err,
+    ManifestUpdateEntry,
+    ManifestUpdateError,
+    ManifestUpdateReport,
     MetadataSnapshot,
+    Ok,
     OriginalMetadata,
     ReaderRecipe,
+    Result,
     SizedTorchIterableDataset,
 )
 
@@ -44,13 +51,50 @@ class CachedDataset:
     __module__ = "dataset_rt.api"
 
     cache_paths: list[Path]
-    """Immutable cache directories loaded by this dataset, in `cache_id` order."""
+    """Cache directories in physical traversal order; only legacy IDs depend on it."""
 
     reader_config: ReaderConfig
     """Reader configuration used when this dataset was loaded."""
 
     _inner: _RustCachedDataset
     _recipe: ReaderRecipe
+
+    def update_manifests(
+        self, version: Literal[3]
+    ) -> Result[ManifestUpdateReport, ManifestUpdateError]:
+        """Persist current cache IDs when upgrading v2 manifests to v3.
+
+        Construct legacy datasets in the original cache order used by saved
+        metadata tables. This explicit migration preserves those IDs; it does
+        not replace them with name hashes. Already-v3 manifests are unchanged.
+        Rust preflights all targets, then atomically replaces each manifest.
+        Partial failures retain completed entries; retry in the original order.
+        Caller owns manifest mutation exclusively. Sample files, active metadata,
+        weights and iterator state are unchanged.
+        """
+        if type(version) is not int or version != 3:
+            return Err(
+                ManifestUpdateError(
+                    AbsentManifestTarget("unsupported migration request"),
+                    "unsupported manifest migration target; expected integer 3",
+                )
+            )
+        success, records, failed_path, message = self._inner.update_manifests(version)
+        entries: list[ManifestUpdateEntry] = []
+        for path, cache_id, status in records:
+            match status:
+                case "updated" | "unchanged" | "durability_unknown":
+                    entries.append(ManifestUpdateEntry(Path(path), cache_id, status))
+                case _:
+                    raise ValueError(f"invalid native manifest update status: {status}")
+        if success:
+            return Ok(ManifestUpdateReport(tuple(entries)))
+        target = (
+            Path(failed_path)
+            if failed_path is not None
+            else AbsentManifestTarget("request has no filesystem target")
+        )
+        return Err(ManifestUpdateError(target, message, tuple(entries)))
 
     def __init__(self) -> None:
         """Reject direct construction because every dataset requires a runtime."""
@@ -366,9 +410,9 @@ class CachedDataset:
         - Columns are `cache_id`, `sample_id`, every metadata column stored in
           the cache, `weight`, and any extra columns preserved from the previous
           `update_metadata` call.
-        - `cache_id` is the cache path position passed to
-          `DatasetRuntime.cached_dataset`; `sample_id` is the physical row
-          inside that cache.
+        - `cache_id` is persisted in v3 manifests. Legacy v2 caches use their
+          supplied path positions until explicit manifest migration. `sample_id`
+          is the physical row inside that cache.
         - Each row is one active sampling row. Duplicate `(cache_id, sample_id)`
           rows are allowed and represent repeated entries for the same physical
           sample.

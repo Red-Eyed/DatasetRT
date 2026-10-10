@@ -58,6 +58,9 @@ Loading a new dataset with the same cache paths and seed resets the stream posit
 
 ## Cache Identity
 
-`cache_id` is the position of the cache path passed to `DatasetRuntime.cached_dataset(...)`.
+`cache_id` is persisted in a v3 manifest. A legacy v2 cache uses its path position
+passed to `DatasetRuntime.cached_dataset(...)` until explicitly migrated. Reordering
+v3 caches preserves identity, but changes physical traversal order and therefore
+does not promise the same sampled sequence for the reordered population.
 
 `sample_id` is the physical row within that cache.

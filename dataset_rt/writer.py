@@ -10,7 +10,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from dataset_rt._dataset_rt import DatasetRuntime as NativeRuntime
 from dataset_rt._dataset_rt import write_cache
@@ -20,6 +20,9 @@ from dataset_rt.records import (
     CacheWriteError,
     CacheWriteResult,
     CacheWriteSuccess,
+    Err,
+    Ok,
+    Result,
 )
 
 if TYPE_CHECKING:
@@ -72,26 +75,6 @@ class Failed:
 
 
 WorkerMessage = Ready | Finished | Interrupted | Failed
-
-T = TypeVar("T")
-E = TypeVar("E")
-
-
-@dataclass(frozen=True)
-class Ok(Generic[T]):
-    """Carry a value accepted at a validation boundary."""
-
-    value: T
-
-
-@dataclass(frozen=True)
-class Err(Generic[E]):
-    """Carry a recoverable validation error without raising it."""
-
-    error: E
-
-
-Result: TypeAlias = Ok[T] | Err[E]
 
 
 def validate_source_name(name: str) -> Result[str, str]:

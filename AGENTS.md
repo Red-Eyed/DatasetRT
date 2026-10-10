@@ -14,7 +14,7 @@ Core vocabulary:
 - **Cache directory**: One immutable DatasetRT cache containing `manifest.json`, `metadata.arrow`, `index.bin`, and `shards/`.
 - **Manifest**: The publication marker for a complete cache. Readers reject caches without a valid manifest.
 - **Metadata**: Primitive sample-level values stored columnarly in `metadata.arrow` and redundantly embedded in each shard record.
-- **Physical sample**: A concrete `(cache_id, sample_id)` pair. `cache_id` is the position of the cache path passed to `CachedDataset`; `sample_id` is the row within that cache.
+- **Physical sample**: A concrete `(cache_id, sample_id)` pair. V3 manifests persist `cache_id`; legacy v2 caches retain their supplied path positions until explicit migration. `sample_id` is the row within that cache. Rust maps cache IDs to internal array positions; never index a cache array directly by public ID.
 - **Samples metadata table**: A Polars table with `cache_id`, `sample_id`, metadata columns, and `weight`. Rust owns the authoritative weight vector and validates all updates.
 - **Epoch plan**: The ordered list of physical samples emitted by an iterator. With `shuffle=True`, it is deterministic weighted multinomial sampling with replacement for the dataset seed, epoch, and weight vector; it is not a permutation.
 - **Shard**: A binary file containing concatenated sample records. The index maps each sample to a shard id, offset, and byte length.
@@ -120,7 +120,7 @@ Python package:
 Rust modules:
 
 - `types.rs`: validated IDs, config newtypes, metadata enums, samples, and `CacheError`.
-- `storage.rs`: cache format, manifests, metadata Arrow files, indexes, shards, compression envelopes, checksums, and cache loading.
+- `storage.rs`: cache format, metadata Arrow files, indexes, shards, compression envelopes, checksums, and cache loading. `storage/manifest.rs` contains separate v2/v3 records; `storage/migration.rs` upgrades manifests while preserving resolved IDs.
 - `writer.rs` and `writer/pipeline.rs`: source ingestion, bounded queues, serialization workers, ordered commit, progress, profiling, and publication.
 - `dataset.rs`: Python-facing `CachedDataset`, schema checks, weight state, weight validation, and iterator construction.
 - `runtime.rs`: Rust-owned synchronous reader pipeline with scheduler, workers, bounded result queue, and reorder buffer.

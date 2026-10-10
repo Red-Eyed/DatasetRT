@@ -1,0 +1,67 @@
+{
+  "format_version": 2,
+  "source_name": "legacy-plain",
+  "sample_count": 4,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    }
+  ],
+  "metadata_sha256": "68151a8762381f745b1114ad1dd13dd807eea9b0e977c62e975c26ef22eaeae1",
+  "index_sha256": "a1a00e45160a9047cbdc952741fb1a4eb56d59347280c836478a30c646a99878",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 143,
+      "byte_len": 210,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "500b74242e00a14ea36031bbe3580f132eaf4ff3c7eb8dbfa7e45d1ddc2da692"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 143,
+      "byte_len": 211,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "9d75d05452c2130f5481b70d8ac9fce749a8c970156432c3130a5aa72e9e1274"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 143,
+      "byte_len": 210,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "140a320f6ce841cc32ee56735d9d000571def26e28311e18179b9803cbde001d"
+    },
+    {
+      "name": "000003.bin",
+      "uncompressed_byte_len": 143,
+      "byte_len": 211,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "220c64862ec1d766b52a794f6fd1d45567dc1acdc949f64e36e70550641215c2"
+    }
+  ]
+}

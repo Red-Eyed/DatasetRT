@@ -200,7 +200,7 @@ cache_id | sample_id | <metadata columns...> | weight
 
 Required columns:
 
-- `cache_id`: cache position passed to `DatasetRuntime.cached_dataset(...)`.
+- `cache_id`: persistent v3 manifest ID, or supplied path position for legacy v2 caches.
 - `sample_id`: physical row within that cache.
 - Metadata columns: one column per metadata field stored in the cache.
 - `weight`: positive finite float, default `1.0`.
@@ -320,8 +320,20 @@ Rust owns cache validation, active metadata state, epoch planning, sampling,
 bounded prefetching, and iterator cancellation.
 
 Fields:
-- `cache_paths: list[Path]`: Immutable cache directories loaded by this dataset, in `cache_id` order.
+- `cache_paths: list[Path]`: Cache directories in physical traversal order; only legacy IDs depend on it.
 - `reader_config: ReaderConfig`: Reader configuration used when this dataset was loaded.
+
+#### `CachedDataset.update_manifests(version: Literal[3]) -> Result[ManifestUpdateReport, ManifestUpdateError]`
+
+Persist current cache IDs when upgrading v2 manifests to v3.
+
+Construct legacy datasets in the original cache order used by saved
+metadata tables. This explicit migration preserves those IDs; it does
+not replace them with name hashes. Already-v3 manifests are unchanged.
+Rust preflights all targets, then atomically replaces each manifest.
+Partial failures retain completed entries; retry in the original order.
+Caller owns manifest mutation exclusively. Sample files, active metadata,
+weights and iterator state are unchanged.
 
 #### `CachedDataset.__init__()`
 
@@ -443,9 +455,9 @@ Contract:
 - Columns are `cache_id`, `sample_id`, every metadata column stored in
   the cache, `weight`, and any extra columns preserved from the previous
   `update_metadata` call.
-- `cache_id` is the cache path position passed to
-  `DatasetRuntime.cached_dataset`; `sample_id` is the physical row
-  inside that cache.
+- `cache_id` is persisted in v3 manifests. Legacy v2 caches use their
+  supplied path positions until explicit manifest migration. `sample_id`
+  is the physical row inside that cache.
 - Each row is one active sampling row. Duplicate `(cache_id, sample_id)`
   rows are allowed and represent repeated entries for the same physical
   sample.
@@ -509,7 +521,7 @@ One sample emitted by `CachedDataset` iteration.
 Fields:
 - `data: bytes`: Payload bytes loaded from the immutable cache.
 - `metadata: dict[str, MetadataValue]`: Metadata row associated with this physical sample.
-- `cache_id: int`: Position of the source cache passed to `DatasetRuntime.cached_dataset`.
+- `cache_id: int`: Stored v3 cache identity, or the supplied cache-path position for legacy v2.
 - `sample_id: int`: Physical sample row within the source cache.
 
 ### `DatasetRuntime`
@@ -563,7 +575,8 @@ sample progress is disabled. Use a main guard when launching processes.
 
 Load immutable cache directories into a `CachedDataset`.
 
-`paths` order defines stable `cache_id` values for the dataset.
+V3 manifests define persistent `cache_id` values. Legacy v2 IDs remain
+positions in `paths` until explicit `update_manifests(version=3)` migration.
 DatasetRT validates manifests, schemas, metadata/index shape, and shard
 lengths while loading. Expensive checksum hashing is controlled by
 `reader_config.validate_cache`.
@@ -585,8 +598,8 @@ was provided. The result always includes per-source write outcomes so
 callers can audit partial success.
 
 Parallel execution follows `write_cache`'s process, timeout, ownership,
-and serialization contract. Successful paths still define cache IDs in
-input source order, regardless of worker completion order.
+and serialization contract. Successful paths preserve input source order,
+regardless of completion order; IDs come from v3 manifests or v2 positions.
 
 ### `ReaderConfig`
 
@@ -647,6 +660,60 @@ Ctrl-C.
 Fields:
 - `enabled: bool`: Whether Rust collects and writes writer-stage timing statistics.
 - `path: Path`: JSON summary path used when profiling is enabled.
+
+### `AbsentManifestTarget`
+
+A rejected request has no individual filesystem target.
+
+Fields:
+- `reason: str`: Why the rejected request cannot identify an individual manifest.
+
+### `Err`
+
+Carry an expected failure without converting it into exception control flow.
+
+Fields:
+- `error: E`: Typed rejection, available after narrowing this outcome to Err.
+
+### `ManifestUpdateEntry`
+
+Describe a replacement or unchanged manifest; durability may be unconfirmed.
+
+Fields:
+- `path: Path`: Resolved manifest file that was replaced or left unchanged.
+- `cache_id: int`: Dataset identity retained in the persisted manifest.
+- `status: Literal['updated', 'unchanged', 'durability_unknown']`: Replacement state; durability_unknown means rename succeeded but directory sync failed.
+
+### `ManifestUpdateError`
+
+Retain completed replacements so callers can safely inspect and retry.
+
+Fields:
+- `path: Path | AbsentManifestTarget`: Failed manifest target, or a reason-carrying absence for invalid requests.
+- `message: str`: Boundary diagnostic describing the expected validation or filesystem failure.
+- `entries: tuple[ManifestUpdateEntry, ...]`: Completed or durability-uncertain outcomes before the request stopped.
+
+### `ManifestUpdateReport`
+
+One entry per cache after a complete, identity-preserving migration.
+
+Fields:
+- `entries: tuple[ManifestUpdateEntry, ...]`: Immutable input-ordered outcomes for every cache in the completed request.
+
+### `Ok`
+
+Carry a successful outcome that callers narrow with pattern matching.
+
+Fields:
+- `value: T`: Accepted value, available after narrowing this outcome to Ok.
+
+### `Result`
+
+```python
+Result = Ok[T] | Err[E]
+```
+
+Typed expected success/failure contract; interrupts and unexpected bugs may unwind.
 
 <!-- END GENERATED: Public Python API -->
 

@@ -131,7 +131,7 @@ fn write_named_source(
     let cache_path = cache_path_for_source(base_cache_dir, source_name, source_index);
     if config.reuse_existing && cache_path.exists() {
         if config.validate_cache {
-            load_cache(cache_path.clone(), true)?;
+            load_cache(cache_path.clone(), true, 0)?;
         }
         return Ok(cache_path);
     }

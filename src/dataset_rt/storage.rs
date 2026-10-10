@@ -14,25 +14,17 @@ use sha2::{Digest, Sha256};
 
 use crate::compression::{compress_payload, decompress_payload};
 use crate::types::{
-    CacheError, CacheResult, CacheSample, MetadataField, MetadataKind, MetadataValue,
+    CacheError, CacheId, CacheResult, CacheSample, MetadataField, MetadataKind, MetadataValue,
     ShardCompression,
 };
 
-const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
+mod manifest;
+pub mod migration;
+pub use manifest::{Manifest, ManifestFields, ManifestV3};
 const INDEX_ROW_BYTES: usize = 24;
 const RECORD_METADATA_LEN_BYTES: usize = 8;
 const MAX_CACHED_SHARD_READERS: usize = 64;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Manifest {
-    pub format_version: u32,
-    pub source_name: String,
-    pub sample_count: u64,
-    pub metadata_schema: Vec<MetadataField>,
-    pub metadata_sha256: String,
-    pub index_sha256: String,
-    pub shards: Vec<ShardManifest>,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShardManifest {
@@ -52,6 +44,7 @@ pub struct IndexEntry {
 
 #[derive(Debug)]
 pub struct LoadedCache {
+    pub cache_id: CacheId,
     pub manifest: Manifest,
     metadata_rows: Mutex<Option<Vec<Vec<MetadataValue>>>>,
     pub index: Vec<IndexEntry>,
@@ -87,6 +80,7 @@ impl LoadedCache {
         })?;
         let shard = self
             .manifest
+            .fields()
             .shards
             .get(entry.shard_id as usize)
             .ok_or_else(|| {
@@ -101,7 +95,7 @@ impl LoadedCache {
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut record)?;
         let (embedded_metadata, stored_payload) =
-            split_sample_record(&record, &self.manifest.metadata_schema)?;
+            split_sample_record(&record, &self.manifest.fields().metadata_schema)?;
         if self.validate_embedded_metadata {
             self.with_metadata_rows(|metadata_rows| {
                 let metadata = metadata_rows.get(sample_index).ok_or_else(|| {
@@ -130,7 +124,7 @@ impl LoadedCache {
         if guard.is_none() {
             *guard = Some(read_metadata_file(
                 &self.path.join("metadata.arrow"),
-                &self.manifest.metadata_schema,
+                &self.manifest.fields().metadata_schema,
             )?);
         }
         let rows = guard
@@ -336,15 +330,18 @@ impl CacheBuilder {
         let index_started_at = Instant::now();
         let index_sha256 = write_index_file(&self.path, &self.index)?;
         let index = index_started_at.elapsed();
-        let manifest = Manifest {
-            format_version: FORMAT_VERSION,
-            source_name: self.source_name,
-            sample_count: self.index.len() as u64,
-            metadata_schema: self.schema,
-            metadata_sha256,
-            index_sha256,
-            shards: self.shards,
-        };
+        let manifest = Manifest::V3(ManifestV3 {
+            cache_id: cache_id_from_name(&self.source_name),
+            fields: ManifestFields {
+                source_name: self.source_name,
+                sample_count: self.index.len() as u64,
+                metadata_schema: self.schema,
+                metadata_sha256,
+                index_sha256,
+                shards: self.shards,
+                extra: BTreeMap::new(),
+            },
+        });
         // The manifest is the publication marker: readers reject caches until it exists.
         let manifest_started_at = Instant::now();
         write_manifest(&self.path, &manifest)?;
@@ -468,15 +465,20 @@ impl OpenShard {
     }
 }
 
-pub fn load_cache(path: PathBuf, validate_cache: bool) -> CacheResult<LoadedCache> {
+/// Resolve legacy identity only at the loading boundary; v3 IDs come from disk.
+pub fn load_cache(
+    path: PathBuf,
+    validate_cache: bool,
+    position: usize,
+) -> CacheResult<LoadedCache> {
     let manifest = read_manifest(&path)?;
-    validate_manifest_version(&manifest)?;
+    let cache_id = manifest.resolve_cache_id(position)?;
 
     let metadata_path = path.join("metadata.arrow");
     let index_path = path.join("index.bin");
     if validate_cache {
-        verify_file_checksum(&metadata_path, &manifest.metadata_sha256)?;
-        verify_file_checksum(&index_path, &manifest.index_sha256)?;
+        verify_file_checksum(&metadata_path, &manifest.fields().metadata_sha256)?;
+        verify_file_checksum(&index_path, &manifest.fields().index_sha256)?;
     }
     verify_shards(&path, &manifest, validate_cache)?;
 
@@ -484,7 +486,7 @@ pub fn load_cache(path: PathBuf, validate_cache: bool) -> CacheResult<LoadedCach
     let metadata_rows = if validate_cache {
         Some(read_metadata_file(
             &metadata_path,
-            &manifest.metadata_schema,
+            &manifest.fields().metadata_schema,
         )?)
     } else {
         fs::metadata(&metadata_path)?;
@@ -493,6 +495,7 @@ pub fn load_cache(path: PathBuf, validate_cache: bool) -> CacheResult<LoadedCach
     validate_loaded_shapes(&manifest, metadata_rows.as_deref(), &index)?;
 
     Ok(LoadedCache {
+        cache_id,
         manifest,
         metadata_rows: Mutex::new(metadata_rows),
         index,
@@ -520,14 +523,14 @@ fn read_manifest(path: &Path) -> CacheResult<Manifest> {
     Ok(serde_json::from_reader(BufReader::new(file))?)
 }
 
-fn validate_manifest_version(manifest: &Manifest) -> CacheResult<()> {
-    if manifest.format_version != FORMAT_VERSION {
-        return Err(CacheError::InvalidCache(format!(
-            "unsupported format version {}",
-            manifest.format_version
-        )));
+/// Hash exact UTF-8 names with a fixed, portable 63-bit manifest identity rule.
+pub fn cache_id_from_name(name: &str) -> u64 {
+    let digest = Sha256::digest(name.as_bytes());
+    let mut prefix = [0_u8; 8];
+    for (target, byte) in prefix.iter_mut().zip(digest.iter()) {
+        *target = *byte;
     }
-    Ok(())
+    u64::from_be_bytes(prefix) & i64::MAX as u64
 }
 
 fn write_metadata_file(
@@ -872,7 +875,7 @@ fn verify_file_checksum(path: &Path, expected: &str) -> CacheResult<()> {
 }
 
 fn verify_shards(path: &Path, manifest: &Manifest, validate_cache: bool) -> CacheResult<()> {
-    for shard in &manifest.shards {
+    for shard in &manifest.fields().shards {
         let shard_path = path.join("shards").join(&shard.name);
         let metadata = fs::metadata(&shard_path)?;
         if metadata.len() != shard.byte_len {
@@ -893,7 +896,7 @@ fn validate_loaded_shapes(
     metadata_rows: Option<&[Vec<MetadataValue>]>,
     index: &[IndexEntry],
 ) -> CacheResult<()> {
-    let sample_count = manifest.sample_count as usize;
+    let sample_count = manifest.fields().sample_count as usize;
     if let Some(rows) = metadata_rows {
         if rows.len() != sample_count {
             return Err(CacheError::InvalidCache(
@@ -907,7 +910,12 @@ fn validate_loaded_shapes(
         ));
     }
     for entry in index {
-        if manifest.shards.get(entry.shard_id as usize).is_none() {
+        if manifest
+            .fields()
+            .shards
+            .get(entry.shard_id as usize)
+            .is_none()
+        {
             return Err(CacheError::InvalidCache(format!(
                 "index references missing shard {}",
                 entry.shard_id

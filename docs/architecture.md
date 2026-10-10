@@ -83,6 +83,14 @@ All other implementation details are private.
 
 A completed cache is immutable. Writers create the cache directory, write all data files, validate the completed layout, and only then publish `manifest.json`. Readers refuse incomplete or malformed caches.
 
+V3 manifests store name-derived integer `cache_id` values; v2 readers retain
+positional IDs. Rust resolves IDs once and builds a map to internal cache array
+positions in expected O(caches) time and space. Sample reads and metadata updates
+use expected O(1) identity lookup. Physical traversal and sampling retain input
+path order. `update_manifests(version=3)` is the explicit exception to manifest
+immutability: it persists resolved legacy IDs through atomic per-manifest updates
+while leaving sample files and active dataset state unchanged.
+
 ## Framework Independence
 
 The Rust crate has no PyTorch, TensorFlow, JAX, or ML framework dependency. Framework integration lives in optional Python adapters that convert framework-native values into bytes payloads and primitive metadata.
