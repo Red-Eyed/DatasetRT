@@ -100,7 +100,7 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
         loader = dataset.to_torch_dataloader(
             shuffle=options.shuffle,
             seed=7 if options.shuffle else None,
-            samples_per_epoch=options.steps * 4,
+            samples_per_epoch=options.steps * 4 * options.ranks,
             worker_partition="replicate" if options.shuffle else "split",
             batch_size=4,
             num_workers=options.workers,
@@ -111,17 +111,15 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
         model = DistributedDataParallel(torch.nn.Linear(1, 1))
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         completed = 0
-        # The caller owns collective coordination; the loader only budgets samples.
-        with model.join():
-            for batch in loader:
-                if not isinstance(batch, torch.Tensor):
-                    raise TypeError("expected the transform's collated tensor")
-                optimizer.zero_grad()
-                model(batch).square().mean().backward()
-                optimizer.step()
-                completed += 1
-                if rank == 0 and not options.quiet:
-                    print(f"step {completed}/{options.steps}", file=sys.stderr)
+        for batch in loader:
+            if not isinstance(batch, torch.Tensor):
+                raise TypeError("expected the transform's collated tensor")
+            optimizer.zero_grad()
+            model(batch).square().mean().backward()
+            optimizer.step()
+            completed += 1
+            if rank == 0 and not options.quiet:
+                print(f"step {completed}/{options.steps}", file=sys.stderr)
         if options.json_output:
             print(
                 json.dumps({"rank": rank, "steps": completed, "shuffle": options.shuffle}),

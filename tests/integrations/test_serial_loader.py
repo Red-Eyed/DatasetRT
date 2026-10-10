@@ -18,8 +18,7 @@ from torch.utils.data import DataLoader
 from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations.loader import LocalReader, PendingReader, ReaderAdapter
-from dataset_rt.metadata import decode_metadata
-from dataset_rt.records import MetadataSnapshot
+from dataset_rt.reconstruction import load_configuration, load_metadata, select_population
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -433,7 +432,7 @@ def test_largest_supported_sample_budget(
     expected = budget // batch_size if drop_last else (budget + batch_size - 1) // batch_size
     assert len(loader) == expected
     assert isinstance(loader.dataset, ReaderAdapter)
-    assert len(loader.dataset) == budget
+    assert len(loader.dataset) == (budget // batch_size * batch_size if drop_last else budget)
     assert isinstance(loader.dataset._state, PendingReader)
 
 
@@ -545,7 +544,7 @@ def test_partition_policy_exposes_weight_distribution(
 def test_prepared_worker_populations(
     dataset: CachedDataset, shuffle: bool, partition: Literal["split", "replicate"]
 ) -> None:
-    """Parent-side Polars preserves full records while shuffling only split populations."""
+    """Compact plans reproduce complete records and shuffle only split populations."""
     frame = dataset.get_metadata().with_columns(pl.col("sample_id").alias("extra"))
     dataset.update_metadata(frame)
     loader = dataset.to_torch_dataloader(
@@ -557,15 +556,24 @@ def test_prepared_worker_populations(
     )
     adapter = loader.dataset
     assert isinstance(adapter, ReaderAdapter)
-    pieces = []
+    pieces: list[pl.DataFrame] = []
+    table = load_metadata(adapter.config_path, load_configuration(adapter.config_path))
     for recipe in adapter.partitions:
-        assert isinstance(recipe.metadata, MetadataSnapshot)
-        pieces.append(decode_metadata(recipe.metadata.ipc))
+        piece = pl.from_arrow(
+            select_population(
+                table,
+                offset=recipe.offset,
+                length=recipe.population_size,
+                partition_seed=recipe.partition_seed,
+            )
+        )
+        assert isinstance(piece, pl.DataFrame)
+        pieces.append(piece)
     assert [recipe.sample_count for recipe in adapter.partitions] == [6, 4]
     if partition == "replicate":
         for piece in pieces:
             assert_frame_equal(piece, frame)
-        assert adapter.partitions[0].metadata is adapter.partitions[1].metadata
+        assert all(plan.offset == 0 and plan.population_size == 10 for plan in adapter.partitions)
     else:
         prepared = pl.concat(pieces)
         assert_frame_equal(prepared.sort("sample_id"), frame)

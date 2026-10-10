@@ -167,7 +167,7 @@ class DatasetRuntime:
         The returned dataset keeps this runtime's Rust worker pool alive and
         uses it for every future iterator.
         """
-        return CachedDataset._load(self._inner, paths, reader_config)
+        return CachedDataset._load(self._inner, paths, reader_config, num_workers=self.num_workers)
 
     def from_cache_sources(
         self,

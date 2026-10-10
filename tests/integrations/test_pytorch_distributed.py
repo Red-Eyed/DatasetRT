@@ -27,7 +27,7 @@ from torch.utils.data import get_worker_info
 from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig, WriterConfig
 from dataset_rt.integrations.loader import LocalReader, ReaderAdapter
 from dataset_rt.integrations.loading import ReplicaIdentity, derive_seed
-from dataset_rt.metadata import decode_metadata
+from dataset_rt.reconstruction import load_configuration, load_metadata, select_population
 from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
 
 if TYPE_CHECKING:
@@ -96,6 +96,9 @@ class Case:
     rows: int = 24
     fail_rank: int = -1
     persistent: bool = False
+    drop_last: bool = False
+    random_seed: bool = False
+    split: bool = False
 
 
 @dataclass(frozen=True)
@@ -192,22 +195,20 @@ def parameters(model: DistributedDataParallel) -> tuple[float, ...]:
 def run_training(
     model: DistributedDataParallel, loader: Iterable[Batch], shuffle: bool
 ) -> tuple[tuple[Observation, ...], int]:
-    """Run real optimizer steps; the application handles finite uneven inputs."""
+    """Run ordinary DDP optimizer steps with identical finite rank quotas."""
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     iterator = checked_batches(loader)
     batches = islice(iterator, 128) if shuffle else iterator
     observations: list[Observation] = []
     steps = 0
     try:
-        # join shadows collectives for exhausted sequential ranks, including empty ones.
-        with model.join():
-            for batch in batches:
-                observations.extend(batch.observations)
-                optimizer.zero_grad()
-                loss = model(batch.inputs).square().mean()
-                loss.backward()
-                optimizer.step()
-                steps += 1
+        for batch in batches:
+            observations.extend(batch.observations)
+            optimizer.zero_grad()
+            loss = model(batch.inputs).square().mean()
+            loss.backward()
+            optimizer.step()
+            steps += 1
     finally:
         del batches, iterator
         gc.collect()
@@ -235,10 +236,11 @@ def make_loader(
         "torch.utils.data.DataLoader[Batch]",
         dataset.to_torch_dataloader(
             shuffle=case.shuffle,
-            seed=7 if case.shuffle else None,
-            samples_per_epoch=512 if case.shuffle else None,
-            worker_partition="replicate" if case.shuffle else "split",
+            seed=7 if case.shuffle and not case.random_seed else None,
+            samples_per_epoch=512 if case.shuffle else case.rows,
+            worker_partition="replicate" if case.shuffle and not case.split else "split",
             batch_size=4,
+            drop_last=case.drop_last,
             num_workers=case.workers,
             multiprocessing_context=case.context if case.workers else None,
             sample_transform_fn=fail_transform if failing else observe,
@@ -259,16 +261,24 @@ def prefix(loader: Iterable[Batch]) -> tuple[Observation, ...]:
         gc.collect()
 
 
-def partition_positions(partitions: tuple[ReaderRecipe, ...]) -> tuple[tuple[int, ...], ...]:
+def partition_positions(adapter: ReaderAdapter[Observation]) -> tuple[tuple[int, ...], ...]:
     """Inspect tiny parent-prepared IPC slices independently of the partition helper.
 
     Unique fixture labels distinguish active positions that reference identical
     physical samples. Decode in the rank before workers start, never after fork.
     """
     positions = []
-    for recipe in partitions:
-        assert isinstance(recipe.metadata, MetadataSnapshot)
-        frame = decode_metadata(recipe.metadata.ipc)
+    table = load_metadata(adapter.config_path, load_configuration(adapter.config_path))
+    for recipe in adapter.partitions:
+        frame = pl.from_arrow(
+            select_population(
+                table,
+                offset=recipe.offset,
+                length=recipe.population_size,
+                partition_seed=recipe.partition_seed,
+            )
+        )
+        assert isinstance(frame, pl.DataFrame)
         positions.append(tuple(int(value) for value in frame["active_position"]))
     return tuple(positions)
 
@@ -300,9 +310,9 @@ def rank_main(
         local_length = -1
         if not case.shuffle:
             local_length = len(loader.dataset)
-        positions = partition_positions(loader.dataset.partitions)
+        positions = partition_positions(loader.dataset)
         observations, steps = run_training(model, loader, case.shuffle)
-        if case.workers == 0 and observations:
+        if case.workers == 0 and observations and not case.random_seed:
             state = loader.dataset._state
             assert isinstance(state, LocalReader)
             expected_seed = derive_seed(7, rank, 0) if case.shuffle else 0
@@ -398,15 +408,14 @@ def verify_report(report: RankReport, case: Case) -> None:
     """Check native streams and real worker identity independently of DDP collectives."""
     assert report.parameters != report.initial_parameters
     if not case.shuffle:
-        size, remainder = divmod(case.rows, case.ranks)
-        start = report.rank * size + min(report.rank, remainder)
-        length = size + int(report.rank < remainder)
+        length = (case.rows + case.ranks - 1) // case.ranks
+        start = report.rank * length
         assert tuple(position for worker in report.positions for position in worker) == tuple(
-            range(start, start + length)
+            position % case.rows for position in range(start, start + length)
         )
         assert report.local_length == length
     if case.shuffle:
-        assert report.steps == 128 and report.local_length == -1
+        assert report.steps == 512 // case.ranks // 4 and report.local_length == -1
         assert [(item.sample, item.worker) for item in report.replay] == [
             (item.sample, item.worker) for item in report.observations[: len(report.replay)]
         ]
@@ -429,8 +438,9 @@ def verify_report(report: RankReport, case: Case) -> None:
                 ]
         if case.shuffle:
             counts = Counter(item.sample for item in observed)
-            assert set(counts) == set(range(12))
-            assert 0.30 < counts[0] / len(observed) < 0.60
+            assert set(counts) <= set(range(12))
+            assert counts[0] == max(counts.values())
+            assert 0.25 < counts[0] / len(observed) < 0.70
             continue
         rows = report.positions[worker]
         assert [item.sample for item in observed] == [row % 12 for row in rows]
@@ -476,7 +486,7 @@ def test_real_ddp(
 @pytest.mark.parametrize("rows", [3, 13])
 @pytest.mark.parametrize("context", ["fork", "spawn", "forkserver"])
 def test_uneven_ddp(recipe: ReaderRecipe, tmp_path: Path, rows: int, context: Context) -> None:
-    """DDP join supports remainders and empty ranks without adapter padding."""
+    """Equal padded quotas keep rank lengths and optimizer step counts identical."""
     case = Case(4, 2, context, False, rows)
     reports = launch(case, recipe, tmp_path)
     assert len(reports) == 4
@@ -485,7 +495,7 @@ def test_uneven_ddp(recipe: ReaderRecipe, tmp_path: Path, rows: int, context: Co
         verify_report(report, case)
     assert (
         sum(len(report.observations) for report in reports if isinstance(report, RankReport))
-        == rows
+        == (rows + 3) // 4 * 4
     )
     assert len({report.parameters for report in reports if isinstance(report, RankReport)}) == 1
 
@@ -498,6 +508,42 @@ def test_terminal_ddp_failure(recipe: ReaderRecipe, tmp_path: Path, context: Con
         isinstance(report, RankFailure) and "deliberate DDP transform failure" in report.message
         for report in reports
     )
+
+
+@pytest.mark.parametrize("rows", [3, 19])
+@pytest.mark.parametrize("drop_last", [False, True])
+def test_global_remainder_policy(
+    recipe: ReaderRecipe, tmp_path: Path, rows: int, drop_last: bool
+) -> None:
+    """Padding/discarding gives every real rank identical sample and optimizer counts."""
+    case = Case(4, 2, "spawn", False, rows, drop_last=drop_last)
+    reports = launch(case, recipe, tmp_path)
+    expected = rows // 16 * 4 if drop_last else (rows + 3) // 4
+    assert len(reports) == 4
+    for report in reports:
+        assert isinstance(report, RankReport), report
+        assert report.local_length == len(report.observations) == expected
+        assert report.steps == (expected + 3) // 4
+    assert len({report.parameters for report in reports if isinstance(report, RankReport)}) == 1
+
+
+@pytest.mark.parametrize("context", ["fork", "spawn", "forkserver"])
+def test_random_common_partition_seed(
+    recipe: ReaderRecipe, tmp_path: Path, context: Context
+) -> None:
+    """An omitted seed still gives disjoint shuffled positions and distinct rank streams."""
+    reports = launch(Case(2, 1, context, True, random_seed=True, split=True), recipe, tmp_path)
+    assert len(reports) == 2
+    positions = []
+    seeds = set()
+    for report in reports:
+        assert isinstance(report, RankReport), report
+        assert report.steps == 64
+        positions.extend(position for population in report.positions for position in population)
+        seeds.update(item.seed for item in report.observations)
+    assert sorted(positions) == list(range(24))
+    assert positions != list(range(24))
+    assert len(seeds) == 2
 
 
 @pytest.mark.parametrize("context", ["fork", "spawn", "forkserver"])

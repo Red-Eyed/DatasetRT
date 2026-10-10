@@ -29,6 +29,8 @@ classifiers = [
 dependencies = [
     "pydantic>=2",
     "polars>=1",
+    "pyarrow>=19",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

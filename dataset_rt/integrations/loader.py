@@ -3,30 +3,39 @@
 from __future__ import annotations
 
 import os
-import secrets
+import pickle
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import isfinite
 from multiprocessing import get_all_start_methods
 from multiprocessing.context import BaseContext
+from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from dataset_rt.integrations.loading import (
+    WorkerPlan,
     capture_replica,
+    common_seed,
     partition_rows,
+    rank_budget,
     reader_seed,
     worker_budgets,
 )
-from dataset_rt.metadata import decode_metadata, encode_metadata
-from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
-from dataset_rt.runtime import DatasetRuntime
+from dataset_rt.reconstruction import (
+    ConstructionArtifacts,
+    DatasetConfiguration,
+    load_configuration,
+    load_metadata,
+    select_population,
+)
+from dataset_rt.records import CachedSample, RowSpan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    import polars as pl
+    from pydantic import DirectoryPath, FilePath
 
     from dataset_rt.dataset import CachedDataset
     from dataset_rt.integrations.loading import ReplicaIdentity
@@ -70,7 +79,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         native_num_workers: int,
         sample_transform_fn: Callable[[CachedSample], T] | None,
         row_count: int,
-        partitions: tuple[ReaderRecipe, ...],
+        partitions: tuple[WorkerPlan, ...],
+        config_path: FilePath,
     ) -> None:
         """Store immutable inputs; construction neither reads nor creates native state."""
         self.replica = replica
@@ -80,6 +90,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         self.sample_transform_fn = sample_transform_fn
         self.row_count = row_count
         self.partitions = partitions
+        self.config_path = config_path
+        self._artifacts: ConstructionArtifacts | None = None
         self._state: PendingReader | EmptyPartition | LocalReader = PendingReader()
 
     def setup(self) -> None:
@@ -100,26 +112,28 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         if recipe.sample_count == 0:
             self._state = EmptyPartition(os.getpid())
             return
-        config = replace(
-            recipe,
-            reader_config=recipe.reader_config.model_copy(
-                update={
-                    "shuffle": self.shuffle,
-                    "seed": reader_seed(
-                        shuffle=self.shuffle,
-                        seed=self.seed,
-                        rank_id=self.replica.rank,
-                        worker_id=worker_id,
-                    ),
-                }
-            ),
+        if recipe.rank != self.replica.rank or recipe.worker_id != worker_id:
+            raise RuntimeError("worker plan does not match consumer identity")
+        from dataset_rt.dataset import CachedDataset
+
+        config = load_configuration(self.config_path)
+        metadata = select_population(
+            load_metadata(self.config_path, config),
+            offset=recipe.offset,
+            length=recipe.population_size,
+            partition_seed=recipe.partition_seed,
         )
-        runtime = DatasetRuntime(num_workers=self.native_num_workers)
-        dataset = runtime.cached_dataset(config.cache_paths, reader_config=config.reader_config)
-        match config.metadata:
-            case MetadataSnapshot() as snapshot:
-                dataset._restore_metadata(snapshot)
-        dataset.set_epoch_len(config.sample_count)
+        config = config.model_copy(
+            update={
+                "num_workers": self.native_num_workers,
+                "epoch_len": recipe.sample_count,
+                "row_count": metadata.num_rows,
+                "reader_config": config.reader_config.model_copy(
+                    update={"shuffle": self.shuffle, "seed": recipe.seed}
+                ),
+            }
+        )
+        dataset = CachedDataset._from_configuration(config, metadata)
         self._state = LocalReader(os.getpid(), dataset, iter(dataset))
 
     def __len__(self) -> int:
@@ -159,6 +173,7 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
             self.sample_transform_fn,
             self.row_count,
             self.partitions,
+            self.config_path,
         )
 
 
@@ -179,70 +194,62 @@ class WorkerInitializer:
 
 
 def prepare_partitions(
-    dataset: CachedDataset,
-    recipe: ReaderRecipe,
+    config: DatasetConfiguration,
     replica: ReplicaIdentity,
     *,
     num_workers: int,
     batch_size: int,
-    samples_per_epoch: int | None,
+    samples_per_epoch: int,
     worker_partition: Literal["split", "replicate"],
     shuffle: bool,
     seed: int | None,
-) -> tuple[ReaderRecipe, ...]:
-    """Snapshot active rows once, then prepare columnar populations and finite quotas.
-
-    Preparation is O((rows + workers) × columns), including an O(rows)
-    permutation for shuffled splitting. Replicated workers share one IPC value.
-    No payload is read and no dataset row becomes a Python object.
-    """
-    match recipe.metadata:
-        case MetadataSnapshot(ipc=ipc):
-            frame = decode_metadata(ipc)
-        case _:
-            frame = dataset.get_metadata()
-    if not shuffle:
-        rank_span = partition_rows(frame.height, parts=replica.world_size, part_id=replica.rank)
-        frame = frame.slice(rank_span.offset, rank_span.length)
-    count = recipe.sample_count if samples_per_epoch is None else samples_per_epoch
+    drop_last: bool,
+) -> tuple[WorkerPlan, ...]:
+    """Plan global/rank/worker quotas in O(workers), without materializing metadata."""
+    count = rank_budget(samples_per_epoch, replica, batch_size, drop_last)
     workers = max(1, num_workers)
-    populations = frame.height
-    if worker_partition == "replicate" and frame.height:
-        populations = workers
-    budgets = worker_budgets(count, workers=workers, populations=populations, batch_size=batch_size)
-    if shuffle and worker_partition == "split":
-        if seed is None:
-            raise RuntimeError("shuffled partition preparation requires a resolved seed")
-        frame = frame.sample(fraction=1.0, shuffle=True, seed=seed)
+    population = config.row_count
     if worker_partition == "replicate":
-        snapshot = MetadataSnapshot(encode_metadata(frame))
-        return tuple(replace(recipe, sample_count=budget, metadata=snapshot) for budget in budgets)
-    return split_populations(frame, recipe, budgets)
-
-
-def split_populations(
-    frame: pl.DataFrame, recipe: ReaderRecipe, budgets: tuple[int, ...]
-) -> tuple[ReaderRecipe, ...]:
-    """Encode disjoint populations; a full-row epoch aligns populations with batch quotas.
-
-    A custom budget divides the population among active consumers independently
-    of the draw count, so every row remains available without copying repeats.
-    """
+        rank_span = RowSpan(0, population)
+        populations = workers
+    else:
+        if samples_per_epoch == population:
+            population = count * replica.world_size
+        elif population < replica.world_size:
+            population = (
+                (population + replica.world_size - 1) // replica.world_size * replica.world_size
+            )
+        rank_span = partition_rows(population, parts=replica.world_size, part_id=replica.rank)
+        populations = rank_span.length
+    budgets = worker_budgets(count, workers=workers, populations=populations, batch_size=batch_size)
     active = sum(budget > 0 for budget in budgets)
-    full_pass = sum(budgets) == frame.height
-    recipes = []
-    offset = 0
+    full_pass = sum(budgets) == rank_span.length
+    plans = []
+    offset = rank_span.offset
     for worker, budget in enumerate(budgets):
-        if full_pass:
-            population_size = budget
-        elif budget:
-            population_size = partition_rows(frame.height, parts=active, part_id=worker).length
-        else:
+        if budget == 0:
             population_size = 0
-        snapshot = MetadataSnapshot(encode_metadata(frame.slice(offset, population_size)))
-        recipes.append(replace(recipe, sample_count=budget, metadata=snapshot))
+        elif worker_partition == "replicate":
+            population_size = config.row_count
+        elif full_pass:
+            population_size = budget
+        else:
+            population_size = partition_rows(rank_span.length, parts=active, part_id=worker).length
+        plans.append(
+            WorkerPlan(
+                rank=replica.rank,
+                worker_id=worker,
+                offset=0 if worker_partition == "replicate" else offset,
+                population_size=population_size,
+                sample_count=budget,
+                seed=reader_seed(
+                    shuffle=shuffle, seed=seed, rank_id=replica.rank, worker_id=worker
+                ),
+                partition_seed=seed if shuffle and worker_partition == "split" else None,
+            )
+        )
         offset += population_size
-    return tuple(recipes)
+    return tuple(plans)
 
 
 def _validate_worker_options(
@@ -281,6 +288,24 @@ def _validate_worker_options(
         raise ValueError("multiprocessing_context must be a start method or BaseContext")
 
 
+class _PickleSink:
+    """Discard serialized probe output instead of retaining callback-sized buffers."""
+
+    def write(self, data: bytes) -> int:
+        """Satisfy the pickler's stream boundary without keeping its output."""
+        return len(data)
+
+
+def _validate_transform(transform: Callable[[CachedSample], T] | None, num_workers: int) -> None:
+    """Fail before export when a multiprocess transform cannot be serialized."""
+    if transform is None or num_workers == 0:
+        return
+    try:
+        ForkingPickler(_PickleSink(), pickle.HIGHEST_PROTOCOL).dump(transform)
+    except Exception as error:
+        raise TypeError("sample_transform_fn must be picklable for multiprocess loading") from error
+
+
 def make_dataloader(
     dataset: CachedDataset,
     *,
@@ -300,6 +325,7 @@ def make_dataloader(
     worker_init_fn: Callable[[int], None] | None,
     prefetch_factor: int | None,
     persistent_workers: bool,
+    work_dir: DirectoryPath | None,
 ) -> DataLoader[CachedSample | T]:
     """Snapshot in the training process; delegate batching and lifecycle to Torch."""
     _validate_worker_options(
@@ -330,44 +356,55 @@ def make_dataloader(
         raise ValueError("worker_partition must be 'split' or 'replicate'")
     if not shuffle and seed is not None:
         raise ValueError("seed requires shuffle=True; omit seed for sequential reading")
-    if shuffle:
-        if seed is None:
-            seed = secrets.randbits(64)
+    if shuffle and seed is not None:
         reader_seed(shuffle=True, seed=seed, rank_id=0, worker_id=0)
+    _validate_transform(sample_transform_fn, num_workers)
     recipe = dataset._reader_recipe()
     if samples_per_epoch is None and not 1 <= recipe.sample_count <= MAX_SAMPLE_BUDGET:
         raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
     replica = capture_replica()
-    partitions = prepare_partitions(
-        dataset,
-        recipe,
-        replica,
-        num_workers=num_workers,
-        batch_size=batch_size,
-        samples_per_epoch=samples_per_epoch,
-        worker_partition=worker_partition,
-        shuffle=shuffle,
-        seed=seed,
-    )
-    adapter = ReaderAdapter(
-        replica,
-        shuffle,
-        seed,
-        native_num_workers,
-        sample_transform_fn,
-        sum(partition.sample_count for partition in partitions),
-        partitions,
-    )
-    return DataLoader(
-        adapter,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        drop_last=drop_last,
-        pin_memory=pin_memory,
-        timeout=timeout,
-        multiprocessing_context=multiprocessing_context,
-        worker_init_fn=WorkerInitializer(worker_init_fn),
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
-    )
+    seed = common_seed(replica, shuffle, seed)
+    artifacts = ConstructionArtifacts.create(work_dir)
+    try:
+        config_path = dataset.dump_config(artifacts.directory)
+        config = load_configuration(config_path)
+        partitions = prepare_partitions(
+            config,
+            replica,
+            num_workers=num_workers,
+            batch_size=batch_size,
+            samples_per_epoch=recipe.sample_count
+            if samples_per_epoch is None
+            else samples_per_epoch,
+            worker_partition=worker_partition,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+        )
+        adapter = ReaderAdapter(
+            replica,
+            shuffle,
+            seed,
+            native_num_workers,
+            sample_transform_fn,
+            sum(partition.sample_count for partition in partitions),
+            partitions,
+            config_path,
+        )
+        adapter._artifacts = artifacts
+        return DataLoader(
+            adapter,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            timeout=timeout,
+            multiprocessing_context=multiprocessing_context,
+            worker_init_fn=WorkerInitializer(worker_init_fn),
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+        )
+    except BaseException:
+        artifacts.discard()
+        raise

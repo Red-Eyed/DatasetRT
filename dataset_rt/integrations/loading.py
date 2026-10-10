@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import warnings
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,6 +26,57 @@ class ReplicaIdentity(BaseModel):
         if self.rank >= self.world_size:
             raise ValueError("rank must be smaller than world_size")
         return self
+
+
+class WorkerPlan(BaseModel):
+    """Compact instructions for one logical consumer; never embeds metadata or handles."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rank: int = Field(ge=0, lt=1 << 32)
+    worker_id: int = Field(ge=0, lt=1 << 32)
+    offset: int = Field(ge=0)
+    population_size: int = Field(ge=0)
+    sample_count: int = Field(ge=0)
+    seed: int = Field(ge=0, lt=1 << 64)
+    partition_seed: int | None = Field(default=None, ge=0, lt=1 << 64)
+
+
+def rank_budget(samples: int, replica: ReplicaIdentity, batch_size: int, drop_last: bool) -> int:
+    """Adjust one global budget to equal rank-local counts and warn only in rank zero."""
+    ranks = replica.world_size
+    local = (
+        samples // (ranks * batch_size) * batch_size
+        if drop_last
+        else (samples + ranks - 1) // ranks
+    )
+    effective = local * ranks
+    if effective != samples and replica.rank == 0:
+        action = "padded" if effective > samples else "discarded"
+        warnings.warn(
+            f"samples_per_epoch adjusted: requested {samples} global samples, effective "
+            f"{effective}; {action} {abs(effective - samples)} for equal rank batch counts",
+            UserWarning,
+            stacklevel=3,
+        )
+    return local
+
+
+def common_seed(replica: ReplicaIdentity, shuffle: bool, seed: int | None) -> int | None:
+    """Agree one partition seed in training ranks; loading children never query groups."""
+    if not shuffle:
+        return None
+    if seed is not None:
+        _require_u64("seed", seed)
+        return seed
+    if replica.world_size == 1:
+        return secrets.randbits(64)
+    import torch.distributed as distributed
+
+    values = [secrets.randbits(64) if replica.rank == 0 else 0]
+    distributed.broadcast_object_list(values, src=0)
+    _require_u64("seed", values[0])
+    return values[0]
 
 
 def _require_u64(name: str, value: int) -> None:
@@ -60,10 +112,10 @@ def derive_seed(base_seed: int, rank_id: int, worker_id: int) -> int:
 
 
 def reader_seed(*, shuffle: bool, seed: int | None, rank_id: int, worker_id: int) -> int:
-    """Select a seed during process-local setup; sequential mode ignores it.
+    """Derive a consumer seed from the common construction seed; sequential uses zero.
 
-    None is the optional API input, converted here into fresh OS randomness.
-    No random seed is generated during recipe creation in the parent process.
+    Direct helper callers may pass None for fresh randomness. Loader construction
+    resolves its common seed first so all shuffled split consumers share ordering.
     """
     if not shuffle:
         return 0

@@ -28,8 +28,9 @@ inherited epoch override being mistaken for the population size.
   blocked work, and what survives failure or an interrupted caller?
 - [ ] Verify deterministic ordering and stable identity where promised. Separate
   intentional repeated samples from accidental duplication or lost work.
-- [ ] Reject Python row-object expansion, internal temporary-file transport,
-  accidental quadratic lookup, and unbounded queues on scalable paths.
+- [ ] Reject Python row-object expansion, accidental quadratic lookup, unbounded
+  queues, and accidental temporary-file bridges on scalable paths. Explicit
+  config/Parquet snapshots are construction artifacts with an owned lifetime.
 - [ ] Make examples and types agree with behavior. Describe ignored or advisory
   settings explicitly; avoid making an unrelated flag select a hidden mode.
 
@@ -195,6 +196,30 @@ with different cache identity, population, or length.
   candidate table must never enter the recipe.
 - [ ] Row spans partition active positions with valid bounds, including empty
   slices; slicing must never renumber physical sample identities.
+
+## DatasetConfiguration, WorkerPlan, and construction artifacts
+
+Sources: [reconstruction.py](../dataset_rt/reconstruction.py),
+[integrations/loading.py](../dataset_rt/integrations/loading.py).
+
+Failure to prevent: an ordinary reconstruction hides disk writes, transports a
+full metadata table, or deletes an artifact still owned by a reader.
+
+- [ ] Export is explicit, accepts an existing directory, returns a real FilePath,
+  references immutable caches, and publishes config only after metadata finishes.
+- [ ] Never overwrite an existing snapshot; failed writes remove only owned files.
+- [ ] Config schema rejects unsupported versions and paths; Rust validates restored
+  identities and weights. Test missing, malformed, and incompatible artifacts.
+- [ ] Preserve active order, duplicates, logical column types, and epoch overrides;
+  restored readers have fresh cursors and require no caller-owned runtime.
+- [ ] Serialized adapters contain paths and small plans, excluding native state
+  and materialized metadata. Fork setup must also work without invoking pickle.
+- [ ] Keep one common partition seed and distinct sampling seeds. Children never
+  initialize/query distributed groups or inherited columnar thread pools.
+- [ ] Parent-owned temporary output outlives active iterators and persistent workers;
+  child destructors cannot remove it. Explicit output survives teardown.
+- [ ] Account separately for artifact export, Parquet decoding, permutations,
+  selected IPC, and native state; transport reduction is not a zero-copy claim.
 
 ## EpochSampler and EpochPlan
 
@@ -442,13 +467,13 @@ Sources: [integrations/loader.py](../dataset_rt/integrations/loader.py),
 
 Failure to prevent: independent workers multiply the epoch budget, alter the
 promised population, or retain native state from another process. These checks
-cover ordinary DataLoader workers; distributed execution is deferred.
+cover ordinary DataLoader workers and initialized default-group DDP.
 
 - [ ] Invalid options fail before reading/serializing metadata: worker counts,
   batch size, sample count, context, persistence, timeout, prefetch, and seed.
   Finite counts must fit Python's length protocol and native integer bounds.
 - [ ] Inherit `len(dataset)`, including `set_epoch_len`, once at construction;
-  explicit budgets override it locally. Later source edits require rebuilding.
+  explicit budgets override it globally. Later source edits require rebuilding.
 - [ ] Compare `len(loader)` with emitted batches for short/exact/long windows,
   uneven tails, excess workers, both partition modes, and both `drop_last`
   settings. Allocate whole batches and at most one tail across one total budget.
@@ -456,9 +481,9 @@ cover ordinary DataLoader workers; distributed execution is deferred.
   wraparound, replicated overlap, and worker interleaving rather than promising
   global order or unique physical coverage.
 - [ ] Reading every active row once requires a complete sequential split pass,
-  a budget equal to the active row count, and no dropped tail. Active duplicate
+  a budget equal to the active row count, divisibility across ranks, and no dropped tail. Active duplicate
   rows still intentionally repeat their physical sample.
-- [ ] Split shuffling happens in the parent before slicing. Unequal-weight tests
+- [ ] Split consumers reproduce one common seeded ordering before slicing. Unequal-weight tests
   expose the difference between per-partition and global weighted distributions;
   shuffling does not make fixed worker quotas globally exact.
 - [ ] Replicated workers receive the full population but share the epoch budget;
@@ -469,65 +494,64 @@ cover ordinary DataLoader workers; distributed execution is deferred.
 - [ ] Setup creates native readers in the consumer before the user's initializer;
   zero-quota workers create none. PID mismatches and unexpected worker topology
   fail explicitly; serialization excludes initialized readers.
-- [ ] Include every prepared IPC slice, native metadata/index copy, Torch batch
-  prefetch, and native read buffer in process-tree memory. Spawn currently sends
-  all split recipes to every worker, so aggregate metadata can grow with workers.
+- [ ] Include Parquet decoding, seeded permutation, selected IPC, native metadata/index
+  copies, Torch batch prefetch, and native read buffers in process-tree memory.
+  Control pickle size must be independent of full metadata byte size.
 - [ ] Collation receives lists even for batch size one; transformed samples and
   custom batch return types agree with overloads and examples.
 - [ ] Initialization, transform/read errors, timeout, worker death, interruption,
   and partial teardown propagate or clean up under supported start contexts.
 
-### Completed single-GPU loader review
+### Loader and reconstruction review
 
-The evidence below covers one training process with zero or multiple local
-DataLoader workers. It exercises the adapter using real native caches and Torch
-workers; it does not establish GPU-kernel, distributed, or multi-host behavior.
-The checklists for other abstractions remain independent review templates.
+Evidence uses real native caches, fork/spawn/forkserver workers, and CPU Gloo
+ranks. It establishes neither GPU-kernel nor multi-host behavior. Checklists for
+other abstractions remain review templates rather than blanket claims of proof.
 
-Evidence comes from [serial loader tests](../tests/integrations/test_serial_loader.py),
-[parallel loader tests](../tests/integrations/test_parallel_loader.py), the native
-queue/runtime checks, and [runtime contracts](runtime.md#pytorch-dataloader-helper).
-
-| Checklist condition | Evidence and outcome |
+| Failure condition | Evidence |
 | --- | --- |
-| Reject invalid options before metadata work | `test_invalid_workers_fail_before_metadata`, `test_invalid_sample_budget`, and `test_boolean_options_reject_truthy_integers` make preparation fail if reached. Invalid persistence, contexts, prefetch, timeout, flags, and numeric bounds are rejected first. |
-| Inherit the finite budget once | `test_inherited_and_explicit_epoch_budgets`, `test_sequential_inherits_source_epoch_length`, and `test_inherited_budget_limit` cover inheritance, local overrides, source mutation, and limits. |
-| Match reported and emitted batches | Serial short/long-window tests and real-worker batch-tail, batch-drop, quota-short, quota-long, empty, and tiny-replicate cases cover whole-batch quotas and one shared tail. Numeric-limit tests check reported length without consuming a huge epoch. |
-| Preserve sequential semantics | Serial order/wrap tests and parallel validation/replicate-sequential cases verify actual identities. Parent population tests verify unchanged metadata order when shuffling is disabled. |
-| Distinguish a complete active-row pass from physical uniqueness | Duplicate snapshot and parallel validation cases preserve intentional repeated identities. The runtime example now describes inherited sample count rather than promising every row once. |
-| Expose split distribution limits | `test_partition_policy_exposes_weight_distribution` uses weights 1 and 10^12 with two workers: split emits 50 draws from each one-row population; replicate emits all 100 draws from the heavy sample for the fixed seed. It runs under fork, spawn, and forkserver. This difference is documented behavior. |
-| Share one budget in replicate mode | Real-worker weighted, replicate-sequential, and tiny-replicate cases check finite counts, full populations, and intentional overlap. Parent recipe tests verify a shared IPC snapshot. |
-| State replay and partial-pass behavior | Serial partial-window tests and parallel replay, persistent-validation, persistent-shuffle, random-persistent, and partial cases exercise fresh versus retained readers. Discarded multiprocess prefetch can leave gaps; the contract says so. |
-| Enforce process ownership and topology | Lazy-setup, pickle, actual inherited-fork rejection, initializer-order, and `test_prepared_topology_must_match_consumer` checks cover fresh PID-bound readers and empty quotas. `test_explicit_base_context` also consumes through a real BaseContext. |
-| Account for scalable memory and work | Source inspection keeps preparation columnar and linear. Serial and parallel many-cache smoke cases process 10,000 active rows without collecting outputs. The memory costs below remain explicit input-sized costs. |
-| Match collation and type contracts | Custom collators receive lists for batch size one and larger batches; transform and batching tests check actual outputs. Torch's `DataLoader` generic describes input samples, and its iterator does not statically guarantee the custom batch type. The adapter retains that standard Torch typing boundary. |
-| Propagate failures and release workers | Supervised real-worker callback-error, transform-error, native-error, death, timeout, partial teardown, and Ctrl-C cases exercise supported process contexts with finite deadlines and cleanup. |
+| Ignored options or incorrect finite lengths | Serial option, inherited-budget, numeric-limit, batching, and wraparound tests; whole-batch worker quotas plus at most one local tail. |
+| Shuffle silently implies validation | Both split/replicate modes exercise sequential and weighted reads. No flag selects a validation mode. |
+| Split quotas pretend to reproduce global weights | Extreme-weight tests emit 50/100 heavy draws in split/replicate modes respectively. Replicate preserves full-population replacement sampling; split approximates the distribution. |
+| Worker IPC grows with metadata | `test_compact_pickle_does_not_include_metadata` and measured 1/2/4-worker control sizes: 540/609/748 bytes, unchanged between 1,795-byte and 1,001,811-byte metadata IPC. Native handles and materialized populations are excluded. |
+| Reconstruction loses accepted state | Config round-trip tests preserve duplicate order, weights, extras, date/time and nested types, epoch length, and fresh cursors. Relocated exports use absolute cache references. |
+| Malformed artifacts bypass Rust | Missing/malformed configs or metadata, unsupported versions, row-count mismatches, and invalid saved weights fail. Rust remains authoritative for restored identities and weights. |
+| Failure destroys caller-owned files | Export refusal and failed-sync tests preserve existing files. Each loader allocates an exclusive subdirectory; failed construction removes its owned output. |
+| Premature cleanup invalidates workers | Serial and real persistent fork/spawn iterator tests retain temporary artifacts after loader deletion, then remove them after final iterator teardown. Explicit work directories retain snapshots. |
+| Unpicklable transforms fail after expensive preparation | Multiprocess callback validation precedes export; zero-worker local callbacks remain supported. Serialization cannot prove child imports, so real startup supervision still applies. |
+| Wrong-PID readers or worker topology | Lazy setup, initializer ordering, pickle exclusion, inherited-fork rejection, and unexpected consumer-count tests. Zero quotas avoid native construction. |
+| Worker death or interruption hangs cleanup | Real-worker initializer/transform/native errors, death, timeout, partial teardown, and Ctrl-C tests run with independent deadlines under supported contexts. |
+| Rank lengths diverge or remainder exceptions recur | Real DDP tests cover two/four ranks, zero/one/two loading workers, padding/discarding, zero effective budgets, seeded replay, persistent readers, common random partition seeds, and terminal failures. Training uses ordinary DDP without join to conceal unequal lengths. |
 
-Both original findings are resolved: oversized explicit or inherited budgets fail
-before metadata preparation, and zero-worker persistence fails before source
-metadata is accessed. The budget review also exposed floating-point rounding in
-Torch's batch-length calculation. Accepted sample budgets are now bounded by
-`min(sys.maxsize, 2**53)` so the ordinary Torch length calculation remains exact.
-Batch size must fit `sys.maxsize`; invalid boolean flags are rejected rather than
-being treated as truthy values.
+Process memory remains input-sized. Every nonempty consumer reads Parquet during
+setup; shuffled selection allocates an O(rows) permutation, while native metadata,
+accepted IPC, indexes, and queues belong to each consumer. Replicate retains the
+full population per process. No dataset-scale Python row-object bridge is added.
+Selected metadata still crosses the Python/Rust boundary as IPC bytes.
 
-Memory accounting remains part of the contract, rather than a claim of constant
-memory. For W loading workers and M bytes of prepared metadata IPC, spawn and
-forkserver retain approximately `(W + 1) * M` IPC bytes across parent and workers,
-before native tables, indexes, and transient serialization copies. All recipes
-currently travel to each worker, including zero-quota workers. Replicate mode
-shares one IPC value within each process; fork may share immutable bytes through
-copy-on-write. Each consuming process also owns native indexes and metadata.
-Torch prefetch costs scale with workers, prefetch factor, batch size, and decoded
-sample size; native payload buffers follow their bounded read window. Arbitrary
-payload sizes and user decoding are application-sized memory costs.
+On the acceptance Mac, one-repeat spawn smoke measurements used 512 samples in
+two caches, 64-byte payloads, batch size 32, and cheap transforms. The wide case
+added 32 KiB metadata per row (16 MiB logical metadata). Values are whole-tree
+summed RSS, which can double-count shared pages; startup includes interpreter and
+Torch costs. Concurrent acceptance tests and a single repeat prevent throughput
+or causal memory claims.
 
-Supported contexts require picklable callbacks where Python multiprocessing
-requires them. Exact global weighted draws require replicate mode; shuffled split
-mode deliberately approximates the distribution. These documented limits are
-accepted contract boundaries, not untested promises of coverage or replay.
+| Workers | Narrow cold first batch, ms | Wide cold first batch, ms | Narrow peak RSS, MiB | Wide peak RSS, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 1.4 | 11.5 | 264.7 | 400.3 |
+| 1 | 454.4 | 484.9 | 537.4 | 719.4 |
+| 2 | 483.0 | 734.6 | 794.0 | 1012.4 |
+| 4 | 894.2 | 630.3 | 1311.9 | 1642.2 |
 
-Verification: `just check` passed with 499 Python tests and 15 Rust tests,
-including formatting, Ruff, precise-type checks, Pyrefly, generated API docs,
-Clippy, and a rebuilt extension. Distributed tests marked slow were outside this
-single-GPU review. Rust implementation and binding signatures were unchanged.
+Reproduce using `scripts/bench_reader.py --samples-per-cache 256 --caches 2
+--payload-bytes 64 --batch-size 32 --contexts '["spawn"]' --workloads '["cheap"]'
+--shuffles '[false]' --repeats 1`, adding `--metadata-bytes 32768` for the wide case.
+The compact transport gate is supported by measured pickle-size independence,
+real worker tests, and explicit process-memory accounting; this is not a claim of
+zero-copy Parquet loading or constant total memory.
+
+Verification: `just check` passed with 518 Python tests and 15 Rust tests,
+including formatting, lint, precise types, Pyrefly, generated docs, Clippy, and
+native rebuild. The separate slow CPU DDP matrix passed all 50 tests; the updated
+two-rank example completed its requested two steps per rank. Rust source and
+binding signatures remain unchanged by this reconstruction implementation.

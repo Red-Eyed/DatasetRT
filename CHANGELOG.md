@@ -4,6 +4,20 @@ All notable changes to DatasetRT are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add `CachedDataset.dump_config(DirectoryPath) -> FilePath` and classmethod
+  `CachedDataset.from_config(FilePath)` for JSON construction settings and active
+  metadata Parquet snapshots, referencing existing cache payloads.
+- Add loader `work_dir`: managed temporary output by default, retained isolated
+  snapshots under a caller-selected existing directory.
+
+### Changed
+
+- Send config paths and compact plans through process IPC instead of metadata
+  snapshots. Children reconstruct seeded partitions locally. Add NumPy and
+  PyArrow for columnar selection and synchronous Parquet reads.
+
 ### Backwards Incompatible Changes
 
 - Reject invalid DataLoader worker combinations before metadata preparation,
@@ -12,19 +26,24 @@ All notable changes to DatasetRT are documented here.
   `min(sys.maxsize, 2**53)` to keep Torch's reported batch counts exact, and
   require batch sizes to fit `sys.maxsize`.
 - Make `CachedDataset.to_torch_dataloader()` finite in both shuffle modes. Set
-  `samples_per_epoch` to the desired sample count per loader; `None` inherits
+  `samples_per_epoch` to the desired global sample count; `None` inherits
   `len(dataset)`, including source `set_epoch_len()` overrides, at construction.
   Replace externally limited infinite loops with iteration over the finite loader.
 - Add `worker_partition="split"` (default) and `"replicate"`. Split mode gives
-  workers disjoint populations, shuffled in the parent only when
+  consumers partitioned populations, using a common seeded ordering only when
   `shuffle=True`; replicate mode gives each worker the full population.
-  Both share one sample budget per loader. Use `"replicate"` for full-population
-  weighted draws in every worker. Randomized split populations approximate the
+  Both share one global budget across ranks and workers. Use `"replicate"` for
+  full-population weighted draws in every worker. Randomized split populations approximate the
   global weight distribution because quotas do not follow partition weight sums.
 - Reject an explicit `seed` with `shuffle=False` instead of silently ignoring it.
   Omit the seed for sequential reading.
 - Require `batch_size` to be a positive integer and reject `None`. Collation now
   always receives a list; use `batch_size=1` for individual-sample processing.
+- Divide global sample budgets equally across initialized DDP ranks. Pad with
+  `drop_last=False` or discard to complete local batches with `drop_last=True`;
+  warn in rank zero when the effective count changes. Report equal rank lengths.
+- Check multiprocess `sample_transform_fn` picklability before exporting artifacts,
+  including fork. Serial loaders still accept local callbacks.
 
 ### Fixed
 

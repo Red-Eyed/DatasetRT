@@ -339,6 +339,25 @@ weights and iterator state are unchanged.
 
 Reject direct construction because every dataset requires a runtime.
 
+#### `CachedDataset.dump_config(path: DirectoryPath) -> FilePath`
+
+Save construction settings and active metadata Parquet into an existing directory.
+
+Return the generated dataset.json file. Cache payloads are referenced by
+absolute paths, not copied. Active row order, duplicates, weights, extra
+columns, and epoch length are preserved; reader progress is not saved.
+The directory must be exclusively owned for export and contain no prior
+export. Publish configuration after metadata is complete; existing files
+are never overwritten. Keep the artifacts immutable while readers use them.
+
+#### `CachedDataset.from_config(cls, path: FilePath) -> CachedDataset`
+
+Construct fresh native state from an existing config and its metadata Parquet.
+
+Validate paths and config before construction, then validate metadata in
+Rust. Restore the finite epoch length after metadata and start fresh
+cursors. No caller runtime or saved native handles are required.
+
 #### `CachedDataset.__iter__() -> Iterator[CachedSample]`
 
 Create an iterator from the current active metadata table and epoch length.
@@ -394,23 +413,23 @@ it with `DataLoader` while keeping domain decoding in Python.
 Raises:
     ImportError: If PyTorch is not installed in the active environment.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
 
 Collate lists of transformed samples into a caller-defined result.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
 
 Collate lists of cache records without a sample transform.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
 
 Delegate to Torch default collation when no custom callback is supplied.
 
-#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', batch_size: PositiveInt = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, batch_size: PositiveInt = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
 
 Build a finite PyTorch DataLoader for training or evaluation.
 
-``samples_per_epoch`` counts samples for this DataLoader before batching,
+``samples_per_epoch`` counts global samples before batching,
 not batches or optimizer steps. None inherits ``len(self)`` at loader
 construction, including any ``set_epoch_len`` override. A positive integer
 overrides that inherited count for this loader. Sequential readers wrap
@@ -419,8 +438,9 @@ dataset do not change an existing loader's sample budget.
 The inherited or explicit count must be between 1 and
 min(sys.maxsize, 2**53), keeping PyTorch's batch-length calculation exact.
 
-``len(loader)`` is exact: with batch size B and sample budget N it is
-ceil(N / B), or floor(N / B) with ``drop_last=True``. For example, N=10
+With one training process, ``len(loader)`` is exact: with batch size B
+and sample budget N it is ceil(N / B), or floor(N / B) with
+``drop_last=True``. For example, N=10
 and B=3 yields four batches, or three when dropping the incomplete batch.
 ``batch_size`` must be a positive integer no larger than sys.maxsize;
 None is not supported.
@@ -428,10 +448,19 @@ Worker quotas consist of whole batches plus at most one incomplete batch.
 Increasing ``num_workers`` neither multiplies N nor adds dropped tails.
 Workers without an assigned quota yield nothing.
 
-``worker_partition="split"`` gives workers disjoint metadata populations.
+With an initialized default distributed group of R training processes,
+each receives ceil(N/R) samples when drop_last=False, or
+B*floor(N/(R*B)) when drop_last=True. All report the same batch length.
+A remainder pads the global count or discards samples respectively;
+process zero warns with requested and effective counts. For N=1000,
+R=3, B=32, each gets 334 samples and 11 batches, or 320 samples and
+10 batches when dropping tails. A zero effective count yields no batches.
+
+``worker_partition="split"`` divides active row positions across training
+processes, then their loading workers. Padding may repeat row positions.
 With ``shuffle=False``, metadata stays in its existing order and workers
 read their populations sequentially. With ``shuffle=True``, metadata rows
-are shuffled in the parent before splitting, then each worker samples
+use one common seeded ordering before splitting, then each worker samples
 its own population by weight with replacement. Randomized splits
 improve the weight mix but do not guarantee the global weighted frequency:
 worker quotas follow batch counts, not partition weight sums.
@@ -440,7 +469,7 @@ worker quotas follow batch counts, not partition weight sums.
 while sharing the same total sample budget. With shuffle=True,
 each worker samples by weight with replacement; with shuffle=False, each
 starts at the beginning, so different workers can emit duplicate samples.
-With one consumer (num_workers=0 or 1), both modes use the full population.
+With one training process and one consumer, both modes use the full population.
 Torch interleaves worker batches; multiworker output need not match global
 metadata order. Weights do not affect sequential reads.
 
@@ -452,13 +481,29 @@ workers and continue their draw streams/cursors. Nonpersistent workers
 reconstruct fresh readers each pass. Split populations are fixed for the
 loader's lifetime, including when persistent workers are used.
 
-Construction snapshots metadata columnarly without loading payloads or
-creating a consuming native reader. Parent edits do not change snapshots.
+Construction saves a config and active metadata Parquet without loading
+payloads or creating a consuming native reader. Parent edits do not change
+snapshots. Workers receive the config path and compact partition instructions,
+read the snapshot, and build their own native state. They do not query
+distributed groups. With shuffle=True and seed=None, training processes
+agree a random partition seed during construction; construct loaders in
+the same order with the same global budget and batch size on every process.
+Each worker uses a distinct derived sampling seed.
+
+``work_dir`` is an existing directory for exported construction artifacts.
+Each loader creates its own subdirectory there, retained for inspection
+or reconstruction. None creates a managed temporary directory, removed
+when the parent loader and its active iterators release their dataset.
+Keep artifacts immutable and accessible to every consuming process.
+A hard process kill can leave temporary artifacts behind.
 Native setup happens on first consumption, or before worker_init_fn in
 each worker. num_workers controls Torch processes; native_num_workers
 controls Rust reader threads per consuming process. Queues remain bounded
-by ReaderConfig.prefetch_size. Callbacks must be picklable for spawn and
-forkserver; errors propagate rather than silently replacing samples.
+by ReaderConfig.prefetch_size. With num_workers>0, sample_transform_fn
+is checked for picklability before export or worker startup, for every
+start method. Other callbacks must also be picklable for spawn/forkserver.
+Successful serialization does not guarantee child imports will succeed;
+startup and callback errors propagate rather than replacing samples.
 
 Collation always receives a list, including when batch_size=1. The list
 contains transformed samples if sample_transform_fn is supplied, otherwise

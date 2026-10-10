@@ -21,7 +21,7 @@ from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConf
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations.loader import EmptyPartition, LocalReader, PendingReader, ReaderAdapter
 from dataset_rt.integrations.loading import derive_seed
-from dataset_rt.metadata import decode_metadata
+from dataset_rt.reconstruction import load_configuration, load_metadata, select_population
 from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
 
 if TYPE_CHECKING:
@@ -261,9 +261,17 @@ def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> No
     adapter = loader.dataset
     assert isinstance(adapter, ReaderAdapter)
     populations = []
+    table = load_metadata(adapter.config_path, load_configuration(adapter.config_path))
     for partition in adapter.partitions:
-        assert isinstance(partition.metadata, MetadataSnapshot)
-        frame = decode_metadata(partition.metadata.ipc)
+        frame = pl.from_arrow(
+            select_population(
+                table,
+                offset=partition.offset,
+                length=partition.population_size,
+                partition_seed=partition.partition_seed,
+            )
+        )
+        assert isinstance(frame, pl.DataFrame)
         populations.append(tuple(zip(frame["cache_id"], frame["sample_id"], strict=True)))
     batches = list(loader)
     assert len(batches) == len(loader)

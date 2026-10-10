@@ -110,13 +110,19 @@ class Source:
     cache_position: int
     samples: int
     payload_bytes: int
+    metadata_bytes: int = 0
 
     def __iter__(self) -> Iterator[CacheInput]:
         """Encode physical identity independently of the cache writer's metadata."""
         for index in range(self.samples):
             header = self.cache_position.to_bytes(8, "little") + index.to_bytes(8, "little")
             payload = (header * ((self.payload_bytes + 15) // 16))[: self.payload_bytes]
-            yield CacheInput(payload, {"index": index})
+            yield CacheInput(
+                payload,
+                {"index": index, "wide": str(index).ljust(self.metadata_bytes, "x")}
+                if self.metadata_bytes
+                else {"index": index},
+            )
 
 
 class Resources(Record):
@@ -206,6 +212,7 @@ class Benchmark(BaseSettings):
     samples_per_cache: int = Field(default=1000, gt=0)
     caches: int = Field(default=4, gt=0)
     payload_bytes: int = Field(default=1024, ge=16)
+    metadata_bytes: int = Field(default=0, ge=0)
     transform_rounds: int = Field(default=1000, ge=0)
     seed: int = Field(default=7, ge=0, le=(1 << 64) - 1)
     batch_size: int = Field(default=32, gt=0)
@@ -482,7 +489,13 @@ def create_fixture(config: Benchmark, root: Path) -> tuple[Path, ...]:
     """Prepare caches once outside reader timings; sources stream through Rust bounds."""
     runtime = DatasetRuntime(num_workers=config.native_workers)
     sources: list[CacheSource] = [
-        Source(f"cache-{index}", index, config.samples_per_cache, config.payload_bytes)
+        Source(
+            f"cache-{index}",
+            index,
+            config.samples_per_cache,
+            config.payload_bytes,
+            config.metadata_bytes,
+        )
         for index in range(config.caches)
     ]
     paths = []
