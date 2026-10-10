@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -34,6 +34,7 @@ from dataset_rt import (
     ReaderConfig,
     WriterConfig,
 )
+from dataset_rt.benchmarks.resources import ResourceObserver, Resources, resource_snapshot
 from dataset_rt.integrations.loading import derive_seed
 
 if TYPE_CHECKING:
@@ -125,15 +126,6 @@ class Source:
             )
 
 
-class Resources(Record):
-    """Sampled process-tree maxima; summed RSS may count shared pages repeatedly."""
-
-    rss_bytes: int = 0
-    threads: int = 0
-    file_descriptors: int = 0
-    processes: int = 0
-
-
 class PassMeasurement(Record):
     """Keep first-batch latency separate from useful steady-state throughput."""
 
@@ -220,6 +212,7 @@ class Benchmark(BaseSettings):
     prefetch_size: int = Field(default=16, gt=0)
     prefetch_factor: int = Field(default=2, gt=0)
     contexts: tuple[Literal["fork", "spawn", "forkserver"], ...] = ("fork",)
+    worker_counts: tuple[int, ...] = (1, 2, 4)
     workloads: tuple[Workload, ...] = ("heavy", "cheap")
     shuffles: tuple[bool, ...] = (True, False)
     repeats: int = Field(default=5, gt=0)
@@ -235,6 +228,10 @@ class Benchmark(BaseSettings):
         total = self.samples_per_cache * self.caches
         if total <= self.batch_size or total % self.batch_size:
             raise ValueError("total fixture samples must exceed and be divisible by batch_size")
+        if not self.worker_counts or any(count < 1 for count in self.worker_counts):
+            raise ValueError("worker_counts must contain positive process counts")
+        if len(set(self.worker_counts)) != len(self.worker_counts):
+            raise ValueError("worker_counts must be unique")
         if not self.contexts or not self.workloads or not self.shuffles:
             raise ValueError("contexts, workloads, and shuffles must be nonempty")
         if len(set(self.contexts)) != len(self.contexts):
@@ -270,48 +267,6 @@ class TrialSpec(Record):
     shuffle: bool
     workload: Workload
     pair: int
-
-
-@dataclass
-class ResourceObserver:
-    """Sample resources independently of batch transport with O(processes) temporary state."""
-
-    stop: threading.Event = field(default_factory=threading.Event)
-    peak: Resources = field(default_factory=Resources)
-    failures: list[Exception] = field(default_factory=list)
-
-    def run(self) -> None:
-        """Include the consuming process, loading workers, and context service processes."""
-        process = psutil.Process()
-        try:
-            while not self.stop.is_set():
-                current = resource_snapshot(process)
-                self.peak = Resources(
-                    rss_bytes=max(self.peak.rss_bytes, current.rss_bytes),
-                    threads=max(self.peak.threads, current.threads),
-                    file_descriptors=max(self.peak.file_descriptors, current.file_descriptors),
-                    processes=max(self.peak.processes, current.processes),
-                )
-                self.stop.wait(0.05)
-        except Exception as error:
-            # Thread exceptions must invalidate the trial, not silently produce
-            # incomplete resource evidence. One failure ends observation.
-            self.failures.append(error)
-
-
-def resource_snapshot(process: psutil.Process) -> Resources:
-    """Skip children that exited between enumeration and observation."""
-    rss = threads = descriptors = count = 0
-    for member in (process, *process.children(recursive=True)):
-        try:
-            with member.oneshot():
-                rss += member.memory_info().rss
-                threads += member.num_threads()
-                descriptors += member.num_fds()
-                count += 1
-        except psutil.NoSuchProcess:
-            continue
-    return Resources(rss_bytes=rss, threads=threads, file_descriptors=descriptors, processes=count)
 
 
 def collate(outputs: list[Output]) -> tuple[Output, ...]:
@@ -462,7 +417,10 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
     if spec.case.workers == 0:
         assert cold.transform_pids == warm.transform_pids == (psutil.Process().pid,)
     else:
-        assert len(cold.transform_pids) == len(warm.transform_pids) == spec.case.workers
+        active = min(
+            spec.case.workers, config.samples_per_cache * config.caches // config.batch_size
+        )
+        assert len(cold.transform_pids) == len(warm.transform_pids) == active
         assert psutil.Process().pid not in cold.transform_pids + warm.transform_pids
         if config.persistent_workers:
             assert cold.transform_pids == warm.transform_pids
@@ -512,6 +470,7 @@ def create_fixture(config: Benchmark, root: Path) -> tuple[Path, ...]:
 
 def reader_cases(
     contexts: tuple[Literal["fork", "spawn", "forkserver"], ...],
+    worker_counts: tuple[int, ...] = (1, 2, 4),
 ) -> tuple[ReaderCase, ...]:
     """Include native and zero-worker controls in every paired benchmark round."""
     return (
@@ -520,7 +479,7 @@ def reader_cases(
         *(
             ReaderCase(mode="loader", workers=workers, context=context)
             for context in contexts
-            for workers in (1, 2, 4)
+            for workers in worker_counts
         ),
     )
 
@@ -653,6 +612,7 @@ def reader_fingerprint() -> str:
         "dataset_rt/integrations/loading.py",
         "dataset_rt/config.py",
         "dataset_rt/runtime.py",
+        "dataset_rt/reconstruction.py",
     ):
         digest.update(relative.encode())
         digest.update((root / relative).read_bytes())
@@ -664,7 +624,7 @@ def run_benchmark(config: Benchmark) -> Report:
     trials = []
     reader_revision = reader_fingerprint()
     benchmark_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    cases = reader_cases(config.contexts)
+    cases = reader_cases(config.contexts, config.worker_counts)
     with tempfile.TemporaryDirectory(prefix="dataset-rt-reader-") as directory:
         paths = create_fixture(config, Path(directory))
         for workload in config.workloads:

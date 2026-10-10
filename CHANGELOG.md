@@ -6,6 +6,11 @@ All notable changes to DatasetRT are documented here.
 
 ### Added
 
+- Add `python -m dataset_rt.run_benchmark` with automatic local rank launch,
+  external `torchrun` support, CPU/Gloo and CUDA/NCCL execution, generated or
+  existing caches, finite correctness checks, and JSON performance/resource
+  reports. Install optional dependencies with the `benchmark` extra. GPU and
+  physical multi-host execution require validation on suitable hardware.
 - Add `CachedDataset.dump_config(DirectoryPath) -> FilePath` and classmethod
   `CachedDataset.from_config(FilePath)` for JSON construction settings and active
   metadata Parquet snapshots, referencing existing cache payloads.
@@ -14,6 +19,8 @@ All notable changes to DatasetRT are documented here.
 
 ### Changed
 
+- Make the paired reader benchmark's worker counts configurable and share its
+  process-resource observer with the packaged distributed benchmark.
 - Send config paths and compact plans through process IPC instead of metadata
   snapshots. Children reconstruct seeded partitions locally. Add NumPy and
   PyArrow for columnar selection and synchronous Parquet reads.

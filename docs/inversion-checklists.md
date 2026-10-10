@@ -555,3 +555,32 @@ including formatting, lint, precise types, Pyrefly, generated docs, Clippy, and
 native rebuild. The separate slow CPU DDP matrix passed all 50 tests; the updated
 two-rank example completed its requested two steps per rank. Rust source and
 binding signatures remain unchanged by this reconstruction implementation.
+
+## Portable benchmark
+
+Invert the result: what would make a plausible timing misleading or leave a job
+running after failure?
+
+| Abstraction | Failure to prevent | Check |
+| --- | --- | --- |
+| CLI configuration | Invalid topology reaches worker startup | Validate positive counts, existing cache directories, supported contexts, and CUDA process context before launch. |
+| Local launcher | Nested ranks or orphaned jobs | Reuse external `RANK` identity; supervise only the owned local process session with a finite deadline. |
+| Rank inputs | Ranks train against different configurations | Compare configuration, metadata, and source fingerprints before training. |
+| Loader measurement | Progress hides unequal work | Check compact partition plans, actual samples, batches, and agreement across ranks. |
+| Synthetic source and transform | Incorrect reads still produce tensors | Validate fixture payload identity and ordered split output; keep payload generation streaming and collation batch-bounded. |
+| Training step | A successful reader run conceals broken collectives | Run real DDP backward steps and compare final model parameters. |
+| Replay | Repeatability is assumed | Compare a bounded four-batch prefix from a fresh seeded loader. |
+| Resource observer | Monitoring creates unbounded state | Retain maxima only; stop and join the observer after every pass. |
+| Report | Numbers imply unmeasured guarantees | Record startup, versions, code fingerprints, and memory limits; distinguish CPU verification from GPU and physical multi-host verification. |
+
+Rust cache validation, sampling, queues, and cancellation retain their existing
+checklists above. The benchmark uses those public APIs without changing native
+authority. See [remote validation](remote-validation.md) for measurement limits
+and hardware acceptance commands.
+
+Local acceptance: `just check` passed 528 Python tests and 15 Rust tests.
+The focused benchmark suite passed 19 tests; four CUDA/NCCL cases skipped on
+this CPU-only machine. A native/serial/spawn reader smoke run included eight
+loading workers. The macOS ARM64 wheel contains the benchmark modules and extra,
+and its extracted module entry point passed the CLI help check. GPU throughput
+and physical multi-host behavior remain hardware acceptance tasks.

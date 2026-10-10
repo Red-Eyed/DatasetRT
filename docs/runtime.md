@@ -326,6 +326,12 @@ DeepSpeed, multi-host, or custom-subgroup behavior.
 
 ## Reader performance measurements
 
+For portable CPU/GPU and multi-host commands, see
+[remote validation](remote-validation.md). The package entry point
+`python -m dataset_rt.run_benchmark --ranks 4 --num-workers 8 --device cuda`
+launches four local training ranks and eight loading workers per rank, validates
+finite counts and replay, and saves JSON timing/resource results.
+
 `scripts/bench_reader.py` measures `sample_transform_fn` in actual DataLoader
 worker processes. It creates immutable fixture caches automatically and compares
 direct native iteration, a zero-worker loader, and one/two/four-worker loaders.

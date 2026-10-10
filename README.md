@@ -89,6 +89,10 @@ length to the new table row count. Call `set_epoch_len` afterward to override it
 
 ## Installation
 
+For GPU and distributed loader measurements, see the
+[portable benchmark commands](docs/remote-validation.md):
+`python -m dataset_rt.run_benchmark --ranks 4 --num-workers 8 --device cuda`.
+
 DatasetRT supports Python 3.10 through 3.13.
 
 ```bash
