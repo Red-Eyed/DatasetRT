@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from multiprocessing.context import BaseContext
 
     import polars as pl
+    from pydantic import PositiveInt
     from torch.utils.data import DataLoader
 
     from dataset_rt.config import ReaderConfig
@@ -221,17 +222,19 @@ class CachedDataset:
     def to_torch_dataloader(
         self,
         *,
-        batch_size: int = 1,
+        batch_size: PositiveInt = 1,
         sample_transform_fn: Callable[[CachedSample], T],
         collate_fn: Callable[[list[T]], BatchT],
         shuffle: bool = True,
         seed: int | None = None,
+        samples_per_epoch: PositiveInt | None = None,
+        worker_partition: Literal["split", "replicate"] = "split",
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
+        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
@@ -243,39 +246,19 @@ class CachedDataset:
     def to_torch_dataloader(
         self,
         *,
-        batch_size: None,
-        sample_transform_fn: Callable[[CachedSample], T],
-        collate_fn: Callable[[T], BatchT],
-        shuffle: bool = True,
-        seed: int | None = None,
-        num_workers: int = 0,
-        drop_last: bool = False,
-        pin_memory: bool = False,
-        timeout: float = 0,
-        native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
-        worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
-    ) -> DataLoader[CachedSample | T]:
-        """Collate individual transformed samples when automatic batching is disabled."""
-        ...
-
-    @overload
-    def to_torch_dataloader(
-        self,
-        *,
-        batch_size: int = 1,
+        batch_size: PositiveInt = 1,
         sample_transform_fn: None = None,
         collate_fn: Callable[[list[CachedSample]], BatchT],
         shuffle: bool = True,
         seed: int | None = None,
+        samples_per_epoch: PositiveInt | None = None,
+        worker_partition: Literal["split", "replicate"] = "split",
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
+        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
@@ -287,39 +270,19 @@ class CachedDataset:
     def to_torch_dataloader(
         self,
         *,
-        batch_size: None,
-        sample_transform_fn: None = None,
-        collate_fn: Callable[[CachedSample], BatchT],
-        shuffle: bool = True,
-        seed: int | None = None,
-        num_workers: int = 0,
-        drop_last: bool = False,
-        pin_memory: bool = False,
-        timeout: float = 0,
-        native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
-        worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
-    ) -> DataLoader[CachedSample | T]:
-        """Collate individual cache records when automatic batching is disabled."""
-        ...
-
-    @overload
-    def to_torch_dataloader(
-        self,
-        *,
-        batch_size: int | None = 1,
+        batch_size: PositiveInt = 1,
         sample_transform_fn: Callable[[CachedSample], T] | None = None,
         collate_fn: None = None,
         shuffle: bool = True,
         seed: int | None = None,
+        samples_per_epoch: PositiveInt | None = None,
+        worker_partition: Literal["split", "replicate"] = "split",
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
+        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
@@ -332,45 +295,81 @@ class CachedDataset:
         *,
         shuffle: bool = True,
         seed: int | None = None,
-        batch_size: int | None = 1,
+        samples_per_epoch: PositiveInt | None = None,
+        worker_partition: Literal["split", "replicate"] = "split",
+        batch_size: PositiveInt = 1,
         num_workers: int = 0,
         sample_transform_fn: Callable[[CachedSample], T] | None = None,
         collate_fn: (
-            Callable[[list[T]], BatchT]
-            | Callable[[T], BatchT]
-            | Callable[[list[CachedSample]], BatchT]
-            | Callable[[CachedSample], BatchT]
-            | None
+            Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None
         ) = None,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int = 1,
-        multiprocessing_context: str | BaseContext | None = None,
+        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
     ) -> DataLoader[CachedSample | T]:
-        """Return a native PyTorch DataLoader with process-local reader setup.
+        """Build a finite PyTorch DataLoader for training or evaluation.
 
-        Shuffled sampling is infinite and weighted with replacement. An optional
-        seed reproduces newly initialized streams; iterator calls continue the
-        existing stream. Sequential validation reads a finite rank-local partition
-        of active metadata rows; seed and the source epoch-length override are
-        ignored. Capture an initialized distributed group before calling this
-        method. Batching and collation are owned by PyTorch.
+        ``samples_per_epoch`` counts samples for this DataLoader before batching,
+        not batches or optimizer steps. None inherits ``len(self)`` at loader
+        construction, including any ``set_epoch_len`` override. A positive integer
+        overrides that inherited count for this loader. Sequential readers wrap
+        around their population when necessary. Later changes to the source
+        dataset do not change an existing loader's sample budget.
+        The inherited or explicit count must be between 1 and
+        min(sys.maxsize, 2**53), keeping PyTorch's batch-length calculation exact.
 
-        Collation receives a list of transformed samples when batching, or one
-        transformed sample with batch_size=None. Without a transform it receives
-        CachedSample values. Callback annotations are optional at runtime.
+        ``len(loader)`` is exact: with batch size B and sample budget N it is
+        ceil(N / B), or floor(N / B) with ``drop_last=True``. For example, N=10
+        and B=3 yields four batches, or three when dropping the incomplete batch.
+        ``batch_size`` must be a positive integer no larger than sys.maxsize;
+        None is not supported.
+        Worker quotas consist of whole batches plus at most one incomplete batch.
+        Increasing ``num_workers`` neither multiplies N nor adds dropped tails.
+        Workers without an assigned quota yield nothing.
 
-        Construction snapshots inputs without creating a consuming native reader.
-        Setup creates it once on first consumption. Transform failures propagate.
-        With workers, internal initialization calls setup before worker_init_fn.
-        Persistent workers reuse native state and seeds. Context, prefetch, and
-        worker lifetime follow ordinary PyTorch semantics; callbacks must be
-        picklable for spawn/forkserver. Parent edits do not update worker snapshots.
-        PyTorch is optional until called; native_num_workers controls Rust threads.
+        ``worker_partition="split"`` gives workers disjoint metadata populations.
+        With ``shuffle=False``, metadata stays in its existing order and workers
+        read their populations sequentially. With ``shuffle=True``, metadata rows
+        are shuffled in the parent before splitting, then each worker samples
+        its own population by weight with replacement. Randomized splits
+        improve the weight mix but do not guarantee the global weighted frequency:
+        worker quotas follow batch counts, not partition weight sums.
+
+        ``worker_partition="replicate"`` gives every worker the full population
+        while sharing the same total sample budget. With shuffle=True,
+        each worker samples by weight with replacement; with shuffle=False, each
+        starts at the beginning, so different workers can emit duplicate samples.
+        With one consumer (num_workers=0 or 1), both modes use the full population.
+        Torch interleaves worker batches; multiworker output need not match global
+        metadata order. Weights do not affect sequential reads.
+
+        ``seed`` is accepted only with shuffle=True; otherwise ValueError avoids
+        silently ignoring it. An explicit seed reproduces fresh loaders with the
+        same worker topology. None selects randomness once during construction.
+        Repeated passes reuse native state in the main process or persistent
+        workers and continue their draw streams/cursors. Nonpersistent workers
+        reconstruct fresh readers each pass. Split populations are fixed for the
+        loader's lifetime, including when persistent workers are used.
+
+        Construction snapshots metadata columnarly without loading payloads or
+        creating a consuming native reader. Parent edits do not change snapshots.
+        Native setup happens on first consumption, or before worker_init_fn in
+        each worker. num_workers controls Torch processes; native_num_workers
+        controls Rust reader threads per consuming process. Queues remain bounded
+        by ReaderConfig.prefetch_size. Callbacks must be picklable for spawn and
+        forkserver; errors propagate rather than silently replacing samples.
+
+        Collation always receives a list, including when batch_size=1. The list
+        contains transformed samples if sample_transform_fn is supplied, otherwise
+        CachedSample values. multiprocessing_context selects how workers start:
+        "fork", "spawn", "forkserver", or a multiprocessing BaseContext object.
+        None uses PyTorch's platform default. Pinning, timeout, prefetch, and worker
+        lifetime follow ordinary PyTorch semantics. PyTorch is optional until called.
         """
         from dataset_rt.integrations.loader import make_dataloader
 
@@ -378,6 +377,8 @@ class CachedDataset:
             self,
             shuffle=shuffle,
             seed=seed,
+            samples_per_epoch=samples_per_epoch,
+            worker_partition=worker_partition,
             batch_size=batch_size,
             num_workers=num_workers,
             sample_transform_fn=sample_transform_fn,

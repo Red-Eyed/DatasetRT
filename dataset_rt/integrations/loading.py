@@ -100,6 +100,27 @@ def worker_rows(
     return RowSpan(rank_span.offset + local.offset, local.length)
 
 
+def worker_budgets(
+    samples: int, *, workers: int, populations: int, batch_size: int
+) -> tuple[int, ...]:
+    """Assign whole batches and at most one tail without budgeting an empty population.
+
+    Fewer nonempty populations than workers leaves idle workers. Keeping one tail makes
+    Torch's ordinary length calculation exact for either drop_last setting.
+    """
+    if samples == 0:
+        return (0,) * workers
+    if populations == 0:
+        raise ValueError("samples_per_epoch requires a nonempty population")
+    batches, tail = divmod(samples, batch_size)
+    active = min(workers, populations, max(1, batches))
+    budgets = [
+        partition_rows(batches, parts=active, part_id=i).length * batch_size for i in range(active)
+    ]
+    budgets[-1] += tail
+    return tuple(budgets) + (0,) * (workers - active)
+
+
 def capture_replica() -> ReplicaIdentity:
     """Capture initialized-group rank/size in the training process before workers.
 

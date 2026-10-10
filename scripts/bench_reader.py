@@ -416,17 +416,21 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
     transform = Transform(config.transform_rounds if spec.workload == "heavy" else 0, cache_ids)
     loader: Iterable[tuple[Output, ...]]
     if spec.case.mode == "loader":
+        context = spec.case.context
+        worker_context = None if context == "serial" else context
         loader = cast(
             "Iterable[tuple[Output, ...]]",
             dataset.to_torch_dataloader(
                 shuffle=spec.shuffle,
-                seed=config.seed,
+                seed=config.seed if spec.shuffle else None,
+                samples_per_epoch=config.samples_per_cache * config.caches,
+                worker_partition="replicate" if spec.shuffle else "split",
                 batch_size=config.batch_size,
                 num_workers=spec.case.workers,
                 sample_transform_fn=transform,
                 collate_fn=collate,
                 native_num_workers=config.native_workers,
-                multiprocessing_context=spec.case.context if spec.case.workers else None,
+                multiprocessing_context=worker_context if spec.case.workers else None,
                 prefetch_factor=config.prefetch_factor if spec.case.workers else None,
                 persistent_workers=config.persistent_workers and spec.case.workers > 0,
             ),

@@ -25,7 +25,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import get_worker_info
 
 from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig, WriterConfig
-from dataset_rt.integrations.loader import LocalReader, ReaderAdapter, ValidationAdapter
+from dataset_rt.integrations.loader import LocalReader, ReaderAdapter
 from dataset_rt.integrations.loading import ReplicaIdentity, derive_seed
 from dataset_rt.metadata import decode_metadata
 from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
@@ -235,7 +235,9 @@ def make_loader(
         "torch.utils.data.DataLoader[Batch]",
         dataset.to_torch_dataloader(
             shuffle=case.shuffle,
-            seed=7,
+            seed=7 if case.shuffle else None,
+            samples_per_epoch=512 if case.shuffle else None,
+            worker_partition="replicate" if case.shuffle else "split",
             batch_size=4,
             num_workers=case.workers,
             multiprocessing_context=case.context if case.workers else None,
@@ -297,7 +299,6 @@ def rank_main(
         assert loader.dataset.replica == ReplicaIdentity(rank=rank, world_size=case.ranks)
         local_length = -1
         if not case.shuffle:
-            assert isinstance(loader.dataset, ValidationAdapter)
             local_length = len(loader.dataset)
         positions = partition_positions(loader.dataset.partitions)
         observations, steps = run_training(model, loader, case.shuffle)
@@ -432,8 +433,6 @@ def verify_report(report: RankReport, case: Case) -> None:
             assert 0.30 < counts[0] / len(observed) < 0.60
             continue
         rows = report.positions[worker]
-        size, remainder = divmod(report.local_length, max(1, case.workers))
-        assert len(rows) == size + int(worker < remainder)
         assert [item.sample for item in observed] == [row % 12 for row in rows]
 
 

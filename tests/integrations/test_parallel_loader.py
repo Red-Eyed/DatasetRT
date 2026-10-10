@@ -21,6 +21,7 @@ from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConf
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations.loader import EmptyPartition, LocalReader, PendingReader, ReaderAdapter
 from dataset_rt.integrations.loading import derive_seed
+from dataset_rt.metadata import decode_metadata
 from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
 
 if TYPE_CHECKING:
@@ -47,6 +48,11 @@ Case = Literal[
     "batch-drop",
     "many",
     "native-error",
+    "split-shuffle",
+    "replicate-sequential",
+    "quota-short",
+    "quota-long",
+    "tiny-replicate",
 ]
 INIT_CALLS = 0
 FIRST_ID = 2_851_758_661_582_890_383
@@ -140,9 +146,9 @@ def observe(sample: CachedSample) -> Observation:
     )
 
 
-def identity(value: Observation) -> Observation:
-    """Keep typed observations intact through unbatched Torch collation."""
-    return value
+def identity(values: list[Observation]) -> Observation:
+    """Expose one observation while honoring the mandatory list collation boundary."""
+    return values[0]
 
 
 def callback_error(worker_id: int) -> None:
@@ -172,7 +178,7 @@ def batch_identity(values: list[Observation]) -> list[Observation]:
 
 
 def run_batch_case(recipe: ReaderRecipe, context: Context, drop_last: bool) -> None:
-    """Demonstrate real worker tails differing from Torch's estimated batch count."""
+    """Whole-batch worker quotas keep Torch length exact for tails and dropped tails."""
     runtime = DatasetRuntime(num_workers=1)
     dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
     match recipe.metadata:
@@ -194,8 +200,8 @@ def run_batch_case(recipe: ReaderRecipe, context: Context, drop_last: bool) -> N
     assert len(loader) == 3
     assert loader.prefetch_factor == 2
     batches = list(loader)
-    assert len(batches) == (2 if drop_last else 4)
-    assert sum(len(batch) for batch in batches) == (4 if drop_last else 8)
+    assert len(batches) == 3
+    assert sum(len(batch) for batch in batches) == (6 if drop_last else 8)
 
 
 def run_many_case(recipe: ReaderRecipe, context: Context) -> None:
@@ -208,7 +214,7 @@ def run_many_case(recipe: ReaderRecipe, context: Context) -> None:
     dataset.update_metadata(pl.concat([dataset.get_metadata()] * 3334).slice(0, 10000))
     loader = dataset.to_torch_dataloader(
         shuffle=False,
-        batch_size=None,
+        batch_size=1,
         num_workers=2,
         multiprocessing_context=context,
         timeout=15,
@@ -226,6 +232,60 @@ def run_many_case(recipe: ReaderRecipe, context: Context) -> None:
     assert counts == [5000, 5000]
 
 
+def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
+    """Exercise finite quotas and population policies in real consuming workers."""
+    runtime = DatasetRuntime(num_workers=1)
+    dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
+    assert isinstance(recipe.metadata, MetadataSnapshot)
+    dataset._restore_metadata(recipe.metadata)
+    if case == "tiny-replicate":
+        dataset.update_metadata(dataset.get_metadata().head(1))
+    shuffled = case == "split-shuffle"
+    mode: Literal["split", "replicate"] = (
+        "replicate" if case in ("replicate-sequential", "tiny-replicate") else "split"
+    )
+    samples = 1 if case == "quota-short" else (600 if shuffled else 17)
+    batch_size = 1 if case in ("quota-short", "tiny-replicate") else 3
+    loader = dataset.to_torch_dataloader(
+        shuffle=shuffled,
+        seed=7 if shuffled else None,
+        worker_partition=mode,
+        samples_per_epoch=samples,
+        batch_size=batch_size,
+        num_workers=4,
+        multiprocessing_context=context,
+        persistent_workers=True,
+        sample_transform_fn=observe,
+        collate_fn=batch_identity,
+    )
+    adapter = loader.dataset
+    assert isinstance(adapter, ReaderAdapter)
+    populations = []
+    for partition in adapter.partitions:
+        assert isinstance(partition.metadata, MetadataSnapshot)
+        frame = decode_metadata(partition.metadata.ipc)
+        populations.append(tuple(zip(frame["cache_id"], frame["sample_id"], strict=True)))
+    batches = list(loader)
+    assert len(batches) == len(loader)
+    rows = [row for batch in batches for row in batch]
+    assert len(rows) == samples
+    for worker, partition in enumerate(adapter.partitions):
+        emitted = [row for row in rows if row.worker == worker]
+        assert len(emitted) == partition.sample_count
+        actual = [(row.cache, row.sample) for row in emitted]
+        if shuffled:
+            assert set(actual) <= set(populations[worker])
+        else:
+            population = populations[worker]
+            assert actual == [population[i % len(population)] for i in range(len(emitted))]
+    if mode == "replicate":
+        assert all(population == populations[0] for population in populations)
+    if case == "tiny-replicate":
+        assert len({row.worker for row in rows}) == 4
+    del loader
+    gc.collect()
+
+
 def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
     """Warm the real parent before launching each isolated DataLoader scenario."""
     if case in ("batch-tail", "batch-drop"):
@@ -233,6 +293,15 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         return
     if case == "many":
         run_many_case(recipe, context)
+        return
+    if case in (
+        "split-shuffle",
+        "replicate-sequential",
+        "quota-short",
+        "quota-long",
+        "tiny-replicate",
+    ):
+        run_partition_case(recipe, context, case)
         return
     runtime = DatasetRuntime(num_workers=1)
     dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
@@ -246,10 +315,27 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         dataset.update_metadata(dataset.get_metadata().slice(0, 1))
     if case == "native-error":
         (recipe.cache_paths[0] / "manifest.json").unlink()
+    if case == "inherited":
+        loader = dataset.to_torch_dataloader(
+            seed=7, batch_size=1, sample_transform_fn=observe, collate_fn=identity
+        )
+        adapter = loader.dataset
+        assert isinstance(adapter, ReaderAdapter)
+        adapter.setup()
+        child = mp.get_context("fork").Process(target=reject_inherited, args=(adapter,))
+        child.start()
+        child.join(15)
+        try:
+            assert child.exitcode == 0
+        finally:
+            if child.is_alive():
+                child.kill()
+                child.join(5)
+        return
     workers = 4 if case == "empty" else 2
     shuffle = case not in ("validation", "persistent-validation", "empty")
     persistent = case in ("persistent-validation", "persistent-shuffle", "random-persistent")
-    seed = None if case == "random-persistent" else 7
+    seed = None if case == "random-persistent" or not shuffle else 7
     transform = observe
     match case:
         case "transform-error":
@@ -263,7 +349,9 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
     loader = dataset.to_torch_dataloader(
         shuffle=shuffle,
         seed=seed,
-        batch_size=None,
+        worker_partition="replicate" if shuffle else "split",
+        samples_per_epoch=(1600 if case == "weighted" else 40) if shuffle else None,
+        batch_size=1,
         num_workers=workers,
         multiprocessing_context=mp.get_context(context) if case == "validation" else context,
         persistent_workers=persistent,
@@ -308,18 +396,6 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
             for child in mp.active_children():
                 child.join(5)
                 assert not child.is_alive(), "worker survived iterator collection"
-        return
-    if case == "inherited":
-        adapter.setup()
-        child = mp.get_context("fork").Process(target=reject_inherited, args=(adapter,))
-        child.start()
-        child.join(15)
-        try:
-            assert child.exitcode == 0
-        finally:
-            if child.is_alive():
-                child.kill()
-                child.join(5)
         return
     if case == "partial":
         iterator = iter(loader)
@@ -377,7 +453,8 @@ def verify_shuffled(
     """Check real seeds and full-population weighted frequencies without short-prefix assumptions."""
     for worker in range(workers):
         rows = [row for row in observations if row.worker == worker]
-        assert rows and all(row.window == 3 for row in rows)
+        assert rows and len({row.window for row in rows}) == 1
+        assert rows[0].window == (800 if weighted else 20)
         assert {(row.cache, row.sample) for row in rows} <= {(FIRST_ID, 7), (SECOND_ID, 2)}
         if weighted:
             assert {(row.cache, row.sample) for row in rows} == {(FIRST_ID, 7), (SECOND_ID, 2)}
@@ -420,6 +497,11 @@ def reject_inherited(adapter: ReaderAdapter[Observation]) -> None:
         "batch-drop",
         "many",
         "native-error",
+        "split-shuffle",
+        "replicate-sequential",
+        "quota-short",
+        "quota-long",
+        "tiny-replicate",
     ],
 )
 def test_real_parallel_loader(recipe: ReaderRecipe, context: Context, case: Case) -> None:
@@ -505,7 +587,7 @@ def run_interrupt_case(
     assert next(iter(dataset)).data
     loader = dataset.to_torch_dataloader(
         seed=7,
-        batch_size=None,
+        batch_size=1,
         num_workers=2,
         multiprocessing_context=context,
         persistent_workers=persistent,

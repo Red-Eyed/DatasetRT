@@ -151,43 +151,101 @@ Metadata updates retain the exact IPC only after Rust accepts it. Failed updates
 
 Reconstruction restores accepted IPC directly into Rust. It must not decode/re-encode snapshots through Polars in a forked child: inherited Polars thread-pool state can block even when the child creates a fresh DatasetRT runtime. Prepare sequential columnar row slices in the training process before worker launch and select them using the actual worker identity; empty slices yield nothing without native construction. Original cache IDs and intentional duplicate metadata rows remain intact.
 
-The pure contiguous-span helper divides rows across ranks and then local workers without batch-size input, padding, or added duplicates. Zero DataLoader workers means one local consumer. For a fixed base seed, reader-seed derivation version 1 packs u32 rank/worker IDs and uses a seed-keyed SplitMix64 permutation; distinct rank/worker pairs cannot collide. The seed is unused for sequential reading. Omitted shuffled seeds use fresh OS randomness once during process-local setup. Rank/group-size capture runs in the training process, with single-rank fallback when no group is initialized; loading workers do not query process groups.
+The pure contiguous-span helper divides rows across ranks and then local workers without batch-size input, padding, or added duplicates. Zero DataLoader workers means one local consumer. For a fixed base seed, reader-seed derivation version 1 packs u32 rank/worker IDs and uses a seed-keyed SplitMix64 permutation; distinct rank/worker pairs cannot collide. The seed is unused for sequential reading. The loader resolves omitted shuffled seeds once during construction and rejects an explicit seed for sequential reading. Rank/group-size capture runs in the training process, with single-rank fallback when no group is initialized; loading workers do not query process groups.
 
 ## PyTorch DataLoader helper
 
-`CachedDataset.to_torch_dataloader()` returns a standard PyTorch DataLoader supporting zero-worker loading and caller-selected fork/spawn/forkserver contexts. The legacy `to_torch_iterable_dataset()` retains its original behavior.
+`CachedDataset.to_torch_dataloader()` returns a finite PyTorch DataLoader for
+training or evaluation. The legacy `to_torch_iterable_dataset()` is unchanged.
+Neither shuffling nor worker partitioning implies a validation mode.
 
-The internal adapter's idempotent `setup()` creates one consuming runtime/dataset, records its PID, and reuses it. With workers, internal `worker_init_fn` runs setup before the caller's initialization callback; with zero workers, iteration supplies the fallback. Construction and length queries do not create a consuming reader. Empty validation partitions complete setup without a native reader. Native state never enters serialized adapter state; a serialized initialized adapter reconstructs an independent stream. An initialized adapter inherited into a different PID cannot reuse its native objects.
+`samples_per_epoch` is a **sample count per loader, before batching**. `None`
+inherits `len(dataset)` at construction, including any `set_epoch_len()` override.
+A positive integer overrides that inherited count for this loader. Sequential
+reads wrap when their population is exhausted. Later changes to the source
+dataset do not change the loader's snapshotted sample budget.
 
-With `shuffle=True` (the helper default), reading is infinite weighted sampling with replacement over the full active population. Explicit seeds reproduce newly initialized streams; omitted seeds draw OS randomness once at setup. Repeated iterator calls continue the retained draw iterator, including unfinished native windows, without resetting the seed. Source `set_epoch_len()` controls native window size, not a training sample quota; an infinite loader has no finite length. Retaining a paused loader retains its bounded native prefetch state.
+For sample budget N and batch size B, `len(loader)` is `ceil(N / B)`, or
+`floor(N / B)` with `drop_last=True`. `batch_size` must be a positive integer;
+`None` is rejected. For example,
+10 samples with batch size 3 yields four batches, or three if dropping the last
+batch. Workers receive whole-batch quotas and at most one tail across the loader,
+so the reported length matches actual iteration regardless of worker count.
+Workers with no quota yield nothing. The total budget is shared, never multiplied
+by the number of workers.
 
-With `shuffle=False`, validation traverses each rank's contiguous active-row partition, split among actual local workers, once per iterator. It uses active row count, ignoring source epoch-length overrides and seed, and never pads partitions. Subsequent passes reuse the same native dataset. Preparation decodes once and slices columnarly in the training process in O((active rows + workers) × metadata columns) work, including per-slice schema encoding; original duplicates, weights, extras, and physical IDs remain intact. Workers select prepared slices using their actual IDs and restore IPC directly in Rust. They never enter inherited Polars pools or query distributed groups. Empty partitions create no native reader. Shuffled construction instead retains only O(cache paths) inputs plus any existing metadata snapshot. Native startup and queues retain their existing costs and bounds.
+| Worker partition | `shuffle=False` | `shuffle=True` |
+| --- | --- | --- |
+| `"split"` (default) | Preserve metadata order, split into disjoint worker populations, read each sequentially | Shuffle metadata in the parent, split it, then sample each worker population by weight with replacement |
+| `"replicate"` | Give every worker the full population; workers start at its beginning, so outputs can overlap | Give every worker the full population and independently sample by weight with replacement |
 
-Sequential adapters retain all prepared rank-local IPC slices for worker selection. Their total parent size is O(rank metadata bytes + workers × schema bytes); spawn/forkserver copies that set to each worker, so aggregate IPC storage can reach O(workers × rank metadata bytes + workers² × schema bytes), in addition to worker-local native metadata and replicated cache indexes. The original full-table override is excluded once slices are prepared. Fork may share immutable bytes through copy-on-write. This tradeoff avoids worker-side Polars and a custom metadata transport; account for it when measuring process memory.
+Weights do not affect sequential reads. Randomizing split populations improves
+the weight mix but only approximates the global weighted distribution: quotas
+follow batch counts, not partition weight sums. Use replicate mode when every
+worker must sample the full distribution. With one consumer, both modes use the
+full population. Torch interleaves worker batches, so multiple
+workers need not emit samples in global metadata order.
 
-`multiprocessing_context`, `prefetch_factor`, `timeout`, and `persistent_workers` follow PyTorch's constructor and lifecycle rules. The default context is PyTorch's platform default; no automatic context switch is made. Persistent workers keep native readers, seed, and sampling state. Non-persistent workers reconstruct once in each new process. Recipe edits in the training process do not propagate to workers; construct a new loader to change snapshots or seeds. Callbacks must be importable/picklable under spawn/forkserver, and application process-launch code must use the usual main guard.
+`seed` is accepted only with `shuffle=True`; otherwise construction raises
+`ValueError`. An explicit seed reproduces fresh loaders with the same topology.
+An omitted seed selects randomness once during construction. Split populations
+are fixed for the loader's lifetime. Repeated passes continue reader streams and
+cursors with zero workers or persistent workers. Nonpersistent workers rebuild
+fresh readers each pass and replay explicit seeds. Reconstruct the loader to
+change metadata, populations, or seeds.
 
-PyTorch batches each worker's iterable independently, so `len(loader)` can differ from actual batch count for incomplete worker tails. Dropping a partial iterator or resetting persistent workers can discard already-prefetched outputs according to ordinary PyTorch behavior; native streams continue without seed reset, but concatenated consumer prefixes need not be gap-free. No custom cleanup, transport, sampler, or equal-step policy is introduced. Worker initialization, transform, native-read failures, worker death, and timeouts propagate through PyTorch.
+Python prepares metadata columnarly in the parent in O((rows + workers) × columns)
+work, without reading payloads or expanding rows into Python objects. Rust
+validates each restored snapshot and owns weighted sampling and bounded reads.
+Preparation does not create a consuming native reader. Each consumer creates its
+reader once during setup; workers run setup before the caller's `worker_init_fn`.
+Empty quotas create no native reader. Initialized readers are PID-bound and
+excluded from serialization.
 
-PyTorch owns `batch_size`, collation, `drop_last`, and pinning. `sample_transform_fn` receives a `CachedSample` after native delivery and returns a domain value; exceptions propagate. Without a transform or collator, Torch's ordinary conversion/collation rules apply to the sample fields. `native_num_workers` controls Rust read threads, separately from DataLoader workers.
+Split adapters retain all prepared IPC slices. Their total parent size is
+O(metadata bytes + workers × schema bytes). Spawn/forkserver copies these
+inputs into each worker; fork can share immutable bytes through copy-on-write.
+Replicate recipes share one IPC value in each process, though native metadata
+and cache indexes remain process-local. Account for these costs when sizing
+workers. Native payload queues remain bounded by `ReaderConfig.prefetch_size`.
+
+`num_workers` controls Torch processes; `native_num_workers` controls Rust reader
+threads per consuming process. Context, pinning, prefetch, timeout, worker
+lifetime, and partial-iterator cancellation follow PyTorch semantics. Dropping
+or resetting a partial multiprocess iterator can discard prefetched outputs;
+consumer prefixes need not be gap-free. Callbacks must be picklable for spawn
+and forkserver. Initialization, transform, native-read, worker-death, and timeout
+failures propagate.
+
+`sample_transform_fn` receives a native `CachedSample`. Collation always receives
+a list, even with `batch_size=1`: transformed samples if a transform is supplied,
+otherwise `CachedSample` values. `multiprocessing_context` selects how workers
+start: `"fork"`, `"spawn"`, `"forkserver"`, or a `multiprocessing.BaseContext`
+object. `None` uses PyTorch's platform default.
 
 ```python
+# Finite weighted training: 32,000 samples / 32 = 1,000 batches per epoch.
 loader = dataset.to_torch_dataloader(
-    shuffle=True, seed=123, batch_size=32,
+    shuffle=True, seed=123, samples_per_epoch=32_000,
+    worker_partition="replicate", batch_size=32,
     num_workers=4, multiprocessing_context="forkserver", persistent_workers=True,
     sample_transform_fn=decode_sample,
 )
-for step, batch in enumerate(loader):
+for batch in loader:
     train_step(batch)
-    if step + 1 == training_steps:
-        break
 
+# Sequential evaluation using the dataset's current epoch sample count.
 validation_loader = dataset.to_torch_dataloader(
-    shuffle=False, batch_size=32, sample_transform_fn=decode_sample,
+    shuffle=False, worker_partition="split", batch_size=32,
+    sample_transform_fn=decode_sample,
 )
 for batch in validation_loader:
     validate_batch(batch)
 ```
+
+Review failure conditions with the separate
+[inversion checklists](inversion-checklists.md), covering the Python adapters,
+native reader/writer pipelines, storage, sampling, and shared runtime primitives.
 
 ## CPU DDP composition on macOS
 
@@ -198,21 +256,18 @@ and create their own native reader during worker setup. Rank launch and loader
 worker launch are separate choices: the acceptance tests spawn ranks, then use
 the caller-selected fork, spawn, or forkserver context for loading workers.
 
-For shuffled training, all ranks/workers retain the full active weighted
-population. Pass the same explicit base seed to each rank; the helper derives
-distinct native seeds from the base seed, captured rank, and actual worker ID.
-The application chooses a common finite training step count for the infinite
-stream. Reconstructing a loader replays its explicit seeds; persistent workers
-instead retain their reader state. Metadata changes require a new loader.
+For shuffled training, ranks retain the full active weighted population.
+Pass the same explicit base seed to each rank; native seeds are derived from the
+base seed, captured rank, and actual worker ID. The finite sample budget is set
+with `samples_per_epoch`. Fresh loaders replay explicit seeds; persistent workers
+continue their reader state. Metadata changes require a new loader.
 
-For sequential validation, contiguous active-row positions are split across
-ranks and then local workers, without padding. Intentional duplicate physical
-identities remain separate positions. Rank-local lengths and batch counts can
-differ, and a rank can have no samples. Validation code must handle that when
-scheduling collectives and reducing metrics; the loader does not equalize steps.
-The finite training demonstration uses DDP's `join()` context to handle uneven
-forward/backward iterations. `join()` does not automatically cover arbitrary
-application collectives or metric reduction.
+For sequential reads, contiguous active-row positions are split across ranks
+without padding. Intentional duplicate identities remain separate positions.
+Local lengths and batch counts can differ, and a rank can have no samples.
+Applications must account for this when scheduling collectives and reducing
+metrics. DDP's `join()` context does not cover arbitrary application collectives
+or metric reduction.
 
 The self-contained example writes a small temporary fixture cache, initializes
 real CPU Gloo ranks, and performs forward/backward/optimizer steps. No manual

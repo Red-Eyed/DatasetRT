@@ -6,7 +6,6 @@ import json
 import os
 import sys
 from datetime import timedelta
-from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal
@@ -100,7 +99,9 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
         )
         loader = dataset.to_torch_dataloader(
             shuffle=options.shuffle,
-            seed=7,
+            seed=7 if options.shuffle else None,
+            samples_per_epoch=options.steps * 4,
+            worker_partition="replicate" if options.shuffle else "split",
             batch_size=4,
             num_workers=options.workers,
             multiprocessing_context=options.worker_context if options.workers else None,
@@ -110,10 +111,9 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
         model = DistributedDataParallel(torch.nn.Linear(1, 1))
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         completed = 0
-        # Finite validation partitions may yield different step counts. The caller
-        # supplies join; the loader neither pads samples nor coordinates collectives.
+        # The caller owns collective coordination; the loader only budgets samples.
         with model.join():
-            for batch in islice(loader, options.steps):
+            for batch in loader:
                 if not isinstance(batch, torch.Tensor):
                     raise TypeError("expected the transform's collated tensor")
                 optimizer.zero_grad()

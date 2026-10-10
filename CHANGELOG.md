@@ -2,6 +2,36 @@
 
 All notable changes to DatasetRT are documented here.
 
+## [Unreleased]
+
+### Backwards Incompatible Changes
+
+- Reject invalid DataLoader worker combinations before metadata preparation,
+  including zero-worker persistence, contexts, and prefetch, nonfinite timeouts,
+  and nonboolean flags. Bound inherited and explicit sample budgets by
+  `min(sys.maxsize, 2**53)` to keep Torch's reported batch counts exact, and
+  require batch sizes to fit `sys.maxsize`.
+- Make `CachedDataset.to_torch_dataloader()` finite in both shuffle modes. Set
+  `samples_per_epoch` to the desired sample count per loader; `None` inherits
+  `len(dataset)`, including source `set_epoch_len()` overrides, at construction.
+  Replace externally limited infinite loops with iteration over the finite loader.
+- Add `worker_partition="split"` (default) and `"replicate"`. Split mode gives
+  workers disjoint populations, shuffled in the parent only when
+  `shuffle=True`; replicate mode gives each worker the full population.
+  Both share one sample budget per loader. Use `"replicate"` for full-population
+  weighted draws in every worker. Randomized split populations approximate the
+  global weight distribution because quotas do not follow partition weight sums.
+- Reject an explicit `seed` with `shuffle=False` instead of silently ignoring it.
+  Omit the seed for sequential reading.
+- Require `batch_size` to be a positive integer and reject `None`. Collation now
+  always receives a list; use `batch_size=1` for individual-sample processing.
+
+### Fixed
+
+- Make `len(loader)` match the number of batches emitted for every worker count
+  by assigning whole-batch worker quotas and at most one incomplete tail per loader.
+  `drop_last=True` therefore drops at most one tail instead of one per worker.
+
 ## 0.4.0rc2 - 2026-10-08
 
 This release candidate adds process-local PyTorch loading to the 0.3.2 API.
