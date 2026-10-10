@@ -30,7 +30,11 @@ Python owns:
 - Metadata authoring before it crosses into Rust.
 - Optional framework adapters.
 
-Python never owns cache state, iterator state, queues, worker pools, sampler state, scheduler state, or weight vectors.
+Python never owns authoritative cache state, native iterator state, sample queues,
+sampling state, or weight vectors. Optional source-writing processes are supervised
+by a bounded Python harness; each process owns a fresh Rust runtime. Python handles
+only source jobs and final outcomes, assigning each source to one worker; Rust
+retains cache validation, sample backpressure, and publication.
 
 ## Foundational Data Contract
 

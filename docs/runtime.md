@@ -2,7 +2,7 @@
 
 DatasetRT exposes a synchronous Python API backed by native Rust execution.
 
-No async runtime is used. There is no Tokio, no `async`/`await`, no Python threads, and no Python queues. `DatasetRuntime(num_workers=...)` creates one fixed Rust worker pool, and every operation called through that object reuses those threads for cache loading, reading, and writer jobs. Hardware parallelism is never selected implicitly. Creating another runtime creates another independent, explicitly sized pool.
+No async runtime is used. There is no Tokio or `async`/`await`. `DatasetRuntime(num_workers=...)` creates one fixed Rust worker pool, and native operations reuse those threads for cache loading, reading, and writer jobs. Optional spawned source writing uses bounded Python control mailboxes; sample payloads and native prefetch stay inside each writing process. Hardware parallelism is never selected implicitly. Creating another runtime creates another independent, explicitly sized pool.
 
 ## Reader Pipeline
 
@@ -59,6 +59,75 @@ Writer operation settings:
 If Python iteration is faster than writing, Rust keeps at most `min(num_workers, prefetch_size)` writer jobs active and then commits a completed job before pulling more input. For multi-source writes, the bounded window can span source boundaries while ordered commit keeps manifests and result ordering deterministic.
 
 Each operation's result queue has the same capacity as its active-job limit. Cache commit and publish remain sequential for deterministic manifests and result ordering.
+
+### Optional source processes
+
+`WriterConfig(num_processes=0)` preserves native writing in the caller. Positive
+values spawn up to that many children, limited by source count. Each child creates
+one native runtime using the caller's `num_workers` and reuses it across jobs.
+Independent sources are assigned dynamically, so a slow first source does not
+block completion collection or later jobs. The returned list remains input-ordered.
+
+```python
+if __name__ == "__main__":
+    runtime = DatasetRuntime(num_workers=1)
+    results = runtime.write_cache(
+        sources,
+        cache_root,
+        writer_config=WriterConfig(num_processes=4, process_timeout_seconds=3600),
+    )
+```
+
+Source descriptors must be picklable and importable under spawn. Keep descriptors
+small and open files/connections in `__iter__`; serial sources need not be
+picklable. Each child receives at most one active source through a capacity-one
+mailbox. Python retains O(processes) serialized descriptions and O(sources)
+ordered outcomes, with no per-sample transport or metadata expansion. Per-child
+native memory remains bounded by the existing writer window; aggregate native
+threads and buffers scale with the number of children, in addition to the caller's
+runtime. Payload-size bounds still belong to the application.
+
+Each source has one owning worker and one destination. Preflight rejects duplicate,
+case-folded, and Unicode-normalized names before any worker starts, including on
+case-sensitive filesystems. No destination locks or lock files are used. Callers
+must exclude concurrent write invocations targeting the same destinations.
+Parallel writing reserves the `tmp` source name, refuses existing `tmp/<source>`
+paths, and removes only temporary paths owned by the operation after the associated
+child stops. Published caches remain untouched. Hard parent termination can leave
+temporary caches requiring inspection before another parallel attempt.
+
+Cache roots and their `tmp` directories may be symlinks. Cleanup tracks the
+resolved per-source temporary path and leaves the symlink and shared target
+directory intact. Keep these paths stable during an active write. Publication
+still uses native rename, so temporary and published caches must be on the same
+filesystem.
+
+Serialization and ordinary source failures produce `CacheWriteError` values and
+allow healthy jobs to continue. Worker death, transport failure, or the configured
+`process_timeout_seconds` stops the pool and reports unfinished jobs as errors;
+completed outcomes are retained. No source is retried automatically. A cache
+may have been published before its worker died delivering the outcome; inspect
+or reuse that complete cache rather than assuming an error implies no side effects.
+The timeout is one hour by default, applies separately to startup and each
+dispatched source (including child deserialization), and excludes source-name
+access and parent-side pickle hooks. Those caller-executed hooks must not block.
+Shutdown uses bounded joins with termination and kill escalation; source-created
+subprocesses are outside the writer's ownership. KeyboardInterrupt/SystemExit
+propagate after cleanup. Child sample bars are disabled; `show_progress` renders
+completed source counts in the parent. Enabled profiling uses serial execution.
+
+Measure useful preparation work and cheap controls with:
+
+```bash
+uv run --python 3.11 --extra dev scripts/bench_writer.py --output plan/evidence/writer-spawn.json
+```
+
+The benchmark rotates serial/one/two/four-process cases over five paired runs,
+warms each case, verifies physical payload headers and checksums after timing,
+and records first source/sample latency and sampled process-tree RSS/threads.
+Write time includes pool startup and shutdown. RSS may double-count shared pages;
+cheap workloads expose process overhead. T10 measurements are descriptive; final
+combined writer/reader acceptance belongs to T12.
 
 ## Backpressure
 

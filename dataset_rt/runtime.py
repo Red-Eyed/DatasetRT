@@ -115,15 +115,40 @@ class DatasetRuntime:
         Returns one `CacheWriteSuccess` or `CacheWriteError` per source in input
         order. Per-source failures are reported as values instead of exceptions
         when Rust can handle them cleanly.
+
+        `writer_config.num_processes=0` keeps this native serial path. A positive
+        count spawns source-writing processes, each with `self.num_workers`
+        native threads. Sources must then be picklable and importable. Jobs
+        and outcomes cross processes; sample payloads do not. Worker death or
+        `process_timeout_seconds` stops the pool without retrying unfinished
+        sources. Profiling keeps serial execution even with a positive count.
+
+        Each source has one owning worker; callers must exclude concurrent write
+        invocations targeting the same destinations. Parallel mode refuses
+        pre-existing temporary cache paths and reserves the `tmp` source name.
+        `show_progress` reports completed source count from the parent; child
+        sample progress is disabled. Use a main guard when launching processes.
         """
-        results = _write_cache(
-            self._inner,
-            sources,
-            str(path),
-            writer_config,
-            False,
-        )
-        return [_cache_write_result(result) for result in results]
+        return self._write_sources(sources, Path(path), writer_config, reuse_existing=False)
+
+    def _write_sources(
+        self,
+        sources: CacheSource | list[CacheSource],
+        path: Path,
+        config: WriterConfig,
+        *,
+        reuse_existing: bool,
+    ) -> list[CacheWriteResult]:
+        """Select optional process supervision without changing native serial writing."""
+        match config:
+            case WriterConfig(num_processes=count) if count > 0 and not config.profiler.enabled:
+                from dataset_rt.writer import write_parallel
+
+                return write_parallel(sources, path, config, self.num_workers, reuse_existing)
+        return [
+            _cache_write_result(result)
+            for result in _write_cache(self._inner, sources, str(path), config, reuse_existing)
+        ]
 
     def cached_dataset(
         self,
@@ -161,17 +186,12 @@ class DatasetRuntime:
         returns `CacheSourcesDatasetError` when every source failed or no source
         was provided. The result always includes per-source write outcomes so
         callers can audit partial success.
+
+        Parallel execution follows `write_cache`'s process, timeout, ownership,
+        and serialization contract. Successful paths still define cache IDs in
+        input source order, regardless of worker completion order.
         """
-        results = [
-            _cache_write_result(result)
-            for result in _write_cache(
-                self._inner,
-                sources,
-                str(path),
-                writer_config,
-                True,
-            )
-        ]
+        results = self._write_sources(sources, Path(path), writer_config, reuse_existing=True)
         cache_paths = _successful_cache_paths(results)
         if not cache_paths:
             return _cache_sources_dataset_error(results)

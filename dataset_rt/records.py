@@ -184,7 +184,8 @@ class CacheSource(Protocol):
     def __iter__(self) -> Iterator[CacheInput]:
         """Yield cache inputs synchronously.
 
-        DatasetRT does not use Python threads or queues. Rust pulls from this
-        iterator and owns bounded prefetching, worker threads, and commits.
+        Rust pulls from this iterator and owns bounded sample prefetching,
+        worker threads, and commits. Optional spawned source writers execute
+        this iterator in a child; payloads stay in that process.
         """
         ...

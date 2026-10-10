@@ -71,12 +71,34 @@ DEFAULT_WRITER_PROFILER_CONFIG = WriterProfilerConfig()
 
 
 class WriterConfig(BaseModel):
-    """Configuration for Rust-owned cache writing."""
+    """Native cache writing with optional spawned source-process supervision."""
 
     # Existing pickles resolve public classes through the compatibility facade.
     __module__ = "dataset_rt.api"
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    num_processes: int = Field(
+        default=0,
+        ge=0,
+        description="Number of spawned source writers; zero writes in the calling process.",
+    )
+    """Spawn this many source writers; zero keeps writing in the calling process."""
+
+    process_timeout_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Deadline in seconds for child startup or a dispatched source, including "
+            "deserialization. Timeout stops the pool without retries; ignored in serial mode."
+        ),
+    )
+    """Deadline for child startup or one dispatched source, including deserialization.
+
+    A timeout stops the pool and reports unfinished sources as errors without
+    retrying source side effects. Ignored for serial execution.
+    """
 
     prefetch_size: int = Field(
         default=64,
@@ -102,7 +124,7 @@ class WriterConfig(BaseModel):
         default=True,
         description="Whether Rust renders cache write progress with samples/s and MB/s.",
     )
-    """Show Rust-owned cache write progress with samples/s and MB/s."""
+    """Show native sample progress in serial mode or parent source counts in parallel mode."""
 
     validate_cache: bool = Field(
         default=False,

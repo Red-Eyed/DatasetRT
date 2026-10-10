@@ -24,7 +24,9 @@ class CacheSource(Protocol):
         ...
 ```
 
-A `CacheSource` is a synchronous Python iterable. Python does not create threads or queues. The Rust writer pulls from the iterable and owns the cache construction rules.
+A `CacheSource` is a synchronous Python iterable. Rust pulls from it and owns the
+cache construction rules and bounded sample queues. Optional spawned source writers
+execute independent iterables in child processes without transferring payloads.
 
 ## DatasetRuntime
 
@@ -94,6 +96,8 @@ class ShardCompression(BaseModel):
     ratio: float = 1.0
 
 class WriterConfig(BaseModel):
+    num_processes: int = 0
+    process_timeout_seconds: float = 3600.0
     prefetch_size: int = 64
     max_shard_bytes: int = 64 * 1024 * 1024
     shard_compression: ShardCompression = ShardCompression()
@@ -254,8 +258,9 @@ Fields:
 
 Yield cache inputs synchronously.
 
-DatasetRT does not use Python threads or queues. Rust pulls from this
-iterator and owns bounded prefetching, worker threads, and commits.
+Rust pulls from this iterator and owns bounded sample prefetching,
+worker threads, and commits. Optional spawned source writers execute
+this iterator in a child; payloads stay in that process.
 
 ### `CacheSourcesDatasetError`
 
@@ -541,6 +546,19 @@ Returns one `CacheWriteSuccess` or `CacheWriteError` per source in input
 order. Per-source failures are reported as values instead of exceptions
 when Rust can handle them cleanly.
 
+`writer_config.num_processes=0` keeps this native serial path. A positive
+count spawns source-writing processes, each with `self.num_workers`
+native threads. Sources must then be picklable and importable. Jobs
+and outcomes cross processes; sample payloads do not. Worker death or
+`process_timeout_seconds` stops the pool without retrying unfinished
+sources. Profiling keeps serial execution even with a positive count.
+
+Each source has one owning worker; callers must exclude concurrent write
+invocations targeting the same destinations. Parallel mode refuses
+pre-existing temporary cache paths and reserves the `tmp` source name.
+`show_progress` reports completed source count from the parent; child
+sample progress is disabled. Use a main guard when launching processes.
+
 #### `DatasetRuntime.cached_dataset(paths: Sequence[str | Path], *, reader_config: ReaderConfig) -> CachedDataset`
 
 Load immutable cache directories into a `CachedDataset`.
@@ -565,6 +583,10 @@ Returns `CacheSourcesDatasetSuccess` when at least one cache is loaded;
 returns `CacheSourcesDatasetError` when every source failed or no source
 was provided. The result always includes per-source write outcomes so
 callers can audit partial success.
+
+Parallel execution follows `write_cache`'s process, timeout, ownership,
+and serialization contract. Successful paths still define cache IDs in
+input source order, regardless of worker completion order.
 
 ### `ReaderConfig`
 
@@ -602,9 +624,11 @@ Return the physical sample count visible to PyTorch.
 
 ### `WriterConfig`
 
-Configuration for Rust-owned cache writing.
+Native cache writing with optional spawned source-process supervision.
 
 Fields:
+- `num_processes: int`: Number of spawned source writers; zero writes in the calling process.
+- `process_timeout_seconds: float`: Deadline in seconds for child startup or a dispatched source, including deserialization. Timeout stops the pool without retries; ignored in serial mode.
 - `prefetch_size: int`: Maximum number of writer tasks/results buffered by Rust.
 - `max_shard_bytes: int`: Target shard byte size before Rust rotates to a new shard.
 - `shard_compression: ShardCompression`: Per-record payload compression policy for new shards.
