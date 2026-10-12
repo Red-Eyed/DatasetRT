@@ -19,8 +19,10 @@ use crate::types::{
 };
 
 pub const FORMAT_VERSION: u32 = 3;
+mod index;
 mod manifest;
 pub mod migration;
+use index::MappedIndex;
 pub use manifest::{Manifest, ManifestFields, ManifestV3};
 const INDEX_ROW_BYTES: usize = 24;
 const RECORD_METADATA_LEN_BYTES: usize = 8;
@@ -47,7 +49,7 @@ pub struct LoadedCache {
     pub cache_id: CacheId,
     pub manifest: Manifest,
     metadata_rows: Mutex<Option<Vec<Vec<MetadataValue>>>>,
-    pub index: Vec<IndexEntry>,
+    pub index: MappedIndex,
     pub path: PathBuf,
     validate_embedded_metadata: bool,
 }
@@ -76,9 +78,7 @@ impl LoadedCache {
         sample_index: usize,
         readers: &mut ShardReaderCache,
     ) -> CacheResult<CacheSample> {
-        let entry = self.index.get(sample_index).ok_or_else(|| {
-            CacheError::InvalidCache(format!("sample index {sample_index} is out of range"))
-        })?;
+        let entry = self.index.get(sample_index)?;
         let shard = self
             .manifest
             .fields()
@@ -483,7 +483,7 @@ pub fn load_cache(
     }
     verify_shards(&path, &manifest, validate_cache)?;
 
-    let index = read_index_file(&index_path)?;
+    let index = MappedIndex::open(&index_path)?;
     let metadata_rows = if validate_cache {
         Some(read_metadata_file(
             &metadata_path,
@@ -822,20 +822,6 @@ fn write_index_file(path: &Path, index: &[IndexEntry]) -> CacheResult<String> {
     hash_file(&index_path)
 }
 
-fn read_index_file(path: &Path) -> CacheResult<Vec<IndexEntry>> {
-    let bytes = fs::read(path)?;
-    if bytes.len() % INDEX_ROW_BYTES != 0 {
-        return Err(CacheError::InvalidCache(
-            "index length is not divisible by row size".to_string(),
-        ));
-    }
-
-    bytes
-        .chunks_exact(INDEX_ROW_BYTES)
-        .map(read_index_entry)
-        .collect()
-}
-
 fn read_index_entry(bytes: &[u8]) -> CacheResult<IndexEntry> {
     let shard_id = read_u64(index_field(bytes, 0, 8)?)?;
     let offset = read_u64(index_field(bytes, 8, 16)?)?;
@@ -895,7 +881,7 @@ fn verify_shards(path: &Path, manifest: &Manifest, validate_cache: bool) -> Cach
 fn validate_loaded_shapes(
     manifest: &Manifest,
     metadata_rows: Option<&[Vec<MetadataValue>]>,
-    index: &[IndexEntry],
+    index: &MappedIndex,
 ) -> CacheResult<()> {
     let sample_count = manifest.fields().sample_count as usize;
     if let Some(rows) = metadata_rows {
@@ -910,7 +896,8 @@ fn validate_loaded_shapes(
             "index row count does not match manifest".to_string(),
         ));
     }
-    for entry in index {
+    for entry in index.iter() {
+        let entry = entry?;
         if manifest
             .fields()
             .shards

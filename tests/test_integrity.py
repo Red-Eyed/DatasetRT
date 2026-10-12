@@ -148,6 +148,59 @@ def test_index_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
         load_cache(cache_path)
 
 
+@pytest.mark.parametrize("validate_cache", [False, True])
+@pytest.mark.parametrize(
+    ("corruption", "error"),
+    [
+        ("short_row", "index length is not divisible"),
+        ("missing_row", "index row count does not match"),
+        ("empty", "index row count does not match"),
+        ("unknown_shard", "index references missing shard"),
+    ],
+)
+def test_mapped_index_shape_is_always_validated(
+    tmp_path: Path, validate_cache: bool, corruption: str, error: str
+) -> None:
+    """Reject malformed mapped rows even when checksum hashing is disabled."""
+    cache_path = write_integrity_cache(tmp_path)
+    index_path = cache_path / "index.bin"
+    original = index_path.read_bytes()
+    match corruption:
+        case "short_row":
+            damaged = original[:-1]
+        case "missing_row":
+            damaged = original[:24]
+        case "empty":
+            damaged = b""
+        case "unknown_shard":
+            damaged = ((1 << 64) - 1).to_bytes(8, "little") + original[8:]
+        case _:
+            raise AssertionError(corruption)
+    index_path.write_bytes(damaged)
+    manifest = read_manifest(cache_path)
+    manifest.index_sha256 = hashlib.sha256(damaged).hexdigest()
+    write_manifest(cache_path, manifest)
+
+    with pytest.raises(ValueError, match=error):
+        RUNTIME.cached_dataset(
+            [cache_path],
+            reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=validate_cache),
+        )
+
+
+@pytest.mark.parametrize("validate_cache", [False, True])
+def test_missing_mapped_index_is_rejected(tmp_path: Path, validate_cache: bool) -> None:
+    """Report a missing index as an I/O error on both reader validation paths."""
+    cache_path = write_integrity_cache(tmp_path)
+    (cache_path / "index.bin").unlink()
+
+    with pytest.raises(RuntimeError, match="I/O error"):
+        RUNTIME.cached_dataset(
+            [cache_path],
+            reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=validate_cache),
+        )
+
+
 def test_shard_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
     cache_path = write_integrity_cache(tmp_path)
     shard_path = cache_path / "shards" / "000000.bin"

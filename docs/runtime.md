@@ -164,7 +164,8 @@ Existing files are never overwritten. Configuration is published last.
 Workers receive a config path and compact plans, map the same immutable Arrow
 buffers, and pass row-position views to Rust without gathering metadata columns.
 A shuffled split creates one memory-mapped permutation per loader, shared by its
-workers. Native indices, weights, and sampling state remain process-local. This avoids inherited Polars thread
+workers. Cache indexes map their original immutable files; selected physical
+indices, weights, and sampling state remain process-local. This avoids inherited Polars thread
 pools in forked children. Rust validates selected metadata and owns sampling and
 reads. One common seed determines partition ordering; distinct derived seeds
 identify native sampling streams. Empty quotas create no native state.
@@ -187,10 +188,35 @@ require loading its full contents into a private heap allocation.
 
 For shuffled splits, the parent also creates `partition-order.npy` beside the
 config. Workers map that file read-only and use their assigned row positions.
-Cache indexes, selected physical indices, weights, and sampling arrays remain
-process-local. Separate loader exports have separate backing files, and processes
+Cache indexes also use read-only mmap of each cache's original `index.bin`.
+Independent loaders on one host share those pages without exporting a second
+index file. Selected physical indices, weights, and sampling arrays remain
+process-local. Separate metadata exports have separate backing files, and processes
 on different hosts do not share physical memory. Explicit DataFrame operations
 or selected-table exports may still allocate new buffers.
+
+### Index memory comparison
+
+A local macOS arm64 check on 2026-10-12 compared decoded indexes with mapped
+indexes using the same two caches, each containing 500,000 one-byte samples.
+Fresh spawned processes each constructed a non-shuffled reader with one native
+thread, read one sample, and stayed alive until all readers were ready. The
+measurement sums `psutil.memory_full_info().uss` (private resident memory) across
+consumers; it excludes the parent and is a steady-state observation, not peak RAM.
+Both builds already included the Arrow metadata sharing change.
+
+| Consumers | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| 1 | 84.1 MiB | 72.5 MiB | 13.9% |
+| 4 | 340.2 MiB | 197.8 MiB | 41.9% |
+
+The one-reader measurement counts resident mapped index pages as unique because
+no other process maps them. With multiple readers, those pages are shared.
+The change also removes transient file reads and decoded-table allocations;
+allocator retention affects observed savings. These figures include Python and
+sampling state and do not predict total training RAM. Cache index storage is
+24 bytes per sample regardless of consumer count, while private weights and
+selected physical indices still scale with consumers.
 
 ## PyTorch DataLoader helper
 
@@ -255,8 +281,9 @@ rows, bounding transient serialization memory by chunk metadata size. Shuffled
 splits share one mapped O(rows) permutation instead of rebuilding it per worker.
 Metadata view descriptors scale with record batches, and selected validation is
 O(selected rows × log(record batches)); it does not scan all physical samples
-for each row. Cache indexes, selected physical indices, weights, and sampling
-state remain process-local. Replicate mode retains full sampling arrays in each
+for each row. Cache indexes share mapped pages from their original files.
+Selected physical indices, weights, and sampling state remain process-local.
+Replicate mode retains full sampling arrays in each
 consumer. Explicitly requesting a selected metadata DataFrame gathers its columns.
 Native payload queues remain bounded by `ReaderConfig.prefetch_size`; Torch
 batch prefetch multiplies by worker count. New config bundles use version 2 and
@@ -346,12 +373,13 @@ The example also accepts `--quiet` and `--json-output` (one JSON record per rank
 
 Reader resources replicate across ranks. With R ranks and W loading workers per
 rank, there are R × W consuming native datasets (R when W=0), in addition to any
-source datasets retained by rank code. Each consuming dataset loads cache
-indexes, owns native metadata and `native_num_workers` read threads, and retains
+source datasets retained by rank code. Each consuming dataset maps cache
+indexes, retains metadata owners and `native_num_workers` read threads, and retains
 bounded native prefetch state. Torch also prefetches worker batches according to
 `prefetch_factor` and `batch_size`; these bounds multiply across ranks/workers.
 Metadata pages are shared for readers mapping the same snapshot on one host;
-private indexes and sampling arrays still multiply across ranks. Separate loader
+cache index pages are also shared on one host, while private sampling arrays
+still multiply across ranks. Separate loader
 exports create separate mapped snapshots. The tests
 bound their fixture observations and serialize multi-rank cases across pytest
 workers to avoid turning correctness tests into unbounded process fan-out.
@@ -413,8 +441,9 @@ Resource observation samples the trial's entire process tree, including context
 service processes, every 50 ms and after timed consumption. These are sampled
 maxima, not exact peaks. RSS is summed and can count shared fork pages more than
 once. Thread counts include the benchmark observer. Native queues, Torch result
-prefetch, cache indexes, metadata, and worker memory still multiply according to
-the reader budgets described above. The benchmark retains only bounded output
+prefetch and private worker state multiply according to the reader budgets
+described above; summed RSS also counts shared index and metadata pages.
+The benchmark retains only bounded output
 batches, a bounded set of consumer PIDs, and per-trial measurement records; it
 does not preload the payload population.
 

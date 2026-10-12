@@ -22,6 +22,11 @@ All notable changes to DatasetRT are documented here.
 - Remove whole-table IPC copies from `get_metadata()` and `update_metadata()`.
   Map original cache metadata lazily, share retained Arrow buffers between
   Python and Rust, and stream construction exports in bounded row chunks.
+- Further reduce reader memory by replacing the process-local cache indexes
+  described above with read-only mappings shared across consumers on one host.
+  Eliminate a private 24-byte index entry per sample per reader and the transient
+  whole-file read. Preserve the binary format, shape validation, deterministic
+  reads, and opt-in checksum hashing. Weights and sampling arrays remain private.
 
 ### Fixed
 

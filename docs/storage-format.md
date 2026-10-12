@@ -97,6 +97,17 @@ Each row stores:
 
 All integer fields are little-endian unsigned 64-bit values.
 
+Readers map the immutable `index.bin` read-only instead of allocating a decoded
+table per process. Each lookup checks the row bounds and decodes its three
+integers in O(1) time. Startup still checks row count and scans shard references
+in O(samples) time, without retaining decoded entries. Checksum hashing remains
+opt-in through `validate_cache=True`. The binary format is unchanged.
+
+Independent readers discover the index from each supplied cache directory and
+map the same file. The OS shares file-backed pages across readers on one host;
+the mapping remains owned by the loaded cache after its file handle closes.
+Keep published cache files immutable while readers are alive.
+
 ## Shards
 
 Shard files contain concatenated sample records. The index is the authority for locating each record.
