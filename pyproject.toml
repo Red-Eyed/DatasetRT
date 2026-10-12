@@ -55,3 +55,11 @@ dev = [
 module-name = "dataset_rt._dataset_rt"
 python-source = "."
 features = ["pyo3/extension-module"]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]

@@ -2,7 +2,7 @@
 
 All notable changes to DatasetRT are documented here.
 
-## [Unreleased]
+## 0.4.0rc4 - 2026-10-12
 
 ### Backwards Incompatible Changes
 
