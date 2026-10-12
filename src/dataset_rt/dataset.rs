@@ -4,13 +4,15 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyDict};
+use pyo3::types::{PyBytes, PyBytesMethods, PyCapsule, PyDict};
 
+use crate::arrow_metadata::{import_selection, import_table, ArrowMetadata};
 use crate::channel::{bounded, Sender};
 use crate::dataset_runtime::PyDatasetRuntime;
 use crate::runtime::{load_sample_by_identity, EpochPlan, RuntimeIterator};
 use crate::samples_metadata::{
-    build_samples_metadata_ipc, extract_metadata_ipc, ActiveMetadataTable, WeightState,
+    build_samples_metadata, extract_metadata_arrow, extract_metadata_ipc, write_metadata_ipc,
+    write_samples_metadata_file, ActiveMetadataTable, WeightState,
 };
 use crate::sampling::EpochSampler;
 use crate::storage::{load_cache, LoadedCache};
@@ -40,6 +42,7 @@ struct DatasetState {
 
 struct MutableDatasetState {
     active: ActiveMetadata,
+    original_metadata: Option<ArrowMetadata>,
     epoch_len: EpochLen,
     sequential_offset: usize,
     shuffled_draw_offset: u64,
@@ -141,6 +144,52 @@ impl PyCachedDataset {
         Ok(PyBytes::new(py, &ipc))
     }
 
+    /// Export the immutable current table through Arrow ownership rather than IPC copies.
+    fn metadata_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        self.inner
+            .metadata_arrow()
+            .map_err(CacheError::into_py_err)?
+            .export(py)
+    }
+
+    /// Write an explicit immutable construction artifact without building whole-table IPC bytes.
+    fn export_metadata_arrow(&self, path: String) -> PyResult<usize> {
+        self.inner
+            .export_metadata_arrow(std::path::Path::new(&path))
+            .map_err(CacheError::into_py_err)
+    }
+
+    /// Validate a shared Arrow snapshot and optional row view before atomically replacing state.
+    #[pyo3(signature = (metadata, selection=None))]
+    fn update_metadata_arrow(
+        &self,
+        metadata: Bound<'_, PyCapsule>,
+        selection: Option<Bound<'_, PyCapsule>>,
+    ) -> PyResult<()> {
+        let mut table = import_table(metadata)?;
+        if let Some(selection) = selection {
+            table = table
+                .select(import_selection(selection)?)
+                .map_err(CacheError::into_py_err)?;
+        }
+        let active = extract_metadata_arrow(
+            table,
+            self.inner.caches.as_ref(),
+            self.inner.cache_offsets.as_ref(),
+            self.inner.cache_lookup.as_ref(),
+            &self.inner.schema,
+        )
+        .map_err(CacheError::into_py_err)?;
+        let mut guard = self
+            .inner
+            .mutable
+            .lock()
+            .map_err(|_| CacheError::WorkerFailed.into_py_err())?;
+        guard
+            .replace_active(active)
+            .map_err(CacheError::into_py_err)
+    }
+
     /// Return Arrow IPC metadata using the compatibility native method name.
     fn samples_metadata_ipc<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         self.metadata_ipc(py)
@@ -177,6 +226,26 @@ impl PyCachedDataset {
 }
 
 impl DatasetState {
+    /// Stream original cache batches or the accepted active view into an exclusively owned file.
+    fn export_metadata_arrow(&self, path: &std::path::Path) -> CacheResult<usize> {
+        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        match &guard.active {
+            ActiveMetadata::Full => {
+                write_samples_metadata_file(
+                    path,
+                    self.caches.as_ref(),
+                    self.cache_offsets.as_ref(),
+                    &self.schema,
+                )?;
+                Ok(self.total_samples)
+            }
+            ActiveMetadata::Table(active) => {
+                active.metadata.write_file(path)?;
+                Ok(active.metadata.len())
+            }
+        }
+    }
+
     /// Schedule one bounded read on the runtime pool without changing mutable dataset state.
     fn get_item(&self, cache_id: u64, sample_id: u64) -> CacheResult<crate::types::LoadedSample> {
         let caches = self.caches.clone();
@@ -227,6 +296,7 @@ impl DatasetState {
             shuffle,
             mutable: Mutex::new(MutableDatasetState {
                 active: ActiveMetadata::Full,
+                original_metadata: None,
                 epoch_len: EpochLen::new(total_samples)?,
                 sequential_offset: 0,
                 shuffled_draw_offset: 0,
@@ -300,17 +370,30 @@ impl DatasetState {
         Ok(())
     }
 
-    /// Build or return the active metadata table IPC without touching immutable cache files.
+    /// Serialize legacy IPC only on explicit request, mapping original metadata lazily if needed.
     fn metadata_ipc(&self) -> CacheResult<Vec<u8>> {
-        let guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
+        write_metadata_ipc(&self.metadata_arrow()?)
+    }
+
+    /// Load original metadata lazily once; snapshots share buffers across native and Python views.
+    fn metadata_arrow(&self) -> CacheResult<ArrowMetadata> {
+        let mut guard = self.mutable.lock().map_err(|_| CacheError::WorkerFailed)?;
         match &guard.active {
-            ActiveMetadata::Full => build_samples_metadata_ipc(
-                self.caches.as_ref(),
-                self.cache_offsets.as_ref(),
-                &self.schema,
-                &WeightState::Uniform,
-            ),
-            ActiveMetadata::Table(active) => Ok(active.ipc.clone()),
+            ActiveMetadata::Table(active) => Ok(active.metadata.clone()),
+            ActiveMetadata::Full => {
+                if guard.original_metadata.is_none() {
+                    guard.original_metadata = Some(build_samples_metadata(
+                        self.caches.as_ref(),
+                        self.cache_offsets.as_ref(),
+                        &self.schema,
+                        &WeightState::Uniform,
+                    )?);
+                }
+                guard
+                    .original_metadata
+                    .clone()
+                    .ok_or(CacheError::WorkerFailed)
+            }
         }
     }
 
@@ -331,6 +414,7 @@ impl MutableDatasetState {
     fn replace_active(&mut self, active: ActiveMetadataTable) -> CacheResult<()> {
         let epoch_len = EpochLen::new(active.physical_indices.len())?;
         self.active = ActiveMetadata::Table(active);
+        self.original_metadata = None;
         self.epoch_len = epoch_len;
         self.sequential_offset = 0;
         self.shuffled_draw_offset = 0;

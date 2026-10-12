@@ -6,11 +6,13 @@ import gc
 import json
 import pickle
 import warnings
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 import polars as pl
-import pyarrow.parquet as pq
+import pyarrow as pa
 import pytest
 from polars.testing import assert_frame_equal
 from pydantic import ValidationError
@@ -26,6 +28,8 @@ from dataset_rt import (
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations.loader import ReaderAdapter
 from dataset_rt.integrations.loading import ReplicaIdentity, rank_budget
+from dataset_rt.metadata import arrow_metadata
+from dataset_rt.records import MetadataSnapshot
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,6 +47,32 @@ class Source:
         """Supply stable payloads for independent reconstructed readers."""
         for index in range(10):
             yield CacheInput(str(index).encode(), {"index": index})
+
+
+@dataclass
+class ScaleSource:
+    """Stream enough rows per cache to exercise bounded metadata export chunks."""
+
+    name: str
+
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Generate metadata without retaining Python rows in the test producer."""
+        for index in range(70_000):
+            yield CacheInput(str(index).encode(), {"index": index, "label": "train"})
+
+
+@pytest.fixture
+def large_dataset(tmp_path: Path) -> CachedDataset:
+    """Build multiple caches spanning several export chunks with a streaming producer."""
+    runtime = DatasetRuntime(num_workers=2)
+    results = runtime.write_cache(
+        [ScaleSource("first"), ScaleSource("second")],
+        tmp_path,
+        writer_config=WriterConfig(show_progress=False),
+    )
+    assert all(isinstance(result, CacheWriteSuccess) for result in results)
+    paths = [result.path for result in results if isinstance(result, CacheWriteSuccess)]
+    return runtime.cached_dataset(paths, reader_config=ReaderConfig(seed=0, shuffle=False))
 
 
 @pytest.fixture
@@ -71,7 +101,7 @@ def test_round_trip_preserves_snapshot_and_epoch(dataset: CachedDataset, tmp_pat
     export = tmp_path / "export"
     export.mkdir()
     config = dataset.dump_config(export)
-    assert set(path.name for path in export.iterdir()) == {"dataset.json", "metadata.parquet"}
+    assert set(path.name for path in export.iterdir()) == {"dataset.json", "metadata.arrow"}
     dataset.update_metadata(original)
     restored = CachedDataset.from_config(config)
     assert_frame_equal(restored.get_metadata(), frame)
@@ -129,7 +159,10 @@ def test_native_validation_rejects_bad_saved_weights(
     directory.mkdir()
     config = dataset.dump_config(directory)
     frame = dataset.get_metadata().with_columns(pl.lit(-1.0).alias("weight"))
-    pq.write_table(frame.to_arrow(), directory / "metadata.parquet")
+    with pa.OSFile(str(directory / "metadata.arrow"), "wb") as stream:
+        table = frame.to_arrow()
+        with pa.ipc.new_file(stream, table.schema) as writer:
+            writer.write_table(table)
     with pytest.raises(ValueError, match="weight"):
         CachedDataset.from_config(config)
 
@@ -165,7 +198,7 @@ def test_failed_export_cleans_only_owned_files(
     assert tuple(directory.iterdir()) == (sentinel,)
 
 
-@pytest.mark.parametrize("corruption", ["metadata", "config", "rows", "version"])
+@pytest.mark.parametrize("corruption", ["metadata", "config", "rows", "version", "parquet"])
 def test_broken_artifacts_fail_clearly(
     dataset: CachedDataset, tmp_path: Path, corruption: str
 ) -> None:
@@ -174,9 +207,14 @@ def test_broken_artifacts_fail_clearly(
     directory.mkdir()
     config = dataset.dump_config(directory)
     if corruption == "metadata":
-        (directory / "metadata.parquet").unlink()
+        (directory / "metadata.arrow").unlink()
     elif corruption == "config":
         config.write_text("invalid", encoding="utf-8")
+    elif corruption == "parquet":
+        data = json.loads(config.read_bytes())
+        data["version"] = 1
+        data["metadata_file"] = "metadata.parquet"
+        config.write_text(json.dumps(data), encoding="utf-8")
     else:
         data = json.loads(config.read_bytes())
         data["row_count" if corruption == "rows" else "version"] = 11
@@ -276,3 +314,148 @@ def test_global_budget_warns_only_in_rank_zero(drop_last: bool, expected: int) -
     assert quotas == [expected] * 3
     assert len(emitted) == 1
     assert f"effective {expected * 3}" in str(emitted[0].message)
+
+
+def test_mapped_metadata_retains_shared_buffers(dataset: CachedDataset, tmp_path: Path) -> None:
+    """Wide columns map without heap expansion and native import retains the same addresses."""
+    frame = dataset.get_metadata().with_columns(
+        pl.Series("wide", [f"{index}:" + "x" * 1_000_000 for index in range(10)])
+    )
+    dataset.update_metadata(frame)
+    directory = tmp_path / "mapped"
+    directory.mkdir()
+    path = dataset.dump_config(directory)
+    assert (directory / "metadata.arrow").stat().st_size > 10_000_000
+    config = reconstruction.load_configuration(path)
+    before = pa.total_allocated_bytes()
+    table = reconstruction.load_metadata(path, config)
+    restored = CachedDataset._from_configuration(config, table)
+    exported = arrow_metadata(restored._inner)
+    assert pa.total_allocated_bytes() - before < 100_000
+    for original_chunk, exported_chunk in zip(
+        table.column("wide").chunks, exported.column("wide").chunks, strict=True
+    ):
+        assert [buffer.address for buffer in original_chunk.buffers() if buffer is not None] == [
+            buffer.address for buffer in exported_chunk.buffers() if buffer is not None
+        ]
+    del table, exported
+    gc.collect()
+    assert_frame_equal(restored.get_metadata(), frame)
+
+
+def test_worker_setup_avoids_ipc_and_metadata_gather(
+    dataset: CachedDataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected reader keeps the full mapped owner and only allocates native sampling rows."""
+    frame = dataset.get_metadata().with_columns(pl.lit("x" * 1_000_000).alias("wide"))
+
+    def reject_ipc(table: pa.Table) -> bytes:
+        """Fail if a scalable API reintroduces full-table serialization."""
+        raise AssertionError(f"unexpected serialization of {table.num_rows} rows")
+
+    monkeypatch.setattr(reconstruction, "metadata_ipc", reject_ipc)
+    dataset.update_metadata(frame)
+    loader = dataset.to_torch_dataloader(shuffle=True, seed=7, num_workers=0, collate_fn=collate)
+    assert isinstance(loader.dataset, ReaderAdapter)
+    loader.dataset.setup()
+    from dataset_rt.integrations.loader import LocalReader
+
+    assert isinstance(loader.dataset._state, LocalReader)
+    worker = loader.dataset._state.dataset
+    snapshot = worker._reader_recipe().metadata
+    assert isinstance(snapshot, MetadataSnapshot)
+    assert snapshot.table.num_rows == 10
+    assert snapshot.selection is not None
+    assert snapshot.selection.num_rows == 10
+    np.testing.assert_array_equal(
+        worker.get_metadata().get_column("sample_id").to_numpy(),
+        np.random.default_rng(7).permutation(10),
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 7, (1 << 64) - 1])
+@pytest.mark.parametrize("offset,length", [(0, 10), (3, 4), (8, 5), (15, 24)])
+def test_shared_permutation_matches_previous_order(
+    dataset: CachedDataset, tmp_path: Path, seed: int, offset: int, length: int
+) -> None:
+    """Mapped shuffle preserves exact NumPy seed ordering, including cyclic padding."""
+    path = dataset.dump_config(tmp_path)
+    reconstruction.prepare_row_order(path, 10, seed)
+    selection = reconstruction.population_selection(
+        path, 10, offset=offset, length=length, partition_seed=seed
+    )
+    assert selection is not None
+    expected = np.random.default_rng(seed).permutation(10)
+    positions = (np.arange(length) + offset) % 10
+    np.testing.assert_array_equal(selection.column(0).to_numpy(), expected[positions])
+
+
+@pytest.mark.parametrize("rows", [[0, 10], [0, None], [-1, 0]])
+def test_native_row_view_rejection_is_atomic(
+    dataset: CachedDataset, rows: list[int | None]
+) -> None:
+    """Invalid row positions cannot replace the accepted population or cursor state."""
+    table = arrow_metadata(dataset._inner)
+    dtype = pa.int64() if -1 in rows else pa.uint64()
+    selection = pa.table({"row_index": pa.array(rows, type=dtype)})
+    with pytest.raises(ValueError):
+        dataset._inner.update_metadata_arrow(
+            table.__arrow_c_stream__(), selection.__arrow_c_stream__()
+        )
+    assert [sample.sample_id for sample in dataset] == list(range(10))
+
+
+def test_selected_native_view_preserves_metadata_and_lifetime(
+    dataset: CachedDataset, tmp_path: Path
+) -> None:
+    """Duplicate row views preserve extras, order, and old owners after later updates."""
+    frame = dataset.get_metadata().with_columns(pl.lit("kept").alias("extra"))
+    dataset.update_metadata(frame)
+    path = dataset.dump_config(tmp_path)
+    config = reconstruction.load_configuration(path)
+    table = reconstruction.load_metadata(path, config)
+    selection = pa.table({"row_index": pa.array([8, 1, 8], type=pa.uint64())})
+    restored = CachedDataset._from_configuration(
+        config.model_copy(update={"epoch_len": 3}), table, selection
+    )
+    del table, selection
+    gc.collect()
+    selected = restored.get_metadata()
+    assert_frame_equal(
+        selected, pl.concat([frame.slice(8, 1), frame.slice(1, 1), frame.slice(8, 1)])
+    )
+    old_iterator = iter(restored)
+    assert next(old_iterator).sample_id == 8
+    restored.update_metadata(frame)
+    assert [sample.sample_id for sample in old_iterator] == [1, 8]
+    assert selected.get_column("extra").to_list() == ["kept"] * 3
+
+
+def test_large_multicache_export_is_chunked(large_dataset: CachedDataset, tmp_path: Path) -> None:
+    """Mapped original metadata exports bounded chunks and resolves rows across cache boundaries."""
+    directory = tmp_path / "export"
+    directory.mkdir()
+    path = large_dataset.dump_config(directory)
+    config = reconstruction.load_configuration(path)
+    before = pa.total_allocated_bytes()
+    table = reconstruction.load_metadata(path, config)
+    assert pa.total_allocated_bytes() - before < 100_000
+    assert [batch.num_rows for batch in table.to_batches()] == [65_536, 4_464, 65_536, 4_464]
+    positions = pa.table({"row_index": pa.array([69_999, 70_000, 0, 139_999], type=pa.uint64())})
+    restored = CachedDataset._from_configuration(
+        config.model_copy(update={"epoch_len": 4}), table, positions
+    )
+    assert [sample.sample_id for sample in restored] == [69_999, 0, 0, 69_999]
+    metadata = restored.get_metadata()
+    assert metadata.get_column("index").to_list() == [69_999, 0, 0, 69_999]
+    assert metadata.get_column("label").to_list() == ["train"] * 4
+
+
+@pytest.mark.parametrize("contents", [b"", b"ARROW1", b"broken metadata" + b"\0" * 32])
+def test_mapped_cache_metadata_corruption_is_rejected(
+    dataset: CachedDataset, contents: bytes
+) -> None:
+    """Malformed unmapped metadata fails clearly without slicing unchecked file offsets."""
+    (dataset.cache_paths[0] / "metadata.arrow").write_bytes(contents)
+    with pytest.raises((ValueError, OSError)):
+        dataset.get_metadata()

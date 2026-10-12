@@ -30,7 +30,7 @@ inherited epoch override being mistaken for the population size.
   intentional repeated samples from accidental duplication or lost work.
 - [ ] Reject Python row-object expansion, accidental quadratic lookup, unbounded
   queues, and accidental temporary-file bridges on scalable paths. Explicit
-  config/Parquet snapshots are construction artifacts with an owned lifetime.
+  config/Arrow snapshots are construction artifacts with an owned lifetime.
 - [ ] Make examples and types agree with behavior. Describe ignored or advisory
   settings explicitly; avoid making an unrelated flag select a hidden mode.
 
@@ -164,22 +164,26 @@ partially mutate authoritative state.
 - [ ] Measure export, validation, and identity resolution on many caches and
   rows; keep columns columnar and avoid per-row Python callbacks.
 
-## In-memory metadata IPC bridge
+## Shared Arrow metadata bridge
 
 Sources: [metadata.py](../dataset_rt/metadata.py),
+[arrow_metadata.rs](../src/dataset_rt/arrow_metadata.rs),
 [samples_metadata.rs](../src/dataset_rt/samples_metadata.rs).
 
-Failure to prevent: crossing the Python/Rust boundary loses schema or expands
-dataset-scale metadata into row objects.
+Failure to prevent: crossing the Python/Rust boundary copies full metadata tables,
+loses schema, expands rows into Python objects, or releases buffers still in use.
 
 - [ ] Round-trip integer widths, floating weights, extra columns, column order,
   duplicated rows, and sliced frames without changing accepted semantics.
-- [ ] Truncated IPC, malformed schemas, and invalid required cells fail at the
-  native validation boundary before authoritative state changes.
-- [ ] Account for IPC buffers, decoded frames, and retained snapshots together;
-  an in-memory bridge can still make multiple full-table copies.
-- [ ] Forked consumers restore accepted IPC directly in Rust rather than using
-  inherited Python columnar thread-pool state.
+- [ ] Invalid required cells and row selections fail at the native validation
+  boundary before authoritative state changes.
+- [ ] Retain Arrow owners across Python/native views and after source handles
+  close; later updates cannot invalidate an existing snapshot.
+- [ ] Map one immutable Arrow snapshot and shuffle permutation per loader;
+  workers allocate selected sampling arrays without gathering metadata columns.
+- [ ] Bound original-cache export chunks independently of cache row count.
+- [ ] Forked consumers import Arrow owners directly rather than entering
+  inherited Polars thread pools or creating full-table IPC byte buffers.
 
 ## ReaderRecipe, MetadataSnapshot, and RowSpan
 
@@ -523,11 +527,11 @@ other abstractions remain review templates rather than blanket claims of proof.
 | Worker death or interruption hangs cleanup | Real-worker initializer/transform/native errors, death, timeout, partial teardown, and Ctrl-C tests run with independent deadlines under supported contexts. |
 | Rank lengths diverge or remainder exceptions recur | Real DDP tests cover two/four ranks, zero/one/two loading workers, padding/discarding, zero effective budgets, seeded replay, persistent readers, common random partition seeds, and terminal failures. Training uses ordinary DDP without join to conceal unequal lengths. |
 
-Process memory remains input-sized. Every nonempty consumer reads Parquet during
-setup; shuffled selection allocates an O(rows) permutation, while native metadata,
-accepted IPC, indexes, and queues belong to each consumer. Replicate retains the
-full population per process. No dataset-scale Python row-object bridge is added.
-Selected metadata still crosses the Python/Rust boundary as IPC bytes.
+Workers now map shared Arrow metadata and a shared shuffle permutation. Native
+indexes, selected physical indices, weights, sampling state, and queues remain
+process-local; replicate mode retains full sampling arrays in every consumer.
+No dataset-scale Python row-object bridge or full-table IPC transport is used.
+The historical smoke measurements below predate shared Arrow mapping.
 
 On the acceptance Mac, one-repeat spawn smoke measurements used 512 samples in
 two caches, 64-byte payloads, batch size 32, and cheap transforms. The wide case

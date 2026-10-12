@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Generic, Literal, NamedTuple, Protocol, TypeAl
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pyarrow as pa
+
     from dataset_rt.config import ReaderConfig
     from dataset_rt.dataset import CachedDataset
 
@@ -83,9 +85,20 @@ class OriginalMetadata:
 
 @dataclass(frozen=True)
 class MetadataSnapshot:
-    """Immutable in-memory columnar IPC accepted by the native dataset."""
+    """Accepted immutable Arrow owners; compatibility IPC is serialized only on request."""
 
-    ipc: bytes
+    table: pa.Table
+    selection: pa.Table | None = None
+
+    @property
+    def ipc(self) -> bytes:
+        """Materialize legacy reconstruction bytes only for callers explicitly requesting them."""
+        from dataset_rt.reconstruction import metadata_ipc
+
+        table = self.table
+        if self.selection is not None:
+            table = table.take(self.selection.column(0))
+        return metadata_ipc(table)
 
 
 @dataclass(frozen=True)

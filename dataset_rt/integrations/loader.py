@@ -28,7 +28,8 @@ from dataset_rt.reconstruction import (
     DatasetConfiguration,
     load_configuration,
     load_metadata,
-    select_population,
+    population_selection,
+    prepare_row_order,
 )
 from dataset_rt.records import CachedSample, RowSpan
 
@@ -117,8 +118,10 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         from dataset_rt.dataset import CachedDataset
 
         config = load_configuration(self.config_path)
-        metadata = select_population(
-            load_metadata(self.config_path, config),
+        metadata = load_metadata(self.config_path, config)
+        selection = population_selection(
+            self.config_path,
+            config.row_count,
             offset=recipe.offset,
             length=recipe.population_size,
             partition_seed=recipe.partition_seed,
@@ -127,13 +130,13 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
             update={
                 "num_workers": self.native_num_workers,
                 "epoch_len": recipe.sample_count,
-                "row_count": metadata.num_rows,
+                "row_count": recipe.population_size,
                 "reader_config": config.reader_config.model_copy(
                     update={"shuffle": self.shuffle, "seed": recipe.seed}
                 ),
             }
         )
-        dataset = CachedDataset._from_configuration(config, metadata)
+        dataset = CachedDataset._from_configuration(config, metadata, selection)
         self._state = LocalReader(os.getpid(), dataset, iter(dataset))
 
     def __len__(self) -> int:
@@ -381,6 +384,10 @@ def make_dataloader(
             seed=seed,
             drop_last=drop_last,
         )
+        if shuffle and worker_partition == "split":
+            if seed is None:
+                raise RuntimeError("shuffled partitions require a resolved seed")
+            prepare_row_order(config_path, config.row_count, seed)
         adapter = ReaderAdapter(
             replica,
             shuffle,

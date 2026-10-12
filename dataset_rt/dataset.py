@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 from dataset_rt._dataset_rt import CachedDataset as _RustCachedDataset
 from dataset_rt._dataset_rt import DatasetRuntime as _RustDatasetRuntime
 from dataset_rt.integrations.torch import to_torch_iterable_dataset
-from dataset_rt.metadata import decode_metadata, encode_metadata
+from dataset_rt.metadata import decode_arrow_metadata
 from dataset_rt.records import (
     AbsentManifestTarget,
     CachedSample,
@@ -137,7 +137,7 @@ class CachedDataset:
         return dataset
 
     def dump_config(self, path: DirectoryPath) -> FilePath:
-        """Save construction settings and active metadata Parquet into an existing directory.
+        """Save construction settings and active metadata Arrow into an existing directory.
 
         Return the generated dataset.json file. Cache payloads are referenced by
         absolute paths, not copied. Active row order, duplicates, weights, extra
@@ -152,7 +152,7 @@ class CachedDataset:
 
     @classmethod
     def from_config(cls, path: FilePath) -> CachedDataset:
-        """Construct fresh native state from an existing config and its metadata Parquet.
+        """Construct fresh native state from an existing config and its metadata Arrow.
 
         Validate paths and config before construction, then validate metadata in
         Rust. Restore the finite epoch length after metadata and start fresh
@@ -164,17 +164,17 @@ class CachedDataset:
         return cls._from_configuration(config, load_metadata(path, config))
 
     @classmethod
-    def _from_configuration(cls, config: DatasetConfiguration, metadata: pa.Table) -> CachedDataset:
+    def _from_configuration(
+        cls, config: DatasetConfiguration, metadata: pa.Table, selection: pa.Table | None = None
+    ) -> CachedDataset:
         """Create one native reader from validated settings and selected columnar metadata."""
-        from dataset_rt.reconstruction import metadata_ipc
-
         dataset = cls._load(
             _RustDatasetRuntime(config.num_workers),
             config.cache_paths,
             config.reader_config,
             num_workers=config.num_workers,
         )
-        dataset._restore_metadata(MetadataSnapshot(metadata_ipc(metadata)))
+        dataset._restore_metadata(MetadataSnapshot(metadata, selection))
         dataset.set_epoch_len(config.epoch_len)
         return dataset
 
@@ -187,12 +187,9 @@ class CachedDataset:
         return self._recipe
 
     def _restore_metadata(self, snapshot: MetadataSnapshot) -> None:
-        """Validate IPC directly in Rust without entering Polars in forked workers.
-
-        Snapshots are already columnar. Decoding and re-encoding them in a child
-        is unnecessary and can wait on Polars thread-pool state inherited by fork.
-        """
-        self._inner.update_metadata_ipc(snapshot.ipc)
+        """Retain Arrow owners directly in Rust without IPC copies or forked Polars pools."""
+        selection = None if snapshot.selection is None else snapshot.selection.__arrow_c_stream__()
+        self._inner.update_metadata_arrow(snapshot.table.__arrow_c_stream__(), selection)
         self._recipe = replace(self._recipe, sample_count=len(self._inner), metadata=snapshot)
 
     def __iter__(self) -> Iterator[CachedSample]:
@@ -421,10 +418,10 @@ class CachedDataset:
         reconstruct fresh readers each pass. Split populations are fixed for the
         loader's lifetime, including when persistent workers are used.
 
-        Construction saves a config and active metadata Parquet without loading
+        Construction saves a config and active metadata Arrow without loading
         payloads or creating a consuming native reader. Parent edits do not change
         snapshots. Workers receive the config path and compact partition instructions,
-        read the snapshot, and build their own native state. They do not query
+        map shared snapshot buffers, and build their own native sampling state. They do not query
         distributed groups. With shuffle=True and seed=None, training processes
         agree a random partition seed during construction; construct loaders in
         the same order with the same global budget and batch size on every process.
@@ -488,7 +485,7 @@ class CachedDataset:
 
         Contract:
 
-        - Returns a Polars `DataFrame` copy; editing it does not mutate the
+        - Returns a Polars `DataFrame` with shared immutable buffers; editing it does not mutate the
           dataset until the whole frame is passed to `update_metadata`.
         - Columns are `cache_id`, `sample_id`, every metadata column stored in
           the cache, `weight`, and any extra columns preserved from the previous
@@ -501,10 +498,10 @@ class CachedDataset:
           sample.
         - `len(dataset)` equals the configured epoch length. By default it
           matches the active row count, including duplicate rows.
-        - Cache files are not read or rewritten by this method beyond exporting
-          the current Rust-owned in-memory table.
+        - Original cache metadata is mapped lazily on first access. Later calls
+          share the retained Arrow buffers. No cache files are rewritten.
         """
-        return decode_metadata(self._inner.metadata_ipc())
+        return decode_arrow_metadata(self._inner)
 
     def set_samples_metadata(self, metadata: pl.DataFrame) -> None:
         """Compatibility alias for `update_metadata`.
@@ -554,7 +551,5 @@ class CachedDataset:
         - Iterators created before this call keep their existing snapshot;
           iterators created after this call use the new active table.
         """
-        ipc = encode_metadata(metadata)
-        # Retain the exact accepted IPC without another export or row expansion.
-        # Rejected updates leave both native state and this snapshot unchanged.
-        self._restore_metadata(MetadataSnapshot(ipc))
+        # Arrow owners are retained only after native validation accepts the entire update.
+        self._restore_metadata(MetadataSnapshot(metadata.to_arrow()))

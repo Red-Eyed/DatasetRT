@@ -5,6 +5,7 @@
 #![deny(clippy::unimplemented)]
 #![deny(clippy::unwrap_used)]
 
+mod arrow_metadata;
 mod channel;
 mod compression;
 mod dataset;

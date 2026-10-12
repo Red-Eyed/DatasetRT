@@ -145,23 +145,48 @@ Readers and writer reuse skip checksum validation by default. Dataset constructi
 
 ## Internal Reader Reconstruction Contracts
 
-Python keeps an immutable internal recipe containing original ordered cache paths, reader settings, the configured sample count, and either original-cache metadata or accepted metadata IPC. Recipe export does not create a native reader, read payloads, or export a default full metadata table. It does not copy an active iterator's cursor.
+Python keeps an immutable internal recipe containing original ordered cache paths, reader settings, the configured sample count, and either original-cache metadata or accepted Arrow metadata. Recipe export does not create a native reader, read payloads, or export a default full metadata table. It does not copy an active iterator's cursor.
 
-Metadata updates retain the exact IPC only after Rust accepts it. Failed updates preserve the previous recipe; prior exported recipes remain immutable snapshots. Retaining an override costs its IPC byte size in addition to native metadata state. Default datasets retain only O(cache paths) construction inputs, with no eager metadata export or per-row Python objects.
+Metadata updates retain shared immutable Arrow buffers only after Rust accepts them. Failed updates preserve the previous recipe; prior exported recipes remain immutable snapshots. Python and Rust share the column buffers instead of retaining separate IPC copies. Default datasets retain only O(cache paths) construction inputs, with no eager metadata export or per-row Python objects.
 
 Public reconstruction uses `dataset.dump_config(existing_directory)` to write
-`dataset.json` and `metadata.parquet`, returning the config FilePath.
+`dataset.json` and `metadata.arrow`, returning the config FilePath.
 `CachedDataset.from_config(config_path)` creates a fresh runtime itself. Exports
 preserve active order, duplicates, weights, extra columns, reader settings,
 native thread count, and epoch length. Cache paths are absolute references;
 payloads and cursor progress are not copied. Keep exports immutable while used.
 Existing files are never overwritten. Configuration is published last.
 
-Workers receive a config path and compact plans, synchronously read Parquet, and
-select columns using Arrow and NumPy buffers. This avoids inherited Polars thread
+Workers receive a config path and compact plans, map the same immutable Arrow
+buffers, and pass row-position views to Rust without gathering metadata columns.
+A shuffled split creates one memory-mapped permutation per loader, shared by its
+workers. Native indices, weights, and sampling state remain process-local. This avoids inherited Polars thread
 pools in forked children. Rust validates selected metadata and owns sampling and
 reads. One common seed determines partition ordering; distinct derived seeds
 identify native sampling streams. Empty quotas create no native state.
+
+### How metadata sharing uses mmap
+
+Metadata sharing uses read-only, file-backed `mmap`. Each loader writes one
+immutable `metadata.arrow` snapshot; it does not allocate a named shared-memory
+segment. Workers receive the path to `dataset.json`, read its `metadata_file`
+field, and resolve that filename relative to the config directory. Each worker
+then maps the same file independently. This works with `spawn`, `fork`, and
+`forkserver` without relying on inherited mappings or matching virtual addresses.
+
+The OS can share physical file-cache pages between processes on the same host
+mapping the same snapshot. Arrow buffers reference those mapped pages, and the
+Arrow C stream bridge transfers buffer ownership to Rust without copying column
+contents. Retained owners keep mappings alive while their arrays are in use.
+Pages can be loaded on demand and reclaimed by the OS; mapping a file does not
+require loading its full contents into a private heap allocation.
+
+For shuffled splits, the parent also creates `partition-order.npy` beside the
+config. Workers map that file read-only and use their assigned row positions.
+Cache indexes, selected physical indices, weights, and sampling arrays remain
+process-local. Separate loader exports have separate backing files, and processes
+on different hosts do not share physical memory. Explicit DataFrame operations
+or selected-table exports may still allocate new buffers.
 
 ## PyTorch DataLoader helper
 
@@ -218,13 +243,20 @@ inspection or reconstruction. Concurrent loaders never overwrite each other.
 Keep snapshots immutable and accessible to all consumers. Hard parent termination
 can leave temporary artifacts behind.
 
-Compact transport does not imply constant memory. Each consumer reads the full
-Parquet snapshot during setup. Shuffled splits build an O(rows) permutation;
-sequential spans can use Arrow slices. Selected metadata is encoded to the native
-IPC validation boundary. Indexes, metadata, and accepted IPC remain process-local.
-Replicate mode still needs a full population per consumer. Decoding and selection
-can allocate transient full-column buffers. Native payload queues remain bounded
-by `ReaderConfig.prefetch_size`; Torch batch prefetch multiplies by worker count.
+Metadata column buffers are mapped from one immutable Arrow snapshot and shared
+by consumers on the same host. Rust retains their owners and validates selected
+identities and weights without copying metadata columns or serializing them into
+IPC bytes. Original cache export uses mapped input and chunks of at most 65,536
+rows, bounding transient serialization memory by chunk metadata size. Shuffled
+splits share one mapped O(rows) permutation instead of rebuilding it per worker.
+Metadata view descriptors scale with record batches, and selected validation is
+O(selected rows × log(record batches)); it does not scan all physical samples
+for each row. Cache indexes, selected physical indices, weights, and sampling
+state remain process-local. Replicate mode retains full sampling arrays in each
+consumer. Explicitly requesting a selected metadata DataFrame gathers its columns.
+Native payload queues remain bounded by `ReaderConfig.prefetch_size`; Torch
+batch prefetch multiplies by worker count. New config bundles use version 2 and
+Arrow only; old Parquet exports must be recreated.
 
 `num_workers` controls Torch processes; `native_num_workers` controls Rust reader
 threads per consuming process. Context, pinning, prefetch, timeout, worker
@@ -314,7 +346,9 @@ source datasets retained by rank code. Each consuming dataset loads cache
 indexes, owns native metadata and `native_num_workers` read threads, and retains
 bounded native prefetch state. Torch also prefetches worker batches according to
 `prefetch_factor` and `batch_size`; these bounds multiply across ranks/workers.
-Parquet decode and selected native metadata costs also multiply across ranks. The tests
+Metadata pages are shared for readers mapping the same snapshot on one host;
+private indexes and sampling arrays still multiply across ranks. Separate loader
+exports create separate mapped snapshots. The tests
 bound their fixture observations and serialize multi-rank cases across pytest
 workers to avoid turning correctness tests into unbounded process fan-out.
 

@@ -42,6 +42,7 @@ from dataset_rt.benchmarks.resources import (
 )
 from dataset_rt.config import ReaderConfig, WriterConfig
 from dataset_rt.integrations.loader import ReaderAdapter
+from dataset_rt.reconstruction import METADATA_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -368,7 +369,7 @@ def input_agreement(
     signature = (
         reader_digest(),
         benchmark_digest(),
-        file_digest(adapter.config_path.parent / "metadata.parquet"),
+        file_digest(adapter.config_path.parent / METADATA_NAME),
         config.model_dump_json(exclude={"ranks", "output", "cache_paths", "quiet"}),
     )
     gathered: list[tuple[str, str, str, str]] = [signature] * topology.world_size

@@ -11,8 +11,15 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict, DirectoryPath, Field, FilePath, PositiveInt, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    DirectoryPath,
+    Field,
+    FilePath,
+    PositiveInt,
+    TypeAdapter,
+)
 
 from dataset_rt.config import ReaderConfig  # noqa: TC001 - Pydantic resolves this model at runtime.
 
@@ -20,7 +27,8 @@ if TYPE_CHECKING:
     from dataset_rt.dataset import CachedDataset
 
 CONFIG_NAME = "dataset.json"
-METADATA_NAME = "metadata.parquet"
+METADATA_NAME = "metadata.arrow"
+ORDER_NAME = "partition-order.npy"
 DIRECTORY_PATH: TypeAdapter[Path] = TypeAdapter(DirectoryPath)
 FILE_PATH: TypeAdapter[Path] = TypeAdapter(FilePath)
 
@@ -30,13 +38,13 @@ class DatasetConfiguration(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     cache_paths: tuple[DirectoryPath, ...] = Field(min_length=1)
     reader_config: ReaderConfig
     num_workers: PositiveInt
     epoch_len: PositiveInt
     row_count: PositiveInt
-    metadata_file: Literal["metadata.parquet"] = METADATA_NAME
+    metadata_file: Literal["metadata.arrow"] = METADATA_NAME
 
 
 @dataclass
@@ -64,38 +72,8 @@ class ConstructionArtifacts:
             self.discard()
 
 
-def arrow_metadata(ipc: bytes) -> pa.Table:
-    """Read accepted columnar IPC without using inherited Polars thread pools."""
-    table = pa.ipc.open_file(pa.BufferReader(ipc)).read_all()
-    fields = [field.with_type(_portable_type(field.type)) for field in table.schema]
-    # Parquet persists view types, but Arrow's row-selection kernels need offset arrays.
-    return table.cast(pa.schema(fields, metadata=table.schema.metadata))
-
-
-def _portable_type(dtype: pa.DataType) -> pa.DataType:
-    """Normalize nested view arrays for Parquet round trips and Arrow row selection."""
-    if pa.types.is_string_view(dtype):
-        return pa.large_string()
-    if pa.types.is_binary_view(dtype):
-        return pa.large_binary()
-    if pa.types.is_large_list(dtype):
-        return pa.large_list(dtype.value_field.with_type(_portable_type(dtype.value_type)))
-    if pa.types.is_list(dtype) or pa.types.is_fixed_size_list(dtype):
-        size = dtype.list_size if pa.types.is_fixed_size_list(dtype) else -1
-        return pa.list_(dtype.value_field.with_type(_portable_type(dtype.value_type)), size)
-    if pa.types.is_struct(dtype):
-        return pa.struct([field.with_type(_portable_type(field.type)) for field in dtype])
-    if pa.types.is_dictionary(dtype):
-        return pa.dictionary(dtype.index_type, _portable_type(dtype.value_type), dtype.ordered)
-    if pa.types.is_map(dtype):
-        return pa.map_(
-            _portable_type(dtype.key_type), _portable_type(dtype.item_type), dtype.keys_sorted
-        )
-    return dtype
-
-
 def metadata_ipc(table: pa.Table) -> bytes:
-    """Encode selected columns for the existing authoritative native validation boundary."""
+    """Serialize an explicitly requested legacy in-memory recipe, outside worker setup."""
     output = pa.BufferOutputStream()
     with pa.ipc.new_file(output, table.schema) as writer:
         writer.write_table(table)
@@ -109,14 +87,52 @@ def load_configuration(path: FilePath) -> DatasetConfiguration:
 
 
 def load_metadata(path: FilePath, config: DatasetConfiguration) -> pa.Table:
-    """Read Parquet synchronously so warmed-parent fork does not inherit a used pool."""
+    """Map immutable Arrow buffers shared across processes without decoding a private table."""
     config_path = FILE_PATH.validate_python(path)
     metadata_path = FILE_PATH.validate_python(config_path.parent / config.metadata_file)
-    with pq.ParquetFile(metadata_path) as reader:
-        table = reader.read(use_threads=False)
+    with pa.memory_map(str(metadata_path), "r") as source:
+        table = pa.ipc.open_file(source).read_all()
     if table.num_rows != config.row_count:
         raise ValueError("metadata row count does not match dataset configuration")
     return table
+
+
+def prepare_row_order(path: FilePath, count: int, seed: int) -> None:
+    """Build one shared deterministic permutation with bounded initialization buffers."""
+    order_path = path.parent / ORDER_NAME
+    order = np.lib.format.open_memmap(order_path, mode="w+", dtype=np.uint64, shape=(count,))
+    for start in range(0, count, 65_536):
+        end = min(count, start + 65_536)
+        order[start:end] = np.arange(start, end, dtype=np.uint64)
+    np.random.default_rng(seed).shuffle(order)
+    order.flush()
+
+
+def population_selection(
+    path: FilePath, count: int, *, offset: int, length: int, partition_seed: int | None
+) -> pa.Table | None:
+    """Select shared row positions; native readers retain full metadata buffers without a take."""
+    if offset < 0 or length <= 0:
+        raise ValueError("population selection requires a nonnegative offset and positive length")
+    if partition_seed is None and offset == 0 and length == count:
+        return None
+    if partition_seed is None:
+        indices = np.arange(length, dtype=np.uint64)
+        indices += offset % count
+        indices %= count
+    else:
+        order = np.load(path.parent / ORDER_NAME, mmap_mode="r", allow_pickle=False)
+        if order.dtype != np.uint64 or order.shape != (count,):
+            raise ValueError("partition order does not match metadata row count")
+        start = offset % count
+        if start + length <= count:
+            indices = order[start : start + length]
+        else:
+            positions = np.arange(length, dtype=np.uint64)
+            positions += start
+            positions %= count
+            indices = order[positions]
+    return pa.table({"row_index": pa.array(indices, type=pa.uint64())})
 
 
 def select_population(
@@ -155,16 +171,15 @@ def dump_configuration(dataset: CachedDataset, path: DirectoryPath) -> FilePath:
     targets = (config_path, metadata_path, pending_config, pending_metadata)
     if any(target.exists() for target in targets):
         raise FileExistsError("dataset export already exists; choose an unused directory")
-    table = arrow_metadata(dataset._inner.metadata_ipc())
-    config = DatasetConfiguration(
-        cache_paths=tuple(cache.resolve() for cache in dataset._recipe.cache_paths),
-        reader_config=dataset._recipe.reader_config,
-        num_workers=dataset._runtime_num_workers,
-        epoch_len=len(dataset),
-        row_count=table.num_rows,
-    )
     try:
-        pq.write_table(table, pending_metadata, compression="zstd", store_schema=True)
+        row_count = dataset._inner.export_metadata_arrow(str(pending_metadata))
+        config = DatasetConfiguration(
+            cache_paths=tuple(cache.resolve() for cache in dataset._recipe.cache_paths),
+            reader_config=dataset._recipe.reader_config,
+            num_workers=dataset._runtime_num_workers,
+            epoch_len=len(dataset),
+            row_count=row_count,
+        )
         _sync_file(pending_metadata)
         pending_config.write_text(config.model_dump_json(indent=2), encoding="utf-8")
         _sync_file(pending_config)

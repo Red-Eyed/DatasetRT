@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
@@ -10,9 +12,13 @@ use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 
+use crate::arrow_metadata::ArrowMetadata;
 use crate::sampling::validate_weights;
 use crate::storage::LoadedCache;
 use crate::types::{CacheError, CacheResult, MetadataField, MetadataKind};
+
+/// Bound identity construction and serialization work independently of cache row counts.
+pub const METADATA_BATCH_ROWS: usize = 65_536;
 
 /// Sampling weight storage that avoids materializing uniform all-one vectors.
 pub enum WeightState {
@@ -23,7 +29,7 @@ pub enum WeightState {
 pub struct ActiveMetadataTable {
     pub physical_indices: Arc<Vec<usize>>,
     pub weights: Vec<f64>,
-    pub ipc: Vec<u8>,
+    pub metadata: ArrowMetadata,
 }
 
 struct WeightUpdate {
@@ -36,16 +42,62 @@ enum WeightSlice {
     Uniform { len: usize },
 }
 
-/// Build one Arrow IPC samples metadata table containing identity, metadata, and weights.
-pub fn build_samples_metadata_ipc(
+/// Load the original columnar population once without a second serialized full-table buffer.
+pub fn build_samples_metadata(
     caches: &[LoadedCache],
     cache_offsets: &[usize],
     schema: &[MetadataField],
     weights: &WeightState,
-) -> CacheResult<Vec<u8>> {
+) -> CacheResult<ArrowMetadata> {
     let arrow_schema = samples_metadata_schema(schema);
     let batches = samples_metadata_batches(caches, cache_offsets, schema, &arrow_schema, weights)?;
-    write_record_batches_ipc(&arrow_schema, &batches)
+    ArrowMetadata::new(arrow_schema, batches)
+}
+
+/// Validate only the selected sampling rows while retaining shared full-table metadata buffers.
+pub fn extract_metadata_arrow(
+    table: ArrowMetadata,
+    caches: &[LoadedCache],
+    cache_offsets: &[usize],
+    cache_lookup: &HashMap<u64, usize>,
+    schema: &[MetadataField],
+) -> CacheResult<ActiveMetadataTable> {
+    validate_active_metadata(table.len())?;
+    let mut columns = Vec::with_capacity(table.batches.len());
+    for batch in table.batches.iter() {
+        validate_required_metadata_columns(batch, schema)?;
+        columns.push((
+            required_column(batch, "cache_id")?,
+            required_column(batch, "sample_id")?,
+            required_column(batch, "weight")?,
+        ));
+    }
+    let mut weights = Vec::with_capacity(table.len());
+    let mut physical_indices = Vec::with_capacity(table.len());
+    for position in 0..table.len() {
+        let (batch_index, row) = table.location(position)?;
+        let (cache_ids, sample_ids, weight_values) =
+            columns.get(batch_index).ok_or(CacheError::WorkerFailed)?;
+        let update = WeightUpdate {
+            cache_id: read_u64_cell(cache_ids, row, "cache_id")?,
+            sample_id: read_u64_cell(sample_ids, row, "sample_id")?,
+            weight: read_f64_cell(weight_values, row, "weight")?,
+        };
+        apply_metadata_update(
+            update,
+            caches,
+            cache_offsets,
+            cache_lookup,
+            &mut physical_indices,
+            &mut weights,
+        )?;
+    }
+    validate_weights(&weights, table.len())?;
+    Ok(ActiveMetadataTable {
+        physical_indices: Arc::new(physical_indices),
+        weights,
+        metadata: table,
+    })
 }
 
 /// Parse an active metadata table and validate that every included sample is usable.
@@ -60,6 +112,8 @@ pub fn extract_metadata_ipc(
     let mut physical_indices = Vec::new();
     let mut row_count = 0_usize;
     let reader = FileReader::try_new(Cursor::new(ipc), None)?;
+    let arrow_schema = reader.schema();
+    let mut batches = Vec::new();
 
     for batch in reader {
         let batch = batch?;
@@ -75,6 +129,7 @@ pub fn extract_metadata_ipc(
             &mut physical_indices,
             &mut weights,
         )?;
+        batches.push(batch);
     }
 
     validate_active_metadata(row_count)?;
@@ -82,7 +137,7 @@ pub fn extract_metadata_ipc(
     Ok(ActiveMetadataTable {
         physical_indices: Arc::new(physical_indices),
         weights,
-        ipc: ipc.to_vec(),
+        metadata: ArrowMetadata::new(arrow_schema, batches)?,
     })
 }
 
@@ -104,7 +159,7 @@ fn validate_required_metadata_columns(
     Ok(())
 }
 
-/// Accept Arrow string width differences introduced by Polars IPC round-trips.
+/// Accept equivalent Arrow string layouts exported by Polars.
 fn metadata_update_type_matches(actual: &DataType, expected: &DataType) -> bool {
     actual == expected
         || matches!(
@@ -122,30 +177,79 @@ fn samples_metadata_batches(
     weights: &WeightState,
 ) -> CacheResult<Vec<RecordBatch>> {
     let mut output_batches = Vec::new();
+    visit_samples_metadata(
+        caches,
+        cache_offsets,
+        metadata_schema,
+        arrow_schema,
+        weights,
+        |batch| {
+            output_batches.push(batch);
+            Ok(())
+        },
+    )?;
+    Ok(output_batches)
+}
+
+/// Publish an explicit Arrow snapshot with serialization buffers bounded by export chunk size.
+pub fn write_samples_metadata_file(
+    path: &Path,
+    caches: &[LoadedCache],
+    cache_offsets: &[usize],
+    schema: &[MetadataField],
+) -> CacheResult<()> {
+    let arrow_schema = samples_metadata_schema(schema);
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut writer = FileWriter::try_new(file, &arrow_schema)?;
+    visit_samples_metadata(
+        caches,
+        cache_offsets,
+        schema,
+        &arrow_schema,
+        &WeightState::Uniform,
+        |batch| writer.write(&batch).map_err(CacheError::from),
+    )?;
+    writer.finish()?;
+    writer.get_ref().sync_all()?;
+    Ok(())
+}
+
+/// Process immutable cache batches in physical order without retaining prior batches.
+fn visit_samples_metadata(
+    caches: &[LoadedCache],
+    cache_offsets: &[usize],
+    metadata_schema: &[MetadataField],
+    arrow_schema: &Arc<Schema>,
+    weights: &WeightState,
+    mut consume: impl FnMut(RecordBatch) -> CacheResult<()>,
+) -> CacheResult<()> {
     for (cache_index, cache) in caches.iter().enumerate() {
         let cache_offset = cache_offset(cache_offsets, cache_index)?;
         let mut sample_start = 0_usize;
         let reader = cache.metadata_batches()?;
         for batch in reader {
             let metadata_batch = batch?;
-            let row_count = metadata_batch.num_rows();
-            let physical_offset = physical_offset(cache_offset, sample_start)?;
-            let weights = weight_slice(weights, physical_offset, row_count);
-            output_batches.push(samples_metadata_batch(
-                cache.cache_id.as_u64(),
-                sample_start,
-                arrow_schema,
-                metadata_schema,
-                &metadata_batch,
-                weights,
-            )?);
-            sample_start = sample_start.checked_add(row_count).ok_or_else(|| {
-                CacheError::InvalidInput("metadata row count overflowed usize".to_string())
-            })?;
+            for start in (0..metadata_batch.num_rows()).step_by(METADATA_BATCH_ROWS) {
+                let row_count = (metadata_batch.num_rows() - start).min(METADATA_BATCH_ROWS);
+                let chunk = metadata_batch.slice(start, row_count);
+                let physical_offset = physical_offset(cache_offset, sample_start)?;
+                let weights = weight_slice(weights, physical_offset, row_count);
+                consume(samples_metadata_batch(
+                    cache.cache_id.as_u64(),
+                    sample_start,
+                    arrow_schema,
+                    metadata_schema,
+                    &chunk,
+                    weights,
+                )?)?;
+                sample_start = sample_start.checked_add(row_count).ok_or_else(|| {
+                    CacheError::InvalidInput("metadata row count overflowed usize".to_string())
+                })?;
+            }
         }
         validate_cache_metadata_rows(cache_index, cache.sample_count(), sample_start)?;
     }
-    Ok(output_batches)
+    Ok(())
 }
 
 /// Return the stable public samples metadata schema used by Rust IPC exports.
@@ -307,12 +411,12 @@ fn weight_len(weights: &WeightSlice) -> usize {
 }
 
 /// Serialize Arrow record batches sharing one schema to an IPC file payload.
-fn write_record_batches_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> CacheResult<Vec<u8>> {
+pub fn write_metadata_ipc(table: &ArrowMetadata) -> CacheResult<Vec<u8>> {
     let mut bytes = Vec::new();
     {
-        let mut writer = FileWriter::try_new(&mut bytes, schema)?;
-        for batch in batches {
-            writer.write(batch)?;
+        let mut writer = FileWriter::try_new(&mut bytes, &table.schema)?;
+        for batch in table.reader() {
+            writer.write(&batch?)?;
         }
         writer.finish()?;
     }

@@ -4,6 +4,25 @@ All notable changes to DatasetRT are documented here.
 
 ## [Unreleased]
 
+### Backwards Incompatible Changes
+
+- Replace version 1 reconstruction bundles containing `metadata.parquet` with
+  version 2 bundles containing an immutable `metadata.arrow` snapshot. Old
+  Parquet exports are no longer accepted by `CachedDataset.from_config()`;
+  recreate them with `CachedDataset.dump_config()`. DataLoader construction
+  automatically creates snapshots in the new format.
+
+### Performance
+
+- Reduce metadata memory during DataLoader startup by sharing memory-mapped
+  Arrow columns across workers and retaining selected row views directly in
+  Rust. Shuffled splits share one mapped permutation per loader instead of
+  allocating a full permutation in every worker. Native cache indexes,
+  weights, and sampling arrays remain process-local.
+- Remove whole-table IPC copies from `get_metadata()` and `update_metadata()`.
+  Map original cache metadata lazily, share retained Arrow buffers between
+  Python and Rust, and stream construction exports in bounded row chunks.
+
 ## 0.4.0rc3 - 2026-10-10
 
 This candidate makes loader epochs finite, adds compact worker reconstruction,

@@ -341,7 +341,7 @@ Reject direct construction because every dataset requires a runtime.
 
 #### `CachedDataset.dump_config(path: DirectoryPath) -> FilePath`
 
-Save construction settings and active metadata Parquet into an existing directory.
+Save construction settings and active metadata Arrow into an existing directory.
 
 Return the generated dataset.json file. Cache payloads are referenced by
 absolute paths, not copied. Active row order, duplicates, weights, extra
@@ -352,7 +352,7 @@ are never overwritten. Keep the artifacts immutable while readers use them.
 
 #### `CachedDataset.from_config(cls, path: FilePath) -> CachedDataset`
 
-Construct fresh native state from an existing config and its metadata Parquet.
+Construct fresh native state from an existing config and its metadata Arrow.
 
 Validate paths and config before construction, then validate metadata in
 Rust. Restore the finite epoch length after metadata and start fresh
@@ -481,10 +481,10 @@ workers and continue their draw streams/cursors. Nonpersistent workers
 reconstruct fresh readers each pass. Split populations are fixed for the
 loader's lifetime, including when persistent workers are used.
 
-Construction saves a config and active metadata Parquet without loading
+Construction saves a config and active metadata Arrow without loading
 payloads or creating a consuming native reader. Parent edits do not change
 snapshots. Workers receive the config path and compact partition instructions,
-read the snapshot, and build their own native state. They do not query
+map shared snapshot buffers, and build their own native sampling state. They do not query
 distributed groups. With shuffle=True and seed=None, training processes
 agree a random partition seed during construction; construct loaders in
 the same order with the same global budget and batch size on every process.
@@ -525,7 +525,7 @@ Return the in-memory metadata table that controls future iterators.
 
 Contract:
 
-- Returns a Polars `DataFrame` copy; editing it does not mutate the
+- Returns a Polars `DataFrame` with shared immutable buffers; editing it does not mutate the
   dataset until the whole frame is passed to `update_metadata`.
 - Columns are `cache_id`, `sample_id`, every metadata column stored in
   the cache, `weight`, and any extra columns preserved from the previous
@@ -538,8 +538,8 @@ Contract:
   sample.
 - `len(dataset)` equals the configured epoch length. By default it
   matches the active row count, including duplicate rows.
-- Cache files are not read or rewritten by this method beyond exporting
-  the current Rust-owned in-memory table.
+- Original cache metadata is mapped lazily on first access. Later calls
+  share the retained Arrow buffers. No cache files are rewritten.
 
 #### `CachedDataset.set_samples_metadata(metadata: pl.DataFrame) -> None`
 
