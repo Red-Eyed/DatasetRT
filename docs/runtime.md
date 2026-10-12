@@ -26,7 +26,11 @@ Reader operation settings:
 - runtime `num_workers`: fixed pool size and maximum active read jobs.
 - `shuffle`: choose deterministic weighted sampling or physical cache order.
 
-Each iterator keeps at most `min(num_workers, prefetch_size)` reads active. Completed reads fit in a result queue of the same size, so workers do not wait on a full per-iterator result queue. Slow Python consumption stops new submissions instead of growing memory without bound.
+Each iterator keeps at most `min(num_workers, prefetch_size)` scheduled but
+unconsumed samples across active reads, queued results, and the reorder buffer.
+Out-of-order completion does not free a scheduling slot: the next consumer call
+replenishes slots released by emitted samples. A delayed early read or slow Python
+consumption therefore cannot grow the buffered sample count beyond this window.
 
 ## Writer Pipeline
 

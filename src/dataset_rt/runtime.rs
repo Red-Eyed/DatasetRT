@@ -86,6 +86,10 @@ fn wrapping_add_mod(start: usize, offset: usize, modulo: usize) -> Option<usize>
     }
 }
 
+#[cfg(test)]
+#[path = "runtime/tests.rs"]
+mod tests;
+
 pub struct RuntimeIterator {
     pool: Arc<WorkerPool>,
     caches: Arc<Vec<LoadedCache>>,
@@ -97,8 +101,6 @@ pub struct RuntimeIterator {
     pending: BTreeMap<usize, LoadedSample>,
     parallelism: usize,
     scheduled: usize,
-    in_flight: usize,
-    next_sequence: usize,
     emitted: usize,
     total: usize,
 }
@@ -129,8 +131,6 @@ impl RuntimeIterator {
             pending: BTreeMap::new(),
             parallelism,
             scheduled: 0,
-            in_flight: 0,
-            next_sequence: 0,
             emitted: 0,
             total,
         };
@@ -138,9 +138,9 @@ impl RuntimeIterator {
         Ok(iterator)
     }
 
-    /// Keep only the configured finite number of sample reads active for this iterator.
+    /// Count every scheduled, unconsumed sample against the bound, including reordered results.
     fn schedule_available(&mut self) -> CacheResult<()> {
-        while self.in_flight < self.parallelism && self.scheduled < self.total {
+        while self.scheduled - self.emitted < self.parallelism && self.scheduled < self.total {
             self.schedule_next()?;
         }
         Ok(())
@@ -177,7 +177,6 @@ impl RuntimeIterator {
         })?;
 
         self.scheduled += 1;
-        self.in_flight += 1;
         Ok(())
     }
 }
@@ -189,10 +188,14 @@ impl Iterator for RuntimeIterator {
         if self.emitted >= self.total {
             return None;
         }
+        if let Err(error) = self.schedule_available() {
+            self.emitted = self.total;
+            self.cancelled.store(true, Ordering::Release);
+            return Some(Err(error));
+        }
 
         loop {
-            if let Some(result) = self.pending.remove(&self.next_sequence) {
-                self.next_sequence += 1;
+            if let Some(result) = self.pending.remove(&self.emitted) {
                 self.emitted += 1;
                 return Some(Ok(result));
             }
@@ -210,22 +213,9 @@ impl Iterator for RuntimeIterator {
                     return Some(Err(CacheError::WorkerFailed));
                 }
             };
-            let Some(in_flight) = self.in_flight.checked_sub(1) else {
-                self.emitted = self.total;
-                self.cancelled.store(true, Ordering::Release);
-                return Some(Err(CacheError::WorkerFailed));
-            };
-            self.in_flight = in_flight;
-            if self.schedule_available().is_err() {
-                self.emitted = self.total;
-                self.cancelled.store(true, Ordering::Release);
-                return Some(Err(CacheError::WorkerFailed));
-            }
-
             // Read workers may finish out of order; Python observes the planned
             // sampler order, so completed future samples wait in a small buffer.
-            if loaded.sequence == self.next_sequence {
-                self.next_sequence += 1;
+            if loaded.sequence == self.emitted {
                 self.emitted += 1;
                 return Some(Ok(loaded.result));
             }

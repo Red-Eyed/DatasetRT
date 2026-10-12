@@ -23,6 +23,12 @@ All notable changes to DatasetRT are documented here.
   Map original cache metadata lazily, share retained Arrow buffers between
   Python and Rust, and stream construction exports in bounded row chunks.
 
+### Fixed
+
+- Bound the reader's combined active reads, queued results, and reorder buffer.
+  A delayed early read no longer allows later completed samples to accumulate
+  toward the epoch size; emission order and iterator-drop cancellation are preserved.
+
 ## 0.4.0rc3 - 2026-10-10
 
 This candidate makes loader epochs finite, adds compact worker reconstruction,
