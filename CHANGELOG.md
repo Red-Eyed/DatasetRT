@@ -2,6 +2,11 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.0rc5 - 2026-10-12
+
+- Advance the release candidate version to package the completed reader memory
+  bounds and shared immutable cache indexes. No additional runtime changes.
+
 ## 0.4.0rc4 - 2026-10-12
 
 ### Backwards Incompatible Changes
