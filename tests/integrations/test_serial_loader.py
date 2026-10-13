@@ -391,7 +391,6 @@ def test_invalid_sample_budget(
         InvalidWorkerOptions(num_workers=1, timeout=float("inf")),
         InvalidWorkerOptions(prefetch_factor=2),
         InvalidWorkerOptions(num_workers=1, prefetch_factor=0),
-        InvalidWorkerOptions(persistent_workers=True),
         InvalidWorkerOptions(multiprocessing_context="spawn"),
         InvalidWorkerOptions(num_workers=1, multiprocessing_context="invalid"),
     ],

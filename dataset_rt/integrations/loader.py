@@ -263,7 +263,6 @@ def _validate_worker_options(
     timeout: float,
     multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
     prefetch_factor: int | None,
-    persistent_workers: bool,
 ) -> None:
     """Reject unusable worker settings before exporting dataset-scale metadata."""
     if type(num_workers) is not int or not 0 <= num_workers < 1 << 32:
@@ -278,8 +277,6 @@ def _validate_worker_options(
         raise ValueError("prefetch_factor must be a positive integer")
     if num_workers == 0 and prefetch_factor is not None:
         raise ValueError("prefetch_factor requires num_workers > 0")
-    if num_workers == 0 and persistent_workers:
-        raise ValueError("persistent_workers requires num_workers > 0")
     if multiprocessing_context is None:
         return
     if num_workers == 0:
@@ -338,7 +335,6 @@ def make_dataloader(
         timeout=timeout,
         multiprocessing_context=multiprocessing_context,
         prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
     )
     if type(batch_size) is not int or not 1 <= batch_size <= sys.maxsize:
         raise ValueError("batch_size must be a positive integer fitting sys.maxsize")
@@ -350,6 +346,8 @@ def make_dataloader(
     ):
         if type(value) is not bool:
             raise ValueError(f"{name} must be a boolean")
+    if num_workers == 0:
+        persistent_workers = False
     if samples_per_epoch is not None and (
         type(samples_per_epoch) is not int or not 1 <= samples_per_epoch <= MAX_SAMPLE_BUDGET
     ):

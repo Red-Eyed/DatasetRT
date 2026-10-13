@@ -286,7 +286,7 @@ class CachedDataset:
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
+        persistent_workers: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of transformed samples into a caller-defined result."""
         ...
@@ -311,7 +311,7 @@ class CachedDataset:
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
+        persistent_workers: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of cache records without a sample transform."""
         ...
@@ -336,7 +336,7 @@ class CachedDataset:
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
+        persistent_workers: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Delegate to Torch default collation when no custom callback is supplied."""
         ...
@@ -362,7 +362,7 @@ class CachedDataset:
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
-        persistent_workers: bool = False,
+        persistent_workers: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Build a finite PyTorch DataLoader for training or evaluation.
 
@@ -420,9 +420,11 @@ class CachedDataset:
         metadata is unchanged. This also happens with seed=None, because its
         randomness is chosen once per loader. A short epoch can therefore keep
         omitting the same population rows. With num_workers>0, use
-        persistent_workers=True to continue across epochs; False emits a warning.
+        persistent_workers=True (the default) to continue across epochs; explicit
+        False emits a warning.
         With num_workers=0 the reader stays in the main process and continues
-        without persistent workers. Split populations are fixed for the
+        without persistent workers; the worker-only flag is disabled in that mode.
+        Split populations are fixed for the
         loader's lifetime, including when persistent workers are used.
 
         Construction saves a config and active metadata Arrow without loading

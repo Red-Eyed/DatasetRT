@@ -2,6 +2,21 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.0rc6 - 2026-10-13
+
+### Fixed
+
+- Default `persistent_workers=True` for loading workers so repeated epochs
+  continue native sampling progress. Zero-worker loading disables the worker-only
+  flag and retains its main-process reader.
+- Warn when loading workers use `persistent_workers=False`: reconstructed readers
+  reuse their saved sampling seeds and reset draw offsets or sequential cursors,
+  repeating the same sample sequence each epoch, including with `seed=None`.
+  Use `persistent_workers=True` to continue multiworker training streams.
+- Document the training coverage failure and review loader defaults. Add real
+  short weighted epoch replay tests across fork, spawn, and forkserver workers.
+  Explicitly nonpersistent readers still restart; the warning does not advance them.
+
 ## 0.4.0rc5 - 2026-10-12
 
 - Advance the release candidate version to package the completed reader memory

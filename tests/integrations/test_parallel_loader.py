@@ -141,6 +141,7 @@ def test_nonpersistent_workers_warn_about_repeated_epochs(
             worker_partition=partition,
             num_workers=2,
             samples_per_epoch=1,
+            persistent_workers=False,
         )
 
 
@@ -155,6 +156,18 @@ def test_retained_readers_do_not_warn_about_restarts(
         accepted_dataset.to_torch_dataloader(
             shuffle=shuffle, num_workers=workers, persistent_workers=persistent
         )
+    assert not captured
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_default_persistence_preserves_consuming_readers(
+    accepted_dataset: CachedDataset, workers: int
+) -> None:
+    """Enable persistence by default only when Torch actually starts loading workers."""
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        loader = accepted_dataset.to_torch_dataloader(num_workers=workers)
+    assert loader.persistent_workers == (workers > 0)
     assert not captured
 
 

@@ -413,19 +413,19 @@ it with `DataLoader` while keeping domain decoding in Python.
 Raises:
     ImportError: If PyTorch is not installed in the active environment.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Collate lists of transformed samples into a caller-defined result.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Collate lists of cache records without a sample transform.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Delegate to Torch default collation when no custom callback is supplied.
 
-#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, batch_size: PositiveInt = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = False) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] = 'split', work_dir: DirectoryPath | None = None, batch_size: PositiveInt = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int = 1, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Build a finite PyTorch DataLoader for training or evaluation.
 
@@ -483,9 +483,11 @@ or sequential cursor each pass, repeating the same sample sequence when
 metadata is unchanged. This also happens with seed=None, because its
 randomness is chosen once per loader. A short epoch can therefore keep
 omitting the same population rows. With num_workers>0, use
-persistent_workers=True to continue across epochs; False emits a warning.
+persistent_workers=True (the default) to continue across epochs; explicit
+False emits a warning.
 With num_workers=0 the reader stays in the main process and continues
-without persistent workers. Split populations are fixed for the
+without persistent workers; the worker-only flag is disabled in that mode.
+Split populations are fixed for the
 loader's lifetime, including when persistent workers are used.
 
 Construction saves a config and active metadata Arrow without loading

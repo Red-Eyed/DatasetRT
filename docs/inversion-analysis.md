@@ -38,7 +38,8 @@ preserves weights and seeds but resets sampling offsets; it does not continue
 training coverage. The default was insufficiently guarded, and earlier assistant
 advice incorrectly dismissed persistence as a correctness concern.
 
-Construction now warns when loading workers are nonpersistent. Use persistent
+Loading workers now persist by default; explicitly nonpersistent workers warn
+at construction. Use persistent
 workers to continue native streams, or zero-worker loading to retain state in the
 main process. This warning does not fix replay automatically. The detailed
 [failure analysis and default review](inversion-checklists.md#training-failure-analysis-nonpersistent-worker-replay--2026-10-13)

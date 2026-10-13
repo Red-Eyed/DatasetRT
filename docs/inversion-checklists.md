@@ -613,7 +613,8 @@ correctness before checking reconstruction and native draw-offset initialization
 The user reports training impact; its duration and model-quality impact have not
 been measured here.
 
-The mitigation warns at loader construction whenever positive loading workers
+The mitigation defaults to persistent workers and warns at loader construction
+whenever positive loading workers
 use nonpersistent readers, documents seed reuse and cursor reset, and tests both
 explicit and omitted seeds. Persistent workers retain native progress; zero-worker
 loading retains its reader in the main process. The warning does not repair old
@@ -624,7 +625,7 @@ epoch or draw-offset propagation remains a separate correctness improvement.
 
 | Default | Consequence and guidance |
 | --- | --- |
-| `num_workers=0`, `persistent_workers=False` | The main-process reader survives repeated passes. Enabling loading workers without persistence changes this behavior and now warns. Use persistence for continuing multiworker training streams. |
+| `num_workers=0`, `persistent_workers=True` | The worker-only flag is disabled for zero-worker loading; the main-process reader survives repeated passes. Positive loading workers persist by default. Explicitly disabling persistence with loading workers warns about replay. |
 | `shuffle=True`, `seed=None` | Weighted sampling with replacement; randomness is selected once per loader, not once per epoch. Persistence advances draw offsets while retaining the seed. |
 | `samples_per_epoch=None` | Inherits the dataset's configured epoch length at construction, which may be shorter than the population. A short epoch neither reduces the population nor guarantees coverage. |
 | `worker_partition="split"` | Fixed partitions and quotas based on sample counts can distort global weighted frequencies. Use `replicate` for full-population weighted sampling in each consumer; its private sampling state uses more RAM. |
