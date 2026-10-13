@@ -588,3 +588,54 @@ this CPU-only machine. A native/serial/spawn reader smoke run included eight
 loading workers. The macOS ARM64 wheel contains the benchmark modules and extra,
 and its extracted module entry point passed the CLI help check. GPU throughput
 and physical multi-host behavior remain hardware acceptance tasks.
+
+## Training failure analysis: nonpersistent worker replay — 2026-10-13
+
+The user reported affected training with a 10-million-sample weighted population
+and a 1-million-sample epoch. With loading workers and
+`persistent_workers=False`, each DataLoader pass reconstructs native readers
+from the same saved worker seeds and resets their draw offsets to zero. The same
+weighted draw sequence repeats each epoch when the snapshot and topology are
+unchanged. A million draws can contain duplicates and do not represent a million
+distinct samples. The remaining population is never explored beyond that fixed
+sequence. Sequential cursors reset too. Metadata and weights survive; progress
+through the sampling stream does not.
+
+`seed=None` does not prevent replay: a common random seed is chosen once when the
+loader is built, and its derived worker seeds are retained in the construction
+recipe. PyTorch's worker randomness is not the native DatasetRT sampling seed.
+
+The default copied PyTorch's `persistent_workers=False` without accounting for
+DatasetRT's worker-owned sampling progress. Existing replay tests verified the
+behavior but did not require a warning or treat it as a training coverage hazard.
+Earlier assistant advice incorrectly said persistence was unnecessary for
+correctness before checking reconstruction and native draw-offset initialization.
+The user reports training impact; its duration and model-quality impact have not
+been measured here.
+
+The mitigation warns at loader construction whenever positive loading workers
+use nonpersistent readers, documents seed reuse and cursor reset, and tests both
+explicit and omitted seeds. Persistent workers retain native progress; zero-worker
+loading retains its reader in the main process. The warning does not repair old
+training runs or advance an epoch counter for reconstructed workers. Parent-owned
+epoch or draw-offset propagation remains a separate correctness improvement.
+
+### Loader default review
+
+| Default | Consequence and guidance |
+| --- | --- |
+| `num_workers=0`, `persistent_workers=False` | The main-process reader survives repeated passes. Enabling loading workers without persistence changes this behavior and now warns. Use persistence for continuing multiworker training streams. |
+| `shuffle=True`, `seed=None` | Weighted sampling with replacement; randomness is selected once per loader, not once per epoch. Persistence advances draw offsets while retaining the seed. |
+| `samples_per_epoch=None` | Inherits the dataset's configured epoch length at construction, which may be shorter than the population. A short epoch neither reduces the population nor guarantees coverage. |
+| `worker_partition="split"` | Fixed partitions and quotas based on sample counts can distort global weighted frequencies. Use `replicate` for full-population weighted sampling in each consumer; its private sampling state uses more RAM. |
+| `batch_size=1`, `drop_last=False` | Keeps incomplete batches; distributed budgets may pad counts. Set batching and tail policy explicitly for training. |
+| `native_num_workers=1`, `prefetch_factor=None` | One native reader thread per consumer; Torch supplies its multiprocess prefetch default. Private buffers multiply across ranks and workers. |
+| `multiprocessing_context=None` | Torch uses the platform default. Select a supported context explicitly when process initialization matters; CUDA loading should use spawn. |
+| `pin_memory=False`, `timeout=0` | No pinned-memory transfer optimization and no positive loader timeout. Choose these according to accelerator and failure-detection needs. |
+
+- [ ] A new worker-lifecycle implementation must prove continuing draw/cursor
+  progress across reconstructed readers, with both explicit and omitted seeds.
+- [x] Real fork/spawn/forkserver tests draw eight samples from a 20-row weighted
+  population across two passes, with explicit and omitted seeds. Restarted worker
+  PIDs differ while their draw sequences repeat. Checking saved weights alone
+  would not detect this failure.

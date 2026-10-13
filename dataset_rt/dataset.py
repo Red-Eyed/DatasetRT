@@ -415,7 +415,14 @@ class CachedDataset:
         same worker topology. None selects randomness once during construction.
         Repeated passes reuse native state in the main process or persistent
         workers and continue their draw streams/cursors. Nonpersistent workers
-        reconstruct fresh readers each pass. Split populations are fixed for the
+        reconstruct fresh readers with the same saved seed and reset draw offset
+        or sequential cursor each pass, repeating the same sample sequence when
+        metadata is unchanged. This also happens with seed=None, because its
+        randomness is chosen once per loader. A short epoch can therefore keep
+        omitting the same population rows. With num_workers>0, use
+        persistent_workers=True to continue across epochs; False emits a warning.
+        With num_workers=0 the reader stays in the main process and continues
+        without persistent workers. Split populations are fixed for the
         loader's lifetime, including when persistent workers are used.
 
         Construction saves a config and active metadata Arrow without loading

@@ -29,3 +29,17 @@ DatasetRT makes those failures hard by keeping correctness-sensitive behavior in
 - Unsupported adapter modes should fail clearly rather than produce plausible-looking bad training data.
 
 The useful intuition is that DatasetRT does not try to make every path flexible. It makes the dangerous paths narrow, typed, bounded, and validated before they can affect training.
+
+## Nonpersistent-worker training replay — 2026-10-13
+
+The user reported affected training after nonpersistent workers repeatedly drew
+the same short epoch from a larger weighted population. Reconstructing readers
+preserves weights and seeds but resets sampling offsets; it does not continue
+training coverage. The default was insufficiently guarded, and earlier assistant
+advice incorrectly dismissed persistence as a correctness concern.
+
+Construction now warns when loading workers are nonpersistent. Use persistent
+workers to continue native streams, or zero-worker loading to retain state in the
+main process. This warning does not fix replay automatically. The detailed
+[failure analysis and default review](inversion-checklists.md#training-failure-analysis-nonpersistent-worker-replay--2026-10-13)
+records the cause, impact limits, regression coverage, and remaining epoch-state work.

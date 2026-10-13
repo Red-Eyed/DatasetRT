@@ -8,6 +8,7 @@ import os
 import pickle
 import signal
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from itertools import islice
@@ -17,7 +18,7 @@ import polars as pl
 import pytest
 from torch.utils.data import DataLoader, get_worker_info
 
-from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
+from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations.loader import EmptyPartition, LocalReader, PendingReader, ReaderAdapter
 from dataset_rt.integrations.loading import derive_seed
@@ -37,6 +38,9 @@ Case = Literal[
     "persistent-shuffle",
     "random-persistent",
     "replay",
+    "random-replay",
+    "short-replay",
+    "random-short-replay",
     "callback-error",
     "transform-error",
     "death",
@@ -107,6 +111,51 @@ def recipe(tmp_path: Path) -> ReaderRecipe:
         selected.with_columns(pl.Series("weight", [3.0, 1.0, 6.0]), pl.lit("kept").alias("extra"))
     )
     return dataset._reader_recipe()
+
+
+@pytest.fixture
+def accepted_dataset(recipe: ReaderRecipe) -> CachedDataset:
+    """Restore validated weights without starting any DataLoader processes."""
+    runtime = DatasetRuntime(num_workers=1)
+    dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
+    match recipe.metadata:
+        case MetadataSnapshot() as snapshot:
+            dataset._restore_metadata(snapshot)
+    return dataset
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("seed", [None, 7])
+@pytest.mark.parametrize("partition", ["split", "replicate"])
+def test_nonpersistent_workers_warn_about_repeated_epochs(
+    accepted_dataset: CachedDataset,
+    shuffle: bool,
+    seed: int | None,
+    partition: Literal["split", "replicate"],
+) -> None:
+    """Expose replay risk at construction for both default and explicit seeds."""
+    with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
+        accepted_dataset.to_torch_dataloader(
+            shuffle=shuffle,
+            seed=seed if shuffle else None,
+            worker_partition=partition,
+            num_workers=2,
+            samples_per_epoch=1,
+        )
+
+
+@pytest.mark.parametrize(("workers", "persistent"), [(0, False), (2, True)])
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_retained_readers_do_not_warn_about_restarts(
+    accepted_dataset: CachedDataset, workers: int, persistent: bool, shuffle: bool
+) -> None:
+    """Avoid a restart warning when the consuming reader survives loader passes."""
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        accepted_dataset.to_torch_dataloader(
+            shuffle=shuffle, num_workers=workers, persistent_workers=persistent
+        )
+    assert not captured
 
 
 def initialize_worker(worker_id: int) -> None:
@@ -294,8 +343,39 @@ def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> No
     gc.collect()
 
 
+def run_short_epoch_replay(recipe: ReaderRecipe, context: Context, seed: int | None) -> None:
+    """Prove that restarted readers repeat a short weighted epoch over a larger population."""
+    runtime = DatasetRuntime(num_workers=1)
+    dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
+    dataset.update_metadata(
+        dataset.get_metadata().with_columns((pl.col("index").cast(pl.Float64) + 1).alias("weight"))
+    )
+    assert len(dataset) == 20
+    with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
+        loader = dataset.to_torch_dataloader(
+            seed=seed,
+            samples_per_epoch=8,
+            worker_partition="replicate",
+            num_workers=2,
+            multiprocessing_context=context,
+            persistent_workers=False,
+            sample_transform_fn=observe,
+            collate_fn=identity,
+        )
+    first = list(loader)
+    second = list(loader)
+    assert len(first) == len(second) == 8
+    assert [(row.worker, row.cache, row.sample, row.seed) for row in first] == [
+        (row.worker, row.cache, row.sample, row.seed) for row in second
+    ]
+    assert {row.pid for row in first}.isdisjoint(row.pid for row in second)
+
+
 def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
     """Warm the real parent before launching each isolated DataLoader scenario."""
+    if case in ("short-replay", "random-short-replay"):
+        run_short_epoch_replay(recipe, context, 7 if case == "short-replay" else None)
+        return
     if case in ("batch-tail", "batch-drop"):
         run_batch_case(recipe, context, case == "batch-drop")
         return
@@ -343,7 +423,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
     workers = 4 if case == "empty" else 2
     shuffle = case not in ("validation", "persistent-validation", "empty")
     persistent = case in ("persistent-validation", "persistent-shuffle", "random-persistent")
-    seed = None if case == "random-persistent" or not shuffle else 7
+    seed = None if case in ("random-persistent", "random-replay") or not shuffle else 7
     transform = observe
     match case:
         case "transform-error":
@@ -426,7 +506,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         verify_validation(first, empty=case == "empty")
     else:
         verify_shuffled(first, workers, seed, weighted=case == "weighted")
-    if case == "replay":
+    if case in ("replay", "random-replay"):
         second = list(islice(loader, 40))
         assert [(r.worker, r.cache, r.sample, r.seed) for r in first] == [
             (r.worker, r.cache, r.sample, r.seed) for r in second
@@ -495,6 +575,9 @@ def reject_inherited(adapter: ReaderAdapter[Observation]) -> None:
         "persistent-shuffle",
         "random-persistent",
         "replay",
+        "random-replay",
+        "short-replay",
+        "random-short-replay",
         "callback-error",
         "transform-error",
         "death",

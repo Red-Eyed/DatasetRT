@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pickle
 import sys
+import warnings
 from dataclasses import dataclass
 from math import isfinite
 from multiprocessing import get_all_start_methods
@@ -362,6 +363,16 @@ def make_dataloader(
     if shuffle and seed is not None:
         reader_seed(shuffle=True, seed=seed, rank_id=0, worker_id=0)
     _validate_transform(sample_transform_fn, num_workers)
+    if num_workers > 0 and not persistent_workers:
+        warnings.warn(
+            "persistent_workers=False restarts DatasetRT readers on every DataLoader pass "
+            "with the same sampling seed and reset draw offset or sequential cursor. "
+            "With unchanged metadata, each epoch repeats the same sample sequence, "
+            "including when seed=None. Short epochs can repeatedly omit the rest of "
+            "the population. Set persistent_workers=True to continue sampling across epochs.",
+            UserWarning,
+            stacklevel=3,
+        )
     recipe = dataset._reader_recipe()
     if samples_per_epoch is None and not 1 <= recipe.sample_count <= MAX_SAMPLE_BUDGET:
         raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
