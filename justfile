@@ -36,6 +36,9 @@ clippy:
 test-python: develop
     {{py}} pytest
 
+test-correctness: develop
+    {{py}} pytest -n 0 tests/integrations/test_loader_correctness.py --durations=5
+
 sync-api-docs:
     {{py}} scripts/sync_api_docs.py
 

@@ -535,3 +535,26 @@ Each iterator snapshots:
 - Seed and epoch number when `shuffle=True`.
 
 Metadata changes made after iterator construction do not affect that iterator.
+
+## Fast loader correctness checks
+
+Run `just test-correctness` before training after loader changes. It rebuilds the
+native extension automatically and runs a small suite with real spawned workers.
+The tests ran in 2.47 seconds on the development Mac, excluding command and build
+startup; timing varies across machines.
+
+The suite checks default persistence and spawn, exact weighted-stream continuation
+across short epochs, reproducibility across independent loaders, full weighted
+population access, exact finite batch counts, and the nonpersistent replay warning
+even with diagnostics disabled. A 32-sample population and eight-sample epochs
+exercise the same population/epoch distinction as a 10M-sample dataset with 1M
+samples per epoch, without production-size allocations. Only CPU availability is
+controlled for reproducible automatic worker counts; Torch and native readers are real.
+
+Each worker's two short epochs must match one uninterrupted native reference
+stream with its derived seed and the full weight table. This detects repeated,
+skipped, or reordered draws at the Python worker boundary. The native sampler is
+the reference, so shared bugs inside that sampler require its separate Rust tests.
+Worker delivery has a 15-second timeout. This suite complements `just check`;
+it does not cover distributed ranks, every start method, memory limits, or
+mid-epoch cancellation.
