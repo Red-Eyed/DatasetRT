@@ -363,8 +363,12 @@ failures propagate.
 `sample_transform_fn` receives a native `CachedSample`. Collation always receives
 a list, even with `batch_size=1`: transformed samples if a transform is supplied,
 otherwise `CachedSample` values. `multiprocessing_context` selects how workers
-start: `"fork"`, `"spawn"`, `"forkserver"`, or a `multiprocessing.BaseContext`
-object. `None` uses PyTorch's platform default.
+start: `"spawn"` (the default), `"fork"`, `"forkserver"`, or a
+`multiprocessing.BaseContext` object. `"inherit"` uses Python's platform default.
+With zero loading workers, the context is omitted. Startup diagnostics report
+the resolved start method, or `disabled` for zero workers. Spawn requires a
+guarded application entry point (`if __name__ == "__main__":`) and picklable
+callbacks; persistent workers amortize its startup cost.
 
 ```python
 # Finite weighted training: 32,000 samples / 32 = 1,000 batches per epoch.
@@ -464,7 +468,7 @@ finite counts and replay, and saves JSON timing/resource results.
 worker processes. It creates immutable fixture caches automatically and compares
 direct native iteration, a zero-worker loader, and one/two/four-worker loaders.
 The benchmark supports Linux and macOS and defaults to fork; the helper's
-own default remains PyTorch's platform default.
+own default is spawn.
 
 ```bash
 uv run --python 3.11 --extra dev scripts/bench_reader.py --output plan/evidence/reader-fork.json

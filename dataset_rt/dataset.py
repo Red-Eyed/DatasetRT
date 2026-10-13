@@ -283,7 +283,8 @@ class CachedDataset:
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int | Literal["auto"] = "auto",
-        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
+        multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver"]
+        | BaseContext = "spawn",
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
@@ -309,7 +310,8 @@ class CachedDataset:
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int | Literal["auto"] = "auto",
-        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
+        multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver"]
+        | BaseContext = "spawn",
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
@@ -335,7 +337,8 @@ class CachedDataset:
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int | Literal["auto"] = "auto",
-        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
+        multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver"]
+        | BaseContext = "spawn",
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
@@ -362,7 +365,8 @@ class CachedDataset:
         pin_memory: bool = False,
         timeout: float = 0,
         native_num_workers: int | Literal["auto"] = "auto",
-        multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
+        multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver"]
+        | BaseContext = "spawn",
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
@@ -494,9 +498,10 @@ class CachedDataset:
         Collation always receives a list, including when batch_size=1. The list
         contains transformed samples if sample_transform_fn is supplied, otherwise
         CachedSample values. multiprocessing_context selects how workers start:
-        "fork", "spawn", "forkserver", or a multiprocessing BaseContext object.
-        None uses PyTorch's platform default. Resolved pinning, timeout, prefetch,
-        and worker lifetime follow ordinary PyTorch semantics. PyTorch is optional
+        "spawn" (the default), "fork", "forkserver", or a multiprocessing BaseContext
+        object. "inherit" uses Python's platform default. With num_workers=0,
+        the context is omitted because no subprocesses are created. Resolved pinning,
+        timeout, prefetch, and worker lifetime follow ordinary PyTorch semantics. PyTorch is optional
         until called.
         """
         from dataset_rt.integrations.loader import make_dataloader

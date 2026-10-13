@@ -260,7 +260,7 @@ def make_loader(
             drop_last=config.drop_last,
             pin_memory=config.pin_memory,
             timeout=config.worker_timeout if config.num_workers else 0,
-            multiprocessing_context=config.worker_context if config.num_workers else None,
+            multiprocessing_context=config.worker_context,
             persistent_workers=config.persistent_workers and config.num_workers > 0,
             prefetch_factor=config.prefetch_factor if config.num_workers else "auto",
             verbose=not config.quiet,

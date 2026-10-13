@@ -104,7 +104,7 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
             worker_partition="replicate" if options.shuffle else "split",
             batch_size=4,
             num_workers=options.workers,
-            multiprocessing_context=options.worker_context if options.workers else None,
+            multiprocessing_context=options.worker_context,
             persistent_workers=options.workers > 0,
             verbose=not options.quiet,
             sample_transform_fn=transform,

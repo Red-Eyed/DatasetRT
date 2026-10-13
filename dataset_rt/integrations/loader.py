@@ -390,7 +390,7 @@ def make_dataloader(
     pin_memory: bool,
     timeout: float,
     native_num_workers: int | Literal["auto"],
-    multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
+    multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver"] | BaseContext,
     worker_init_fn: Callable[[int], None] | None,
     prefetch_factor: int | Literal["auto"],
     persistent_workers: bool | Literal["auto"],
@@ -445,7 +445,7 @@ def make_dataloader(
             drop_last=drop_last,
             pin_memory=pin_memory,
             timeout=timeout,
-            multiprocessing_context=multiprocessing_context,
+            multiprocessing_context=workers.context,
             worker_init_fn=WorkerInitializer(worker_init_fn),
             prefetch_factor=workers.prefetch,
             persistent_workers=workers.persistent,
@@ -461,7 +461,7 @@ def make_dataloader(
                 "event=loader_ready pid=%s rank=%s seed=%s worker_seeds=%s "
                 "num_workers=%s native_threads_per_consumer=%s partition=%s "
                 "persistent=%s prefetch_factor=%s native_prefetch=%s samples=%s samples_per_rank=%s "
-                "batch_size=%s world_size=%s shuffle=%s",
+                "batch_size=%s world_size=%s shuffle=%s multiprocessing_context=%s",
                 os.getpid(),
                 replica.rank,
                 resolved_seed,
@@ -477,6 +477,7 @@ def make_dataloader(
                 batch_size,
                 replica.world_size,
                 shuffle,
+                workers.context.get_start_method() if workers.context is not None else "disabled",
             )
         return loader
     except BaseException:

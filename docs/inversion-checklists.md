@@ -632,7 +632,7 @@ epoch or draw-offset propagation remains a separate correctness improvement.
 | `batch_size=1`, `drop_last=False` | Keeps incomplete batches; distributed budgets may pad counts. Set batching and tail policy explicitly for training. |
 | `native_num_workers="auto"`, `prefetch_factor="auto"` | Select 1–4 native threads using the same CPU-budget observation as automatic process selection. Auto prefetch resolves to two batches per loading worker or disabled with zero workers. Private buffers multiply across ranks and workers. |
 | `verbose=True` | Log resolved seeds, counts, prefetch, and reader starts/passes; restarted readers report sampling resets. Quiet mode suppresses these events but retains replay warnings. |
-| `multiprocessing_context=None` | Torch uses the platform default. Select a supported context explicitly when process initialization matters; CUDA loading should use spawn. |
+| `multiprocessing_context="spawn"` | Start fresh loading processes by default. `"inherit"` selects Python's platform default; zero-worker loading omits the context. Spawn requires a guarded entry point and picklable callbacks. |
 | `pin_memory=False`, `timeout=0` | No pinned-memory transfer optimization and no positive loader timeout. Choose these according to accelerator and failure-detection needs. |
 
 - [ ] A new worker-lifecycle implementation must prove continuing draw/cursor

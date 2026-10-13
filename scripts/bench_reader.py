@@ -379,7 +379,7 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
     loader: Iterable[tuple[Output, ...]]
     if spec.case.mode == "loader":
         context = spec.case.context
-        worker_context = None if context == "serial" else context
+        worker_context = "spawn" if context == "serial" else context
         loader = cast(
             "Iterable[tuple[Output, ...]]",
             dataset.to_torch_dataloader(
@@ -392,7 +392,7 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
                 sample_transform_fn=transform,
                 collate_fn=collate,
                 native_num_workers=config.native_workers,
-                multiprocessing_context=worker_context if spec.case.workers else None,
+                multiprocessing_context=worker_context,
                 prefetch_factor=config.prefetch_factor if spec.case.workers else "auto",
                 persistent_workers=config.persistent_workers and spec.case.workers > 0,
                 verbose=not config.quiet,

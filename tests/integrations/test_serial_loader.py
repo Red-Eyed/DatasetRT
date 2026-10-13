@@ -60,7 +60,9 @@ class InvalidWorkerOptions:
     timeout: float = 0
     prefetch_factor: int | Literal["auto"] = "auto"
     persistent_workers: bool = False
-    multiprocessing_context: Literal["fork", "spawn", "forkserver", "invalid"] | None = None
+    multiprocessing_context: Literal["inherit", "fork", "spawn", "forkserver", "invalid"] | None = (
+        "spawn"
+    )
 
 
 @dataclass(frozen=True)
@@ -417,7 +419,7 @@ def test_invalid_sample_budget(
         InvalidWorkerOptions(num_workers=1, timeout=float("inf")),
         InvalidWorkerOptions(prefetch_factor=2),
         InvalidWorkerOptions(num_workers=1, prefetch_factor=0),
-        InvalidWorkerOptions(multiprocessing_context="spawn"),
+        InvalidWorkerOptions(multiprocessing_context=None),
         InvalidWorkerOptions(num_workers=1, multiprocessing_context="invalid"),
     ],
 )
@@ -642,3 +644,38 @@ def test_inherited_and_explicit_epoch_budgets(dataset: CachedDataset, shuffle: b
     assert len(explicit) == len(list(explicit)) == 2
     assert sum(len(batch) for batch in inherited) == 17
     assert sum(len(batch) for batch in explicit) == 5
+
+
+@pytest.mark.parametrize("workers", [0, 1])
+@pytest.mark.parametrize("context", ["spawn", "inherit"])
+def test_resolved_start_method(
+    dataset: CachedDataset,
+    workers: int,
+    context: Literal["spawn", "inherit"],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Resolve inheritance once and omit contexts for main-process loading."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="dataset_rt.loader"):
+        loader = dataset.to_torch_dataloader(
+            num_workers=workers, multiprocessing_context=context, native_num_workers=1
+        )
+    expected = mp.get_context().get_start_method() if context == "inherit" else "spawn"
+    if workers == 0:
+        assert loader.multiprocessing_context is None
+        expected = "disabled"
+    else:
+        assert loader.multiprocessing_context is not None
+        assert loader.multiprocessing_context.get_start_method() == expected
+    assert f"multiprocessing_context={expected}" in caplog.text
+
+
+def test_default_start_method(dataset: CachedDataset) -> None:
+    """The public default launches spawned workers regardless of platform default."""
+    loader = dataset.to_torch_dataloader(
+        shuffle=False, num_workers=1, native_num_workers=1, collate_fn=indices, timeout=15
+    )
+    assert loader.multiprocessing_context is not None
+    assert loader.multiprocessing_context.get_start_method() == "spawn"
+    assert [value for batch in loader for value in batch] == list(range(10))

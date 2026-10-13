@@ -242,7 +242,7 @@ def make_loader(
             batch_size=4,
             drop_last=case.drop_last,
             num_workers=case.workers,
-            multiprocessing_context=case.context if case.workers else None,
+            multiprocessing_context=case.context,
             sample_transform_fn=fail_transform if failing else observe,
             collate_fn=collate,
             prefetch_factor=1 if case.workers else "auto",

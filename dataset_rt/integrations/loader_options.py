@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from math import isfinite
-from multiprocessing import get_all_start_methods
+from multiprocessing import get_all_start_methods, get_context
 from multiprocessing.context import BaseContext
 from typing import Literal
 
@@ -33,6 +33,7 @@ class ResolvedWorkers:
     counts: WorkerCounts
     persistent: bool
     prefetch: int | None
+    context: BaseContext | None
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class LoaderOptions:
     pin_memory: bool
     persistent_workers: bool | Literal["auto"]
     timeout: float
-    context: Literal["fork", "spawn", "forkserver"] | BaseContext | None
+    context: Literal["inherit", "fork", "spawn", "forkserver"] | BaseContext
     prefetch: int | Literal["auto"]
     verbose: bool
 
@@ -111,13 +112,13 @@ class LoaderOptions:
     def _validate_context(self) -> None:
         """Accept only process contexts available on this platform."""
         match self.context:
-            case None | BaseContext():
+            case "inherit" | BaseContext():
                 return
             case str() if self.context in get_all_start_methods():
                 return
             case _:
                 raise ValueError(
-                    "multiprocessing_context must be an available start method or BaseContext"
+                    "multiprocessing_context must be 'inherit', an available start method, or BaseContext"
                 )
 
     def resolve_workers(self, world_size: int) -> ResolvedWorkers:
@@ -125,16 +126,26 @@ class LoaderOptions:
         counts = resolve_worker_counts(
             self.num_workers, self.native_num_workers, world_size=world_size
         )
-        if counts.processes == 0:
-            if self.timeout != 0:
-                raise ValueError("timeout must be zero with num_workers=0")
-            if self.context is not None:
-                raise ValueError("multiprocessing_context requires num_workers > 0")
+        if counts.processes == 0 and self.timeout != 0:
+            raise ValueError("timeout must be zero with num_workers=0")
         return ResolvedWorkers(
             counts,
             self._resolve_persistence(counts.processes),
             self._resolve_prefetch(counts.processes),
+            self._resolve_context(counts.processes),
         )
+
+    def _resolve_context(self, processes: int) -> BaseContext | None:
+        """Capture the selected start method once; serial loading has no context."""
+        if processes == 0:
+            return None
+        match self.context:
+            case "inherit":
+                return get_context()
+            case BaseContext() as context:
+                return context
+            case str() as method:
+                return get_context(method)
 
     def _resolve_persistence(self, processes: int) -> bool:
         """Auto follows worker availability; explicit persistence requires loading processes."""
