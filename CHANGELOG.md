@@ -2,6 +2,54 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.0rc7 - 2026-10-13
+
+### Backwards Incompatible Changes
+
+- Make DataLoader modes explicit: `num_workers="auto"`,
+  `native_num_workers="auto"`, `seed="random"`,
+  `persistent_workers="auto"`, and `prefetch_factor="auto"`.
+  Replace previous `None` selections with the corresponding literal.
+  Automatic persistence is enabled when loading workers exist; automatic
+  prefetch uses two batches per worker and is disabled with zero workers.
+  Explicit `persistent_workers=True` or integer prefetch with zero workers
+  now raises an error.
+- Default `multiprocessing_context` to `"spawn"`. Replace `None` with
+  `"inherit"` to use Python's platform default. Explicit start methods and
+  `BaseContext` objects remain supported; zero-worker loading omits the context.
+  Spawn requires a guarded application entry point and picklable callbacks.
+- Default shuffled loading to replicated populations, preserving global weighted
+  sampling instead of assigning equal quotas to independently weighted splits.
+  Sequential loading still defaults to split populations. Explicit
+  `worker_partition="split"` remains available. Replication keeps a private
+  weight vector and sampling state per consumer: 10M f64 weights alone require
+  80 MB per consumer, while immutable metadata buffers and indexes remain mapped.
+
+### Improvements
+
+- Select up to four loading processes and 1–4 native reader threads per consumer
+  from CPU affinity and visible Docker/cgroup v1/v2 quota and CPU-set limits,
+  accounting for local ranks. A one-CPU budget selects zero loading processes;
+  unreadable limits warn and fall back conservatively. Explicit counts override
+  detection. Automatic counts can vary across machines; fix both counts when
+  reproducible worker topology is required.
+- Add default loader lifecycle diagnostics through the standard Python logger
+  `dataset_rt.loader`: resolved seeds, process/native thread counts, start method,
+  partition, persistence, prefetching, and reader starts/passes. Application
+  logging configuration controls INFO events; unconfigured processes use stderr.
+  `verbose=False` suppresses diagnostics but retains the nonpersistent replay
+  warning. New nonpersistent reader starts report `sampling_reset=True`.
+
+### Developers
+
+- Add `just test-correctness`, rebuilding the native extension before six fast
+  behavioral tests with real spawned workers. Check exact weighted-stream
+  continuation across short epochs, default worker lifetime, fresh-loader
+  reproducibility, finite batch counts, and replay warnings. The focused suite
+  ran in about 2.8 seconds on the development Mac, excluding rebuild startup.
+  Deliberately disabling persistence, resetting readers, and discarding weights
+  each caused the checks to fail.
+
 ## 0.4.0rc6 - 2026-10-13
 
 ### Fixed
