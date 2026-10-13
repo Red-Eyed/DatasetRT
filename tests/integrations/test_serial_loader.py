@@ -58,7 +58,7 @@ class InvalidWorkerOptions:
     num_workers: int = 0
     native_num_workers: int = 1
     timeout: float = 0
-    prefetch_factor: int | None = None
+    prefetch_factor: int | Literal["auto"] = "auto"
     persistent_workers: bool = False
     multiprocessing_context: Literal["fork", "spawn", "forkserver", "invalid"] | None = None
 

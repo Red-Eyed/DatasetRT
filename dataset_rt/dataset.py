@@ -285,8 +285,9 @@ class CachedDataset:
         native_num_workers: int | Literal["auto"] = "auto",
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = True,
+        prefetch_factor: int | Literal["auto"] = "auto",
+        persistent_workers: bool | Literal["auto"] = "auto",
+        verbose: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of transformed samples into a caller-defined result."""
         ...
@@ -310,8 +311,9 @@ class CachedDataset:
         native_num_workers: int | Literal["auto"] = "auto",
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = True,
+        prefetch_factor: int | Literal["auto"] = "auto",
+        persistent_workers: bool | Literal["auto"] = "auto",
+        verbose: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of cache records without a sample transform."""
         ...
@@ -335,8 +337,9 @@ class CachedDataset:
         native_num_workers: int | Literal["auto"] = "auto",
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = True,
+        prefetch_factor: int | Literal["auto"] = "auto",
+        persistent_workers: bool | Literal["auto"] = "auto",
+        verbose: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Delegate to Torch default collation when no custom callback is supplied."""
         ...
@@ -361,8 +364,9 @@ class CachedDataset:
         native_num_workers: int | Literal["auto"] = "auto",
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
-        prefetch_factor: int | None = None,
-        persistent_workers: bool = True,
+        prefetch_factor: int | Literal["auto"] = "auto",
+        persistent_workers: bool | Literal["auto"] = "auto",
+        verbose: bool = True,
     ) -> DataLoader[CachedSample | T]:
         """Build a finite PyTorch DataLoader for training or evaluation.
 
@@ -427,10 +431,11 @@ class CachedDataset:
         metadata is unchanged. This also happens with seed="random", because its
         randomness is chosen once per loader. A short epoch can therefore keep
         omitting the same population rows. With num_workers>0, use
-        persistent_workers=True (the default) to continue across epochs; explicit
+        persistent_workers="auto" (the default) to continue across epochs; explicit
         False emits a warning.
         With num_workers=0 the reader stays in the main process and continues
-        without persistent workers; the worker-only flag is disabled in that mode.
+        without persistent workers; auto disables the worker-only flag in that mode.
+        Explicit persistent_workers=True requires positive loading workers.
         Split populations are fixed for the
         loader's lifetime, including when persistent workers are used.
 
@@ -471,12 +476,28 @@ class CachedDataset:
         Successful serialization does not guarantee child imports will succeed;
         startup and callback errors propagate rather than replacing samples.
 
+        persistent_workers="auto" enables persistence exactly when loading
+        workers exist. prefetch_factor="auto" selects two batches per loading
+        worker, or disables prefetch for main-process loading. Explicit prefetch
+        must be a positive integer with loading workers. None is not accepted
+        for either selection mode.
+
+        verbose=True reports resolved sampling seeds, process/native thread
+        counts, partition, persistence, prefetching, and reader starts/passes.
+        Nonpersistent reader starts report sampling_reset=True and new PIDs.
+        Events use INFO on the standard logger "dataset_rt.loader", respecting
+        application handlers and filters; unconfigured processes use stderr.
+        verbose=False suppresses lifecycle diagnostics but never the replay warning.
+        Logs describe configured budgets, not measured thread activity or exact
+        native draw offsets. Sampling seeds do not seed random user transforms.
+
         Collation always receives a list, including when batch_size=1. The list
         contains transformed samples if sample_transform_fn is supplied, otherwise
         CachedSample values. multiprocessing_context selects how workers start:
         "fork", "spawn", "forkserver", or a multiprocessing BaseContext object.
-        None uses PyTorch's platform default. Pinning, timeout, prefetch, and worker
-        lifetime follow ordinary PyTorch semantics. PyTorch is optional until called.
+        None uses PyTorch's platform default. Resolved pinning, timeout, prefetch,
+        and worker lifetime follow ordinary PyTorch semantics. PyTorch is optional
+        until called.
         """
         from dataset_rt.integrations.loader import make_dataloader
 
@@ -499,6 +520,7 @@ class CachedDataset:
             worker_init_fn=worker_init_fn,
             prefetch_factor=prefetch_factor,
             persistent_workers=persistent_workers,
+            verbose=verbose,
         )
 
     def samples_metadata(self) -> pl.DataFrame:

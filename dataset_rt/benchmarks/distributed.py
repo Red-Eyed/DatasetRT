@@ -262,7 +262,8 @@ def make_loader(
             timeout=config.worker_timeout if config.num_workers else 0,
             multiprocessing_context=config.worker_context if config.num_workers else None,
             persistent_workers=config.persistent_workers and config.num_workers > 0,
-            prefetch_factor=config.prefetch_factor if config.num_workers else None,
+            prefetch_factor=config.prefetch_factor if config.num_workers else "auto",
+            verbose=not config.quiet,
             sample_transform_fn=Transform(
                 config.input_features, config.transform_rounds, synthetic
             ),

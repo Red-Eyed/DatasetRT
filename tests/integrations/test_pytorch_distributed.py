@@ -245,7 +245,7 @@ def make_loader(
             multiprocessing_context=case.context if case.workers else None,
             sample_transform_fn=fail_transform if failing else observe,
             collate_fn=collate,
-            prefetch_factor=1 if case.workers else None,
+            prefetch_factor=1 if case.workers else "auto",
             persistent_workers=case.persistent,
         ),
     )

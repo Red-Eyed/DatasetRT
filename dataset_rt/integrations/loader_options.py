@@ -32,6 +32,7 @@ class ResolvedWorkers:
 
     counts: WorkerCounts
     persistent: bool
+    prefetch: int | None
 
 
 @dataclass(frozen=True)
@@ -47,10 +48,11 @@ class LoaderOptions:
     native_num_workers: int | Literal["auto"]
     drop_last: bool
     pin_memory: bool
-    persistent_workers: bool
+    persistent_workers: bool | Literal["auto"]
     timeout: float
     context: Literal["fork", "spawn", "forkserver"] | BaseContext | None
-    prefetch: int | None
+    prefetch: int | Literal["auto"]
+    verbose: bool
 
     def __post_init__(self) -> None:
         """Validate supplied values before resource detection, export, or worker startup."""
@@ -62,7 +64,7 @@ class LoaderOptions:
             ("shuffle", self.shuffle),
             ("drop_last", self.drop_last),
             ("pin_memory", self.pin_memory),
-            ("persistent_workers", self.persistent_workers),
+            ("verbose", self.verbose),
         ):
             if type(value) is not bool:
                 raise ValueError(f"{name} must be a boolean")
@@ -77,8 +79,12 @@ class LoaderOptions:
             )
         if not isfinite(self.timeout) or self.timeout < 0:
             raise ValueError("timeout must be finite and nonnegative")
-        if self.prefetch is not None and (type(self.prefetch) is not int or self.prefetch < 1):
-            raise ValueError("prefetch_factor must be a positive integer")
+        _validate_count(self.prefetch, name="prefetch_factor", minimum=1, maximum=sys.maxsize)
+        match self.persistent_workers:
+            case "auto" | True | False:
+                pass
+            case _:
+                raise ValueError("persistent_workers must be a boolean or 'auto'")
         self._validate_seed()
         self._validate_context()
         match self.partition:
@@ -122,11 +128,35 @@ class LoaderOptions:
         if counts.processes == 0:
             if self.timeout != 0:
                 raise ValueError("timeout must be zero with num_workers=0")
-            if self.prefetch is not None:
-                raise ValueError("prefetch_factor requires num_workers > 0")
             if self.context is not None:
                 raise ValueError("multiprocessing_context requires num_workers > 0")
-        return ResolvedWorkers(counts, self.persistent_workers and counts.processes > 0)
+        return ResolvedWorkers(
+            counts,
+            self._resolve_persistence(counts.processes),
+            self._resolve_prefetch(counts.processes),
+        )
+
+    def _resolve_persistence(self, processes: int) -> bool:
+        """Auto follows worker availability; explicit persistence requires loading processes."""
+        match self.persistent_workers:
+            case "auto":
+                return processes > 0
+            case True if processes == 0:
+                raise ValueError("persistent_workers=True requires num_workers > 0")
+            case bool() as persistent:
+                return persistent
+        raise ValueError("persistent_workers must be a boolean or 'auto'")
+
+    def _resolve_prefetch(self, processes: int) -> int | None:
+        """Use two batches per loading worker, with no prefetch in main-process loading."""
+        match self.prefetch:
+            case "auto":
+                return 2 if processes > 0 else None
+            case int() if processes == 0:
+                raise ValueError("prefetch_factor requires num_workers > 0")
+            case int() as prefetch:
+                return prefetch
+        raise ValueError("prefetch_factor must be a positive integer or 'auto'")
 
     def resolved_seed(self) -> int | None:
         """Translate random selection to the existing internal seed protocol."""

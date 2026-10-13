@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import multiprocessing as mp
 import os
 import pickle
@@ -22,6 +23,7 @@ from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRunt
 from dataset_rt.config import WriterConfig
 from dataset_rt.integrations import loading
 from dataset_rt.integrations.loader import EmptyPartition, LocalReader, PendingReader, ReaderAdapter
+from dataset_rt.integrations.loader_logging import LOGGER_NAME
 from dataset_rt.integrations.loading import derive_seed
 from dataset_rt.reconstruction import load_configuration, load_metadata, select_population
 from dataset_rt.records import CachedSample, MetadataSnapshot, ReaderRecipe
@@ -242,6 +244,79 @@ def test_explicit_modes_reject_none(accepted_dataset: CachedDataset, argument: s
                 accepted_dataset.to_torch_dataloader(native_num_workers=None)  # pyrefly: ignore[no-matching-overload]
             case "seed":
                 accepted_dataset.to_torch_dataloader(seed=None)  # pyrefly: ignore[no-matching-overload]
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_auto_persistence_and_prefetch_match_worker_availability(
+    accepted_dataset: CachedDataset, workers: int
+) -> None:
+    """Resolve explicit auto modes before passing ordinary lifetime options to Torch."""
+    loader = accepted_dataset.to_torch_dataloader(num_workers=workers, verbose=False)
+    assert loader.persistent_workers == (workers > 0)
+    assert loader.prefetch_factor == (2 if workers > 0 else None)
+
+
+@pytest.mark.parametrize("argument", ["prefetch_factor", "persistent_workers"])
+def test_new_auto_modes_reject_none(accepted_dataset: CachedDataset, argument: str) -> None:
+    """Only explicit auto modes may request environment-dependent worker settings."""
+    with pytest.raises(ValueError, match=argument):
+        match argument:
+            case "prefetch_factor":
+                accepted_dataset.to_torch_dataloader(prefetch_factor=None)  # pyrefly: ignore[no-matching-overload]
+            case "persistent_workers":
+                accepted_dataset.to_torch_dataloader(persistent_workers=None)  # pyrefly: ignore[no-matching-overload]
+
+
+def test_explicit_persistence_requires_loading_workers(accepted_dataset: CachedDataset) -> None:
+    """An explicit True cannot silently become False after zero-worker resolution."""
+    with pytest.raises(ValueError, match="persistent_workers=True requires num_workers > 0"):
+        accepted_dataset.to_torch_dataloader(num_workers=0, persistent_workers=True)
+
+
+def test_loader_logs_resolved_settings_and_reader_continuation(
+    accepted_dataset: CachedDataset, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retained reader logs its real seed and startup once, then logs continuing passes."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        loader = accepted_dataset.to_torch_dataloader(
+            num_workers=0,
+            native_num_workers=1,
+            seed=7,
+            verbose=True,
+            sample_transform_fn=lambda sample: int(sample.data),
+        )
+        list(loader)
+        list(loader)
+    messages = [record.getMessage() for record in caplog.records if record.name == LOGGER_NAME]
+    summary = next(message for message in messages if "event=loader_ready" in message)
+    assert "seed=7" in summary
+    assert "num_workers=0" in summary
+    assert "native_threads_per_consumer=1" in summary
+    assert "persistent=False prefetch_factor=disabled" in summary
+    assert sum("event=reader_started" in message for message in messages) == 1
+    assert sum("event=reader_pass" in message for message in messages) == 2
+    assert any("sampling_reset=True" in message for message in messages)
+
+
+def test_quiet_loader_preserves_replay_warning(
+    accepted_dataset: CachedDataset, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verbosity cannot conceal the nonpersistent sampling-reset warning."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        with pytest.warns(UserWarning, match="each epoch repeats"):
+            accepted_dataset.to_torch_dataloader(
+                num_workers=2, persistent_workers=False, verbose=False
+            )
+    assert not [record for record in caplog.records if record.name == LOGGER_NAME]
+
+
+def test_spawned_adapter_preserves_logging_settings(accepted_dataset: CachedDataset) -> None:
+    """Compact worker reconstruction retains verbosity and resolved persistence flags."""
+    loader = accepted_dataset.to_torch_dataloader(num_workers=2, verbose=False)
+    restored = pickle.loads(pickle.dumps(loader.dataset))
+    assert isinstance(restored, ReaderAdapter)
+    assert restored.verbose is False
+    assert restored.persistent_workers is True
 
 
 def initialize_worker(worker_id: int) -> None:

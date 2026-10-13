@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
+from dataset_rt.integrations.loader_logging import loader_event
 from dataset_rt.integrations.loader_options import MAX_SAMPLE_BUDGET, LoaderOptions, ResolvedWorkers
 from dataset_rt.integrations.loading import (
     WorkerPlan,
@@ -78,6 +79,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         row_count: int,
         partitions: tuple[WorkerPlan, ...],
         config_path: FilePath,
+        verbose: bool = True,
+        persistent_workers: bool = False,
     ) -> None:
         """Store immutable inputs; construction neither reads nor creates native state."""
         self.replica = replica
@@ -88,6 +91,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         self.row_count = row_count
         self.partitions = partitions
         self.config_path = config_path
+        self.verbose = verbose
+        self.persistent_workers = persistent_workers
         self._artifacts: ConstructionArtifacts | None = None
         self._state: PendingReader | EmptyPartition | LocalReader = PendingReader()
 
@@ -103,9 +108,35 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
         recipe = self._worker_plan()
         if recipe.sample_count == 0:
             self._state = EmptyPartition(os.getpid())
+            self._log_reader_event("reader_empty", recipe)
             return
         dataset = self._create_dataset(recipe)
         self._state = LocalReader(os.getpid(), dataset, iter(dataset))
+        self._log_reader_event("reader_started", recipe)
+
+    def _log_reader_event(self, event: str, recipe: WorkerPlan) -> None:
+        """Report construction/reset and reuse without touching native sampling progress."""
+        if not self.verbose:
+            return
+        match get_worker_info():
+            case None:
+                consumer = "main"
+            case info:
+                consumer = str(info.id)
+        loader_event(
+            "event=%s pid=%s rank=%s worker=%s seed=%s native_threads=%s "
+            "persistent=%s samples=%s population=%s sampling_reset=%s",
+            event,
+            os.getpid(),
+            recipe.rank,
+            consumer,
+            recipe.seed,
+            self.native_num_workers if recipe.sample_count else 0,
+            self.persistent_workers,
+            recipe.sample_count,
+            recipe.population_size,
+            event == "reader_started",
+        )
 
     def _worker_plan(self) -> WorkerPlan:
         """Validate the actual consumer identity against its prepared partition."""
@@ -153,6 +184,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
     def __iter__(self) -> Iterator[CachedSample | T]:
         """Emit one worker quota, retaining unfinished native windows between calls."""
         self.setup()
+        if self.verbose:
+            self._log_reader_event("reader_pass", self._worker_plan())
         match self._state:
             case EmptyPartition():
                 return
@@ -184,6 +217,8 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
             self.row_count,
             self.partitions,
             self.config_path,
+            self.verbose,
+            self.persistent_workers,
         )
 
 
@@ -333,6 +368,8 @@ def _prepare_adapter(
         sum(plan.sample_count for plan in partitions),
         partitions,
         config_path,
+        verbose=options.verbose,
+        persistent_workers=workers.persistent,
     )
     adapter._artifacts = artifacts
     return adapter
@@ -355,8 +392,9 @@ def make_dataloader(
     native_num_workers: int | Literal["auto"],
     multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
     worker_init_fn: Callable[[int], None] | None,
-    prefetch_factor: int | None,
-    persistent_workers: bool,
+    prefetch_factor: int | Literal["auto"],
+    persistent_workers: bool | Literal["auto"],
+    verbose: bool,
     work_dir: DirectoryPath | None,
 ) -> DataLoader[CachedSample | T]:
     """Snapshot in the training process; delegate batching and lifecycle to Torch."""
@@ -374,6 +412,7 @@ def make_dataloader(
         timeout=timeout,
         context=multiprocessing_context,
         prefetch=prefetch_factor,
+        verbose=verbose,
     )
     replica = capture_replica()
     workers = options.resolve_workers(replica.world_size)
@@ -398,7 +437,7 @@ def make_dataloader(
             sample_transform_fn,
             artifacts,
         )
-        return DataLoader(
+        loader = DataLoader(
             adapter,
             batch_size=batch_size,
             num_workers=workers.counts.processes,
@@ -408,9 +447,38 @@ def make_dataloader(
             timeout=timeout,
             multiprocessing_context=multiprocessing_context,
             worker_init_fn=WorkerInitializer(worker_init_fn),
-            prefetch_factor=prefetch_factor,
+            prefetch_factor=workers.prefetch,
             persistent_workers=workers.persistent,
         )
+        if options.verbose:
+            seeds = ",".join(f"{plan.worker_id}:{plan.seed}" for plan in adapter.partitions)
+            match workers.prefetch:
+                case None:
+                    prefetch: int | str = "disabled"
+                case int() as prefetch:
+                    pass
+            loader_event(
+                "event=loader_ready pid=%s rank=%s seed=%s worker_seeds=%s "
+                "num_workers=%s native_threads_per_consumer=%s partition=%s "
+                "persistent=%s prefetch_factor=%s native_prefetch=%s samples=%s samples_per_rank=%s "
+                "batch_size=%s world_size=%s shuffle=%s",
+                os.getpid(),
+                replica.rank,
+                resolved_seed,
+                seeds,
+                workers.counts.processes,
+                workers.counts.native_threads,
+                options.resolved_partition(),
+                workers.persistent,
+                prefetch,
+                recipe.reader_config.prefetch_size,
+                sample_count,
+                adapter.row_count,
+                batch_size,
+                replica.world_size,
+                shuffle,
+            )
+        return loader
     except BaseException:
         artifacts.discard()
         raise

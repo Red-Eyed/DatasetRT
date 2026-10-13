@@ -220,6 +220,32 @@ selected physical indices still scale with consumers.
 
 ## PyTorch DataLoader helper
 
+`verbose=True` reports loader construction and reader lifecycle events on the
+standard Python logger `dataset_rt.loader` at INFO level. Construction reports
+the resolved sampling seed, derived worker seeds, process count, native threads
+per consumer, partition mode, persistence, Torch/native prefetch, and sample
+budgets. Reader starts and passes report PID, rank, worker identity, sampling
+seed, quota/population size, and whether sampling started from zero.
+Nonpersistent passes reconstruct readers and therefore log new PIDs and
+`sampling_reset=True`; persistent readers log continuing passes without a reset.
+These events describe configured settings, not exact native draw offsets or
+measured CPU activity. Sampling seeds do not seed random user transforms.
+
+Application logging handlers and filters are respected. With no configured
+handlers, processes print events to stderr without changing global logging
+configuration. `verbose=False` suppresses lifecycle events while leaving replay
+and resource-detection warnings visible. Events are O(consumers) per pass;
+there is no per-sample logging or hidden logging queue. Spawned/forked workers
+retain the verbosity setting in their compact reconstruction inputs.
+
+`persistent_workers="auto"` enables persistence with loading processes and
+disables it for main-process loading. Explicit True requires positive workers;
+explicit False with loading workers warns about repeated sampling.
+`prefetch_factor="auto"` selects two batches per loading worker or disables
+prefetch with zero workers. Explicit positive integers require loading workers;
+None is rejected at the API boundary. Torch still receives None internally when
+prefetch is disabled.
+
 Loader defaults retain persistent workers and automatically budget native reader
 threads. Both worker counts default to the explicit `"auto"` mode; `None` is
 rejected. `num_workers="auto"` selects `min(4, max(0, CPUs per local rank - 1))`

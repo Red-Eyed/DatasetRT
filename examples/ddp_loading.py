@@ -106,6 +106,7 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
             num_workers=options.workers,
             multiprocessing_context=options.worker_context if options.workers else None,
             persistent_workers=options.workers > 0,
+            verbose=not options.quiet,
             sample_transform_fn=transform,
         )
         model = DistributedDataParallel(torch.nn.Linear(1, 1))

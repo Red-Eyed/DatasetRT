@@ -393,8 +393,9 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
                 collate_fn=collate,
                 native_num_workers=config.native_workers,
                 multiprocessing_context=worker_context if spec.case.workers else None,
-                prefetch_factor=config.prefetch_factor if spec.case.workers else None,
+                prefetch_factor=config.prefetch_factor if spec.case.workers else "auto",
                 persistent_workers=config.persistent_workers and spec.case.workers > 0,
+                verbose=not config.quiet,
             ),
         )
     else:
