@@ -138,7 +138,7 @@ def test_nonpersistent_workers_warn_about_repeated_epochs(
     with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
         accepted_dataset.to_torch_dataloader(
             shuffle=shuffle,
-            seed=seed if shuffle else None,
+            seed=seed if shuffle and seed is not None else "random",
             worker_partition=partition,
             num_workers=2,
             samples_per_epoch=1,
@@ -205,10 +205,43 @@ def test_explicit_native_count_bypasses_automatic_detection(
         raise AssertionError("CPU detection should be bypassed")
 
     monkeypatch.setattr(loading, "available_cpu_count", unavailable)
-    loader = accepted_dataset.to_torch_dataloader(native_num_workers=7)
+    loader = accepted_dataset.to_torch_dataloader(num_workers=0, native_num_workers=7)
     adapter = loader.dataset
     assert isinstance(adapter, ReaderAdapter)
     assert adapter.native_num_workers == 7
+
+
+@pytest.mark.parametrize(("cpus", "processes", "threads"), [(1, 0, 1), (4, 3, 1), (32, 4, 4)])
+def test_default_auto_counts_resolve_before_worker_setup(
+    accepted_dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    cpus: int,
+    processes: int,
+    threads: int,
+) -> None:
+    """Construction stores concrete topology while keeping consuming readers uninitialized."""
+    monkeypatch.setattr(loading, "available_cpu_count", lambda: cpus)
+    loader = accepted_dataset.to_torch_dataloader()
+    adapter = loader.dataset
+    assert isinstance(adapter, ReaderAdapter)
+    assert loader.num_workers == processes
+    assert loader.persistent_workers == (processes > 0)
+    assert adapter.native_num_workers == threads
+    assert len(adapter.partitions) == max(1, processes)
+    assert isinstance(adapter._state, PendingReader)
+
+
+@pytest.mark.parametrize("argument", ["num_workers", "native_num_workers", "seed"])
+def test_explicit_modes_reject_none(accepted_dataset: CachedDataset, argument: str) -> None:
+    """None cannot ambiguously request automatic counts or random seed selection."""
+    with pytest.raises(ValueError, match=argument):
+        match argument:
+            case "num_workers":
+                accepted_dataset.to_torch_dataloader(num_workers=None)  # pyrefly: ignore[no-matching-overload]
+            case "native_num_workers":
+                accepted_dataset.to_torch_dataloader(native_num_workers=None)  # pyrefly: ignore[no-matching-overload]
+            case "seed":
+                accepted_dataset.to_torch_dataloader(seed=None)  # pyrefly: ignore[no-matching-overload]
 
 
 def initialize_worker(worker_id: int) -> None:
@@ -350,7 +383,7 @@ def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> No
     batch_size = 1 if case in ("quota-short", "tiny-replicate") else 3
     loader = dataset.to_torch_dataloader(
         shuffle=shuffled,
-        seed=7 if shuffled else None,
+        seed=7 if shuffled else "random",
         worker_partition=mode,
         samples_per_epoch=samples,
         batch_size=batch_size,
@@ -406,7 +439,7 @@ def run_short_epoch_replay(recipe: ReaderRecipe, context: Context, seed: int | N
     assert len(dataset) == 20
     with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
         loader = dataset.to_torch_dataloader(
-            seed=seed,
+            seed=("random" if seed is None else seed),
             samples_per_epoch=8,
             worker_partition="replicate",
             num_workers=2,
@@ -458,7 +491,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         (recipe.cache_paths[0] / "manifest.json").unlink()
     if case == "inherited":
         loader = dataset.to_torch_dataloader(
-            seed=7, batch_size=1, sample_transform_fn=observe, collate_fn=identity
+            num_workers=0, seed=7, batch_size=1, sample_transform_fn=observe, collate_fn=identity
         )
         adapter = loader.dataset
         assert isinstance(adapter, ReaderAdapter)
@@ -489,7 +522,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
             pass
     loader = dataset.to_torch_dataloader(
         shuffle=shuffle,
-        seed=seed,
+        seed=("random" if seed is None else seed),
         worker_partition="replicate" if shuffle else "split",
         samples_per_epoch=(1600 if case == "weighted" else 40) if shuffle else None,
         batch_size=1,

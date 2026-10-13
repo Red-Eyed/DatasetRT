@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from dataset_rt import resources
-from dataset_rt.integrations.loading import automatic_native_workers
+from dataset_rt.integrations.loading import automatic_native_workers, resolve_worker_counts
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -200,3 +200,33 @@ def test_unreadable_affinity_is_not_ignored(
     monkeypatch.setattr(resources.os, "sched_getaffinity", unavailable)
     with pytest.warns(RuntimeWarning, match="CPU affinity; using one CPU"):
         assert resources.available_cpu_count() == 1
+
+
+@pytest.mark.parametrize(
+    ("cpus", "ranks", "expected"),
+    [(1, 1, 0), (2, 1, 1), (4, 1, 3), (32, 1, 4), (4, 4, 0), (8, 2, 3)],
+)
+def test_loading_process_budget(cpus: int, ranks: int, expected: int) -> None:
+    """Automatic loading uses no processes when a rank has only one CPU of capacity."""
+    assert resources.loading_worker_count(cpus, local_ranks=ranks) == expected
+
+
+def test_both_auto_counts_share_one_observation(
+    hierarchy: Hierarchy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve native threads after process selection without a second CPU-budget read."""
+    from dataset_rt.integrations import loading
+
+    calls = 0
+
+    def budget() -> int:
+        """Count discovery calls to detect inconsistent repeated resource observations."""
+        nonlocal calls
+        calls += 1
+        return 4
+
+    monkeypatch.setattr(loading, "available_cpu_count", budget)
+    counts = resolve_worker_counts("auto", "auto", world_size=1)
+    assert counts.processes == 3
+    assert counts.native_threads == 1
+    assert calls == 1

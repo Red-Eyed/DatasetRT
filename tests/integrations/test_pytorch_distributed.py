@@ -236,7 +236,7 @@ def make_loader(
         "torch.utils.data.DataLoader[Batch]",
         dataset.to_torch_dataloader(
             shuffle=case.shuffle,
-            seed=7 if case.shuffle and not case.random_seed else None,
+            seed=7 if case.shuffle and not case.random_seed else "random",
             samples_per_epoch=512 if case.shuffle else case.rows,
             worker_partition="replicate" if case.shuffle and not case.split else "split",
             batch_size=4,

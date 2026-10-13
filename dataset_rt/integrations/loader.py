@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import os
 import pickle
-import sys
 import warnings
 from dataclasses import dataclass
-from math import isfinite
-from multiprocessing import get_all_start_methods
-from multiprocessing.context import BaseContext
 from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
+from dataset_rt.integrations.loader_options import MAX_SAMPLE_BUDGET, LoaderOptions, ResolvedWorkers
 from dataset_rt.integrations.loading import (
     WorkerPlan,
-    automatic_native_workers,
     capture_replica,
     common_seed,
     partition_rows,
@@ -37,6 +33,7 @@ from dataset_rt.records import CachedSample, RowSpan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from multiprocessing.context import BaseContext
 
     from pydantic import DirectoryPath, FilePath
 
@@ -45,9 +42,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 BatchT = TypeVar("BatchT")
-
-# Torch computes ceil(sample_count / batch_size) through floating-point division.
-MAX_SAMPLE_BUDGET = min(sys.maxsize, 1 << 53)
 
 
 @dataclass(frozen=True)
@@ -106,17 +100,29 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
                 return
             case PendingReader():
                 pass
-        info = get_worker_info()
-        worker_id = 0 if info is None else info.id
-        worker_count = 1 if info is None else info.num_workers
-        if worker_count != len(self.partitions):
-            raise RuntimeError("DataLoader worker count differs from prepared partitions")
-        recipe = self.partitions[worker_id]
+        recipe = self._worker_plan()
         if recipe.sample_count == 0:
             self._state = EmptyPartition(os.getpid())
             return
+        dataset = self._create_dataset(recipe)
+        self._state = LocalReader(os.getpid(), dataset, iter(dataset))
+
+    def _worker_plan(self) -> WorkerPlan:
+        """Validate the actual consumer identity against its prepared partition."""
+        match get_worker_info():
+            case None:
+                worker_id, worker_count = 0, 1
+            case info:
+                worker_id, worker_count = info.id, info.num_workers
+        if worker_count != len(self.partitions):
+            raise RuntimeError("DataLoader worker count differs from prepared partitions")
+        recipe = self.partitions[worker_id]
         if recipe.rank != self.replica.rank or recipe.worker_id != worker_id:
             raise RuntimeError("worker plan does not match consumer identity")
+        return recipe
+
+    def _create_dataset(self, recipe: WorkerPlan) -> CachedDataset:
+        """Build process-owned native state from mapped immutable inputs and validated quotas."""
         from dataset_rt.dataset import CachedDataset
 
         config = load_configuration(self.config_path)
@@ -138,8 +144,7 @@ class ReaderAdapter(IterableDataset[CachedSample | T], Generic[T]):
                 ),
             }
         )
-        dataset = CachedDataset._from_configuration(config, metadata, selection)
-        self._state = LocalReader(os.getpid(), dataset, iter(dataset))
+        return CachedDataset._from_configuration(config, metadata, selection)
 
     def __len__(self) -> int:
         """Expose the loader's finite sample budget for Torch's batch-count calculation."""
@@ -257,41 +262,6 @@ def prepare_partitions(
     return tuple(plans)
 
 
-def _validate_worker_options(
-    *,
-    num_workers: int,
-    native_num_workers: int | None,
-    timeout: float,
-    multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
-    prefetch_factor: int | None,
-) -> None:
-    """Reject unusable worker settings before exporting dataset-scale metadata."""
-    if type(num_workers) is not int or not 0 <= num_workers < 1 << 32:
-        raise ValueError("num_workers must be a nonnegative integer smaller than 2**32")
-    if native_num_workers is not None and (
-        type(native_num_workers) is not int or not 1 <= native_num_workers <= sys.maxsize
-    ):
-        raise ValueError("native_num_workers must be a positive integer fitting sys.maxsize")
-    if not isfinite(timeout) or timeout < 0:
-        raise ValueError("timeout must be finite and nonnegative")
-    if num_workers == 0 and timeout != 0:
-        raise ValueError("timeout must be zero with num_workers=0")
-    if prefetch_factor is not None and (type(prefetch_factor) is not int or prefetch_factor < 1):
-        raise ValueError("prefetch_factor must be a positive integer")
-    if num_workers == 0 and prefetch_factor is not None:
-        raise ValueError("prefetch_factor requires num_workers > 0")
-    if multiprocessing_context is None:
-        return
-    if num_workers == 0:
-        raise ValueError("multiprocessing_context requires num_workers > 0")
-    if isinstance(multiprocessing_context, str):
-        if multiprocessing_context not in get_all_start_methods():
-            raise ValueError("multiprocessing_context must be an available start method")
-        return
-    if not isinstance(multiprocessing_context, BaseContext):
-        raise ValueError("multiprocessing_context must be a start method or BaseContext")
-
-
 class _PickleSink:
     """Discard serialized probe output instead of retaining callback-sized buffers."""
 
@@ -310,21 +280,79 @@ def _validate_transform(transform: Callable[[CachedSample], T] | None, num_worke
         raise TypeError("sample_transform_fn must be picklable for multiprocess loading") from error
 
 
+def _warn_restarting_workers(workers: ResolvedWorkers) -> None:
+    """Expose replay risk only when loading processes actually discard their readers."""
+    if workers.counts.processes == 0 or workers.persistent:
+        return
+    warnings.warn(
+        "persistent_workers=False restarts DatasetRT readers on every DataLoader pass "
+        "with the same sampling seed and reset draw offset or sequential cursor. "
+        "With unchanged metadata, each epoch repeats the same sample sequence, "
+        "including when seed='random'. Short epochs can repeatedly omit the rest of "
+        "the population. Set persistent_workers=True to continue sampling across epochs.",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
+def _prepare_adapter(
+    dataset: CachedDataset,
+    options: LoaderOptions,
+    workers: ResolvedWorkers,
+    replica: ReplicaIdentity,
+    seed: int | None,
+    sample_count: int,
+    transform: Callable[[CachedSample], T] | None,
+    artifacts: ConstructionArtifacts,
+) -> ReaderAdapter[T]:
+    """Publish immutable inputs and prepare compact worker plans without native reader setup."""
+    config_path = dataset.dump_config(artifacts.directory)
+    config = load_configuration(config_path)
+    partition = options.resolved_partition()
+    partitions = prepare_partitions(
+        config,
+        replica,
+        num_workers=workers.counts.processes,
+        batch_size=options.batch_size,
+        samples_per_epoch=sample_count,
+        worker_partition=partition,
+        shuffle=options.shuffle,
+        seed=seed,
+        drop_last=options.drop_last,
+    )
+    if options.shuffle and partition == "split":
+        if seed is None:
+            raise RuntimeError("shuffled partitions require a resolved seed")
+        prepare_row_order(config_path, config.row_count, seed)
+    adapter = ReaderAdapter(
+        replica,
+        options.shuffle,
+        seed,
+        workers.counts.native_threads,
+        transform,
+        sum(plan.sample_count for plan in partitions),
+        partitions,
+        config_path,
+    )
+    adapter._artifacts = artifacts
+    return adapter
+
+
 def make_dataloader(
     dataset: CachedDataset,
     *,
     shuffle: bool,
-    seed: int | None,
+    seed: int | Literal["random"],
     samples_per_epoch: int | None,
     worker_partition: Literal["split", "replicate"] | None,
     batch_size: int,
-    num_workers: int,
+    num_workers: int | Literal["auto"],
     sample_transform_fn: Callable[[CachedSample], T] | None,
     collate_fn: (Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None),
     drop_last: bool,
     pin_memory: bool,
     timeout: float,
-    native_num_workers: int | None,
+    native_num_workers: int | Literal["auto"],
     multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
     worker_init_fn: Callable[[int], None] | None,
     prefetch_factor: int | None,
@@ -332,96 +360,48 @@ def make_dataloader(
     work_dir: DirectoryPath | None,
 ) -> DataLoader[CachedSample | T]:
     """Snapshot in the training process; delegate batching and lifecycle to Torch."""
-    _validate_worker_options(
+    options = LoaderOptions(
+        shuffle=shuffle,
+        seed=seed,
+        samples_per_epoch=samples_per_epoch,
+        partition=worker_partition,
+        batch_size=batch_size,
         num_workers=num_workers,
         native_num_workers=native_num_workers,
+        drop_last=drop_last,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         timeout=timeout,
-        multiprocessing_context=multiprocessing_context,
-        prefetch_factor=prefetch_factor,
+        context=multiprocessing_context,
+        prefetch=prefetch_factor,
     )
-    if type(batch_size) is not int or not 1 <= batch_size <= sys.maxsize:
-        raise ValueError("batch_size must be a positive integer fitting sys.maxsize")
-    for name, value in (
-        ("shuffle", shuffle),
-        ("drop_last", drop_last),
-        ("pin_memory", pin_memory),
-        ("persistent_workers", persistent_workers),
-    ):
-        if type(value) is not bool:
-            raise ValueError(f"{name} must be a boolean")
-    if num_workers == 0:
-        persistent_workers = False
-    if samples_per_epoch is not None and (
-        type(samples_per_epoch) is not int or not 1 <= samples_per_epoch <= MAX_SAMPLE_BUDGET
-    ):
-        raise ValueError(
-            f"samples_per_epoch must be a positive integer <= {MAX_SAMPLE_BUDGET} or None"
-        )
-    if worker_partition is None:
-        worker_partition = "replicate" if shuffle else "split"
-    if worker_partition not in ("split", "replicate"):
-        raise ValueError("worker_partition must be 'split' or 'replicate'")
-    if not shuffle and seed is not None:
-        raise ValueError("seed requires shuffle=True; omit seed for sequential reading")
-    if shuffle and seed is not None:
-        reader_seed(shuffle=True, seed=seed, rank_id=0, worker_id=0)
-    _validate_transform(sample_transform_fn, num_workers)
-    if num_workers > 0 and not persistent_workers:
-        warnings.warn(
-            "persistent_workers=False restarts DatasetRT readers on every DataLoader pass "
-            "with the same sampling seed and reset draw offset or sequential cursor. "
-            "With unchanged metadata, each epoch repeats the same sample sequence, "
-            "including when seed=None. Short epochs can repeatedly omit the rest of "
-            "the population. Set persistent_workers=True to continue sampling across epochs.",
-            UserWarning,
-            stacklevel=3,
-        )
-    recipe = dataset._reader_recipe()
-    if samples_per_epoch is None and not 1 <= recipe.sample_count <= MAX_SAMPLE_BUDGET:
-        raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
     replica = capture_replica()
-    resolved_native_workers = (
-        automatic_native_workers(num_workers=num_workers, world_size=replica.world_size)
-        if native_num_workers is None
-        else native_num_workers
-    )
-    seed = common_seed(replica, shuffle, seed)
+    workers = options.resolve_workers(replica.world_size)
+    _validate_transform(sample_transform_fn, workers.counts.processes)
+    _warn_restarting_workers(workers)
+    recipe = dataset._reader_recipe()
+    sample_count = options.samples_per_epoch
+    if sample_count is None:
+        sample_count = recipe.sample_count
+    if not 1 <= sample_count <= MAX_SAMPLE_BUDGET:
+        raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
+    resolved_seed = common_seed(replica, options.shuffle, options.resolved_seed())
     artifacts = ConstructionArtifacts.create(work_dir)
     try:
-        config_path = dataset.dump_config(artifacts.directory)
-        config = load_configuration(config_path)
-        partitions = prepare_partitions(
-            config,
+        adapter = _prepare_adapter(
+            dataset,
+            options,
+            workers,
             replica,
-            num_workers=num_workers,
-            batch_size=batch_size,
-            samples_per_epoch=recipe.sample_count
-            if samples_per_epoch is None
-            else samples_per_epoch,
-            worker_partition=worker_partition,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-        )
-        if shuffle and worker_partition == "split":
-            if seed is None:
-                raise RuntimeError("shuffled partitions require a resolved seed")
-            prepare_row_order(config_path, config.row_count, seed)
-        adapter = ReaderAdapter(
-            replica,
-            shuffle,
-            seed,
-            resolved_native_workers,
+            resolved_seed,
+            sample_count,
             sample_transform_fn,
-            sum(partition.sample_count for partition in partitions),
-            partitions,
-            config_path,
+            artifacts,
         )
-        adapter._artifacts = artifacts
         return DataLoader(
             adapter,
             batch_size=batch_size,
-            num_workers=num_workers,
+            num_workers=workers.counts.processes,
             collate_fn=collate_fn,
             drop_last=drop_last,
             pin_memory=pin_memory,
@@ -429,7 +409,7 @@ def make_dataloader(
             multiprocessing_context=multiprocessing_context,
             worker_init_fn=WorkerInitializer(worker_init_fn),
             prefetch_factor=prefetch_factor,
-            persistent_workers=persistent_workers,
+            persistent_workers=workers.persistent,
         )
     except BaseException:
         artifacts.discard()

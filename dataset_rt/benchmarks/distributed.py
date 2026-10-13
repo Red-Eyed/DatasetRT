@@ -251,7 +251,7 @@ def make_loader(
         "DataLoader[Batch]",
         dataset.to_torch_dataloader(
             shuffle=config.shuffle,
-            seed=config.seed if config.shuffle else None,
+            seed=config.seed if config.shuffle else "random",
             samples_per_epoch=config.samples_per_epoch,
             worker_partition=config.worker_partition,
             batch_size=config.batch_size,

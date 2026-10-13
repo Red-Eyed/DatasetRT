@@ -5,17 +5,19 @@ from __future__ import annotations
 import os
 import secrets
 import warnings
+from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataset_rt.records import RowSpan
-from dataset_rt.resources import available_cpu_count, native_worker_count
+from dataset_rt.resources import available_cpu_count, loading_worker_count, native_worker_count
 
 U64_MAX = (1 << 64) - 1
 
 
-def automatic_native_workers(*, num_workers: int, world_size: int) -> int:
-    """Divide visible CPU capacity by launcher-local ranks, conservatively using all ranks otherwise."""
+def local_rank_count(world_size: int) -> int:
+    """Use launcher-local ranks, conservatively assuming all distributed ranks are local otherwise."""
     local_ranks = world_size
     if world_size > 1:
         configured = os.environ.get("LOCAL_WORLD_SIZE")
@@ -25,9 +27,46 @@ def automatic_native_workers(*, num_workers: int, world_size: int) -> int:
                 raise ValueError(
                     "LOCAL_WORLD_SIZE must be between one and the distributed world size"
                 )
-    return native_worker_count(
-        available_cpu_count(), num_workers=num_workers, local_ranks=local_ranks
-    )
+    return local_ranks
+
+
+@dataclass(frozen=True)
+class WorkerCounts:
+    """Resolved process and thread counts contain no deferred selection modes."""
+
+    processes: int
+    native_threads: int
+
+
+def resolve_worker_counts(
+    num_workers: int | Literal["auto"],
+    native_num_workers: int | Literal["auto"],
+    *,
+    world_size: int,
+) -> WorkerCounts:
+    """Resolve automatic counts from one CPU-budget observation before launching processes."""
+    match (num_workers, native_num_workers):
+        case (int() as processes, int() as threads):
+            return WorkerCounts(processes, threads)
+        case _:
+            cpus = available_cpu_count()
+            ranks = local_rank_count(world_size)
+    match num_workers:
+        case "auto":
+            processes = loading_worker_count(cpus, local_ranks=ranks)
+        case int() as processes:
+            pass
+    match native_num_workers:
+        case "auto":
+            threads = native_worker_count(cpus, num_workers=processes, local_ranks=ranks)
+        case int() as threads:
+            pass
+    return WorkerCounts(processes, threads)
+
+
+def automatic_native_workers(*, num_workers: int, world_size: int) -> int:
+    """Resolve only native threads for callers supplying an explicit loading-process count."""
+    return resolve_worker_counts(num_workers, "auto", world_size=world_size).native_threads
 
 
 class ReplicaIdentity(BaseModel):

@@ -413,19 +413,19 @@ it with `DataLoader` while keeping domain decoding in Python.
 Raises:
     ImportError: If PyTorch is not installed in the active environment.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | None = None, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T], collate_fn: Callable[[list[T]], BatchT], shuffle: bool = True, seed: int | Literal['random'] = 'random', samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int | Literal['auto'] = 'auto', drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | Literal['auto'] = 'auto', multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Collate lists of transformed samples into a caller-defined result.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | None = None, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: None = None, collate_fn: Callable[[list[CachedSample]], BatchT], shuffle: bool = True, seed: int | Literal['random'] = 'random', samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int | Literal['auto'] = 'auto', drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | Literal['auto'] = 'auto', multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Collate lists of cache records without a sample transform.
 
-#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int = 0, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | None = None, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, batch_size: PositiveInt = 1, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: None = None, shuffle: bool = True, seed: int | Literal['random'] = 'random', samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, num_workers: int | Literal['auto'] = 'auto', drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | Literal['auto'] = 'auto', multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Delegate to Torch default collation when no custom callback is supplied.
 
-#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | None = None, samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, batch_size: PositiveInt = 1, num_workers: int = 0, sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | None = None, multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
+#### `CachedDataset.to_torch_dataloader(*, shuffle: bool = True, seed: int | Literal['random'] = 'random', samples_per_epoch: PositiveInt | None = None, worker_partition: Literal['split', 'replicate'] | None = None, work_dir: DirectoryPath | None = None, batch_size: PositiveInt = 1, num_workers: int | Literal['auto'] = 'auto', sample_transform_fn: Callable[[CachedSample], T] | None = None, collate_fn: Callable[[list[T]], BatchT] | Callable[[list[CachedSample]], BatchT] | None = None, drop_last: bool = False, pin_memory: bool = False, timeout: float = 0, native_num_workers: int | Literal['auto'] = 'auto', multiprocessing_context: Literal['fork', 'spawn', 'forkserver'] | BaseContext | None = None, worker_init_fn: Callable[[int], None] | None = None, prefetch_factor: int | None = None, persistent_workers: bool = True) -> DataLoader[CachedSample | T]`
 
 Build a finite PyTorch DataLoader for training or evaluation.
 
@@ -478,14 +478,16 @@ With one training process and one consumer, both modes use the full population.
 Torch interleaves worker batches; multiworker output need not match global
 metadata order. Weights do not affect sequential reads.
 
-``seed`` is accepted only with shuffle=True; otherwise ValueError avoids
-silently ignoring it. An explicit seed reproduces fresh loaders with the
-same worker topology. None selects randomness once during construction.
+An integer ``seed`` is accepted only with shuffle=True; otherwise
+ValueError avoids silently ignoring it. An explicit seed reproduces fresh
+loaders with the same worker topology. "random" (the default) selects
+randomness once during construction and is unused for sequential reading.
+None is not accepted as a seed or worker-count mode.
 Repeated passes reuse native state in the main process or persistent
 workers and continue their draw streams/cursors. Nonpersistent workers
 reconstruct fresh readers with the same saved seed and reset draw offset
 or sequential cursor each pass, repeating the same sample sequence when
-metadata is unchanged. This also happens with seed=None, because its
+metadata is unchanged. This also happens with seed="random", because its
 randomness is chosen once per loader. A short epoch can therefore keep
 omitting the same population rows. With num_workers>0, use
 persistent_workers=True (the default) to continue across epochs; explicit
@@ -499,7 +501,7 @@ Construction saves a config and active metadata Arrow without loading
 payloads or creating a consuming native reader. Parent edits do not change
 snapshots. Workers receive the config path and compact partition instructions,
 map shared snapshot buffers, and build their own native sampling state. They do not query
-distributed groups. With shuffle=True and seed=None, training processes
+distributed groups. With shuffle=True and seed="random", training processes
 agree a random partition seed during construction; construct loaders in
 the same order with the same global budget and batch size on every process.
 Each worker uses a distinct derived sampling seed.
@@ -511,14 +513,20 @@ when the parent loader and its active iterators release their dataset.
 Keep artifacts immutable and accessible to every consuming process.
 A hard process kill can leave temporary artifacts behind.
 Native setup happens on first consumption, or before worker_init_fn in
-each worker. num_workers controls Torch processes; native_num_workers
-controls Rust reader threads per consuming process. None automatically
-selects 1–4 threads from CPU affinity and visible cgroup v1/v2 quota and
-CPU-set limits, divided among loading consumers and local ranks.
+each worker. num_workers="auto" selects up to four Torch processes from
+the CPU budget per local rank minus one; a one-CPU budget selects zero.
+This leaves room in the process-count heuristic for training, but does not
+reserve CPUs or account for other workload threads. Explicit zero keeps
+loading in the main process and allows non-picklable local transforms.
+native_num_workers="auto" then selects 1–4 Rust reader threads per consumer.
+Both modes share one budget observation from CPU affinity and visible
+cgroup v1/v2 quota and CPU-set limits, divided among consumers and local ranks.
 LOCAL_WORLD_SIZE supplies local rank count; absent launcher information
 conservatively uses distributed world size. Explicit positive integers
 override detection. Fractional quotas round down with a one-thread
-minimum; unreadable limits warn and fall back to one. This is a resource
+minimum; unreadable limits warn and fall back to one CPU. Automatic
+counts can vary across machines; fix both counts for reproducible topology.
+This is a resource
 budget, not a throughput guarantee. Queues remain bounded
 by ReaderConfig.prefetch_size. With num_workers>0, sample_transform_fn
 is checked for picklability before export or worker startup, for every

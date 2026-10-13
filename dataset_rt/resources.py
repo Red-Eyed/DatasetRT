@@ -195,3 +195,10 @@ def native_worker_count(cpu_count: int, *, num_workers: int, local_ranks: int) -
     if cpu_count < 1 or num_workers < 0 or local_ranks < 1:
         raise ValueError("CPU and rank budgets must be positive; loading workers nonnegative")
     return max(1, min(4, cpu_count // (max(1, num_workers) * local_ranks)))
+
+
+def loading_worker_count(cpu_count: int, *, local_ranks: int) -> int:
+    """Choose up to four loading processes per rank, leaving one CPU for training."""
+    if cpu_count < 1 or local_ranks < 1:
+        raise ValueError("CPU and rank budgets must be positive")
+    return min(4, max(0, cpu_count // local_ranks - 1))

@@ -147,7 +147,7 @@ def test_extra_column_types_survive_selection(dataset: CachedDataset, tmp_path: 
     assert_frame_equal(
         CachedDataset.from_config(dataset.dump_config(directory)).get_metadata(), frame
     )
-    loader = dataset.to_torch_dataloader(shuffle=True, seed=7, collate_fn=collate)
+    loader = dataset.to_torch_dataloader(num_workers=0, shuffle=True, seed=7, collate_fn=collate)
     assert len(list(loader)) == 10
 
 
@@ -192,7 +192,7 @@ def test_failed_export_cleans_only_owned_files(
     monkeypatch.setattr(reconstruction, "_sync_file", fail_sync)
     with pytest.raises(OSError, match="cannot synchronize"):
         if loader:
-            dataset.to_torch_dataloader(work_dir=directory)
+            dataset.to_torch_dataloader(num_workers=0, work_dir=directory)
         else:
             dataset.dump_config(directory)
     assert tuple(directory.iterdir()) == (sentinel,)
@@ -231,7 +231,10 @@ def test_transform_validation_precedes_export(dataset: CachedDataset, tmp_path: 
         )
     assert not tuple(tmp_path.glob("dataset-rt-*"))
     loader = dataset.to_torch_dataloader(
-        shuffle=False, sample_transform_fn=lambda sample: int(sample.data), batch_size=2
+        num_workers=0,
+        shuffle=False,
+        sample_transform_fn=lambda sample: int(sample.data),
+        batch_size=2,
     )
     assert next(iter(loader)).tolist() == [0, 1]
 
@@ -251,7 +254,7 @@ def test_compact_pickle_does_not_include_metadata(dataset: CachedDataset) -> Non
 
 def test_temporary_artifacts_follow_active_iterator(dataset: CachedDataset) -> None:
     """Deleting the loader cannot invalidate an iterator that still owns its dataset."""
-    loader = dataset.to_torch_dataloader(shuffle=False, collate_fn=collate)
+    loader = dataset.to_torch_dataloader(num_workers=0, shuffle=False, collate_fn=collate)
     assert isinstance(loader.dataset, ReaderAdapter)
     directory = loader.dataset.config_path.parent
     iterator = iter(loader)
@@ -292,8 +295,8 @@ def test_temporary_artifacts_follow_worker_iterator(
 
 def test_explicit_work_dir_is_isolated_and_retained(dataset: CachedDataset, tmp_path: Path) -> None:
     """Independent loaders publish distinct snapshots under caller-owned output."""
-    first = dataset.to_torch_dataloader(shuffle=False, work_dir=tmp_path)
-    second = dataset.to_torch_dataloader(shuffle=False, work_dir=tmp_path)
+    first = dataset.to_torch_dataloader(num_workers=0, shuffle=False, work_dir=tmp_path)
+    second = dataset.to_torch_dataloader(num_workers=0, shuffle=False, work_dir=tmp_path)
     assert isinstance(first.dataset, ReaderAdapter) and isinstance(second.dataset, ReaderAdapter)
     paths = (first.dataset.config_path, second.dataset.config_path)
     assert paths[0] != paths[1]

@@ -99,7 +99,7 @@ def train_rank(rank: int, options: Example, cache: Path, rendezvous: str) -> Non
         )
         loader = dataset.to_torch_dataloader(
             shuffle=options.shuffle,
-            seed=7 if options.shuffle else None,
+            seed=7 if options.shuffle else "random",
             samples_per_epoch=options.steps * 4 * options.ranks,
             worker_partition="replicate" if options.shuffle else "split",
             batch_size=4,

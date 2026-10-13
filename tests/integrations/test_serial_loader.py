@@ -120,7 +120,11 @@ def test_many_samples_and_caches_stream_without_output_materialization(
 ) -> None:
     """Smoke the scalable adapter path with bounded native prefetch and streaming checks."""
     loader = many_cache_dataset.to_torch_dataloader(
-        shuffle=shuffle, seed=7 if shuffle else None, batch_size=1, collate_fn=sample_identity
+        num_workers=0,
+        shuffle=shuffle,
+        seed=7 if shuffle else "random",
+        batch_size=1,
+        collate_fn=sample_identity,
     )
     count = 0
     seen_caches: set[int] = set()
@@ -162,7 +166,11 @@ def fail_transform(sample: CachedSample) -> int:
 def test_setup_is_lazy_and_reuses_native_state(dataset: CachedDataset, shuffle: bool) -> None:
     """Real readers are created only on consumption and reused on setup/iteration."""
     loader = dataset.to_torch_dataloader(
-        shuffle=shuffle, seed=7 if shuffle else None, batch_size=1, collate_fn=sample_identity
+        num_workers=0,
+        shuffle=shuffle,
+        seed=7 if shuffle else "random",
+        batch_size=1,
+        collate_fn=sample_identity,
     )
     assert isinstance(loader, DataLoader)
     adapter = loader.dataset
@@ -186,6 +194,7 @@ def test_shuffle_continues_windows_and_partial_iterators(dataset: CachedDataset)
     """Partial Python iteration never loses pending draws or resets native sampling."""
     dataset.set_epoch_len(3)
     first = dataset.to_torch_dataloader(
+        num_workers=0,
         seed=7,
         samples_per_epoch=31,
         batch_size=1,
@@ -193,6 +202,7 @@ def test_shuffle_continues_windows_and_partial_iterators(dataset: CachedDataset)
         collate_fn=first_index,
     )
     second = dataset.to_torch_dataloader(
+        num_workers=0,
         seed=7,
         samples_per_epoch=31,
         batch_size=1,
@@ -209,7 +219,11 @@ def test_sequential_inherits_source_epoch_length(dataset: CachedDataset) -> None
     """A loader snapshots the source epoch length and continues sequentially."""
     dataset.set_epoch_len(3)
     loader = dataset.to_torch_dataloader(
-        shuffle=False, batch_size=1, sample_transform_fn=sample_index, collate_fn=first_index
+        num_workers=0,
+        shuffle=False,
+        batch_size=1,
+        sample_transform_fn=sample_index,
+        collate_fn=first_index,
     )
     assert len(loader) == 3
     dataset.set_epoch_len(8)
@@ -223,7 +237,9 @@ def test_sequential_inherits_source_epoch_length(dataset: CachedDataset) -> None
 def test_sequential_rejects_explicit_seed(dataset: CachedDataset, seed: int) -> None:
     """Unshuffled loading rejects a setting that would otherwise be ignored."""
     with pytest.raises(ValueError, match="seed requires shuffle=True"):
-        dataset.to_torch_dataloader(shuffle=False, seed=seed)
+        dataset.to_torch_dataloader(
+            num_workers=0, shuffle=False, seed=("random" if seed is None else seed)
+        )
 
 
 @pytest.mark.parametrize(
@@ -235,7 +251,7 @@ def test_native_dataloader_owns_batching(
 ) -> None:
     """Caller collation and drop_last behave exactly as in ordinary Torch loading."""
     loader = dataset.to_torch_dataloader(
-        shuffle=False, batch_size=4, collate_fn=indices, drop_last=drop_last
+        num_workers=0, shuffle=False, batch_size=4, collate_fn=indices, drop_last=drop_last
     )
     assert list(loader) == expected
 
@@ -246,7 +262,9 @@ def test_metadata_snapshot_preserves_duplicates_and_parent_isolation(
     """Native reconstruction freezes accepted weights, filtering, order, and duplicates."""
     frame = dataset.get_metadata()
     dataset.update_metadata(pl.concat([frame.slice(8, 1), frame.slice(1, 1), frame.slice(8, 1)]))
-    loader = dataset.to_torch_dataloader(shuffle=False, batch_size=1, collate_fn=sample_identity)
+    loader = dataset.to_torch_dataloader(
+        num_workers=0, shuffle=False, batch_size=1, collate_fn=sample_identity
+    )
     dataset.update_metadata(frame)
     assert [sample.sample_id for sample in loader] == [8, 1, 8]
     assert [sample.sample_id for sample in loader] == [8, 1, 8]
@@ -257,6 +275,7 @@ def test_weighted_sampling_keeps_full_active_population(dataset: CachedDataset) 
     frame = dataset.get_metadata().slice(0, 2).with_columns(pl.Series("weight", [1.0, 9.0]))
     dataset.update_metadata(frame)
     loader = dataset.to_torch_dataloader(
+        num_workers=0,
         seed=37,
         samples_per_epoch=1000,
         batch_size=1,
@@ -271,7 +290,11 @@ def test_weighted_sampling_keeps_full_active_population(dataset: CachedDataset) 
 def test_pickle_excludes_initialized_native_state(dataset: CachedDataset) -> None:
     """An initialized adapter serializes fresh reconstruction inputs, never handles."""
     loader = dataset.to_torch_dataloader(
-        seed=7, batch_size=1, sample_transform_fn=sample_index, collate_fn=first_index
+        num_workers=0,
+        seed=7,
+        batch_size=1,
+        sample_transform_fn=sample_index,
+        collate_fn=first_index,
     )
     adapter = loader.dataset
     assert isinstance(adapter, ReaderAdapter)
@@ -287,7 +310,7 @@ def test_pickle_excludes_initialized_native_state(dataset: CachedDataset) -> Non
 def test_omitted_seed_is_fixed_after_setup(dataset: CachedDataset) -> None:
     """Actual entropy is selected once, with a stable reader across iterator calls."""
     loader = dataset.to_torch_dataloader(
-        batch_size=1, sample_transform_fn=sample_index, collate_fn=first_index
+        num_workers=0, batch_size=1, sample_transform_fn=sample_index, collate_fn=first_index
     )
     list(islice(loader, 1))
     adapter = loader.dataset
@@ -302,7 +325,9 @@ def test_omitted_seed_is_fixed_after_setup(dataset: CachedDataset) -> None:
 
 def test_transform_errors_propagate(dataset: CachedDataset) -> None:
     """No implicit replacement or cross-rank recovery hides domain callback errors."""
-    loader = dataset.to_torch_dataloader(batch_size=1, sample_transform_fn=fail_transform)
+    loader = dataset.to_torch_dataloader(
+        num_workers=0, batch_size=1, sample_transform_fn=fail_transform
+    )
     with pytest.raises(ValueError, match="bad sample"):
         next(iter(loader))
 
@@ -325,7 +350,7 @@ def test_invalid_loader_options_fail_before_consumption(
             num_workers=options.num_workers,
             native_num_workers=options.native_num_workers,
             timeout=options.timeout,
-            seed=options.seed,
+            seed=("random" if options.seed is None else options.seed),
         )
 
 
@@ -347,6 +372,7 @@ def test_explicit_finite_budget_wraps_sequentially(
 ) -> None:
     """Sample budgets remain finite, preserve order, and report actual batch counts."""
     loader = dataset.to_torch_dataloader(
+        num_workers=0,
         shuffle=False,
         samples_per_epoch=samples,
         batch_size=3,
@@ -375,7 +401,7 @@ def test_invalid_sample_budget(
     monkeypatch.setattr(CachedDataset, "get_metadata", unexpected_metadata_access)
     monkeypatch.setattr(CachedDataset, "_reader_recipe", unexpected_metadata_access)
     with pytest.raises(ValueError, match="samples_per_epoch"):
-        dataset.to_torch_dataloader(samples_per_epoch=samples)  # pyrefly: ignore[no-matching-overload]
+        dataset.to_torch_dataloader(num_workers=0, samples_per_epoch=samples)  # pyrefly: ignore[no-matching-overload]
 
 
 @pytest.mark.parametrize(
@@ -426,7 +452,11 @@ def test_largest_supported_sample_budget(
     """The maximum accepted length is observable without consuming a huge epoch."""
     budget = min(sys.maxsize, 1 << 53)
     loader = dataset.to_torch_dataloader(
-        shuffle=False, samples_per_epoch=budget, batch_size=batch_size, drop_last=drop_last
+        num_workers=0,
+        shuffle=False,
+        samples_per_epoch=budget,
+        batch_size=batch_size,
+        drop_last=drop_last,
     )
     expected = budget // batch_size if drop_last else (budget + batch_size - 1) // batch_size
     assert len(loader) == expected
@@ -474,16 +504,16 @@ def test_inherited_budget_limit(dataset: CachedDataset, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(CachedDataset, "get_metadata", unexpected_metadata_access)
     with pytest.raises(ValueError, match="inherited samples_per_epoch"):
-        dataset.to_torch_dataloader(shuffle=False)
+        dataset.to_torch_dataloader(num_workers=0, shuffle=False)
     monkeypatch.undo()
-    loader = dataset.to_torch_dataloader(shuffle=False, samples_per_epoch=10)
+    loader = dataset.to_torch_dataloader(num_workers=0, shuffle=False, samples_per_epoch=10)
     assert len(loader) == 10
 
 
 def test_invalid_worker_partition(dataset: CachedDataset) -> None:
     """Unknown partition policies fail explicitly at the public boundary."""
     with pytest.raises(ValueError, match="worker_partition"):
-        dataset.to_torch_dataloader(worker_partition="other")  # pyrefly: ignore[no-matching-overload]
+        dataset.to_torch_dataloader(num_workers=0, worker_partition="other")  # pyrefly: ignore[no-matching-overload]
 
 
 def test_prepared_topology_must_match_consumer(dataset: CachedDataset) -> None:
@@ -548,7 +578,7 @@ def test_prepared_worker_populations(
     dataset.update_metadata(frame)
     loader = dataset.to_torch_dataloader(
         shuffle=shuffle,
-        seed=7 if shuffle else None,
+        seed=7 if shuffle else "random",
         worker_partition=partition,
         num_workers=2,
         batch_size=3,
@@ -586,7 +616,7 @@ def test_prepared_worker_populations(
 def test_invalid_batch_size(dataset: CachedDataset, batch_size: int | float | None) -> None:
     """Require batching explicitly, without coercing None, booleans, or floats."""
     with pytest.raises(ValueError, match="batch_size must be a positive integer"):
-        dataset.to_torch_dataloader(batch_size=batch_size)  # pyrefly: ignore[no-matching-overload]
+        dataset.to_torch_dataloader(num_workers=0, batch_size=batch_size)  # pyrefly: ignore[no-matching-overload]
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
@@ -594,11 +624,16 @@ def test_inherited_and_explicit_epoch_budgets(dataset: CachedDataset, shuffle: b
     """Honor source epoch overrides in both modes and let a loader override them."""
     dataset.set_epoch_len(17)
     inherited = dataset.to_torch_dataloader(
-        shuffle=shuffle, seed=7 if shuffle else None, batch_size=3, collate_fn=indices
+        num_workers=0,
+        shuffle=shuffle,
+        seed=7 if shuffle else "random",
+        batch_size=3,
+        collate_fn=indices,
     )
     explicit = dataset.to_torch_dataloader(
+        num_workers=0,
         shuffle=shuffle,
-        seed=7 if shuffle else None,
+        seed=7 if shuffle else "random",
         samples_per_epoch=5,
         batch_size=3,
         collate_fn=indices,

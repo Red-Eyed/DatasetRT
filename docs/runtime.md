@@ -221,7 +221,13 @@ selected physical indices still scale with consumers.
 ## PyTorch DataLoader helper
 
 Loader defaults retain persistent workers and automatically budget native reader
-threads. `native_num_workers=None` selects 1–4 threads per consumer from the
+threads. Both worker counts default to the explicit `"auto"` mode; `None` is
+rejected. `num_workers="auto"` selects `min(4, max(0, CPUs per local rank - 1))`
+loading processes, while explicit zero retains main-process loading and supports
+local callbacks. Auto loading may launch processes, so transforms must be picklable
+when the resolved count is positive. Explicit topology is preferable for
+cross-machine reproducibility. Both automatic counts share one budget reading.
+`native_num_workers="auto"` then selects 1–4 threads per consumer from the
 minimum of host CPUs, process affinity, and visible Linux cgroup v1/v2 CPU quotas
 and CPU-set constraints. Detection follows `/proc/self/cgroup` and mountinfo,
 checks visible ancestors, and supports remounted controller roots. Fractional
@@ -238,6 +244,11 @@ training threads, or keep total native threads below the budget when consumers
 already outnumber CPUs. An explicit integer overrides automatic selection.
 For example, eight consumers sharing 32 CPUs receive four native threads each;
 a Docker quota of two CPUs reduces them to one thread each.
+
+`seed="random"` chooses randomness once per loader construction. An integer seed
+reproduces fresh loaders with the same topology. Persistent readers continue
+their stream across passes; reconstructed nonpersistent readers still reset it.
+Sequential reads accept the default random mode but reject explicit integer seeds.
 
 `worker_partition=None` selects replicate for shuffled weighted training and
 split for sequential reading. Replicate preserves full-population weighted

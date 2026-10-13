@@ -384,7 +384,7 @@ def measure_trial(spec: TrialSpec) -> TrialResult:
             "Iterable[tuple[Output, ...]]",
             dataset.to_torch_dataloader(
                 shuffle=spec.shuffle,
-                seed=config.seed if spec.shuffle else None,
+                seed=config.seed if spec.shuffle else "random",
                 samples_per_epoch=config.samples_per_cache * config.caches,
                 worker_partition="replicate" if spec.shuffle else "split",
                 batch_size=config.batch_size,
