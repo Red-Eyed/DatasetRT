@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from dataset_rt.integrations.loading import (
     WorkerPlan,
+    automatic_native_workers,
     capture_replica,
     common_seed,
     partition_rows,
@@ -259,7 +260,7 @@ def prepare_partitions(
 def _validate_worker_options(
     *,
     num_workers: int,
-    native_num_workers: int,
+    native_num_workers: int | None,
     timeout: float,
     multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
     prefetch_factor: int | None,
@@ -267,7 +268,9 @@ def _validate_worker_options(
     """Reject unusable worker settings before exporting dataset-scale metadata."""
     if type(num_workers) is not int or not 0 <= num_workers < 1 << 32:
         raise ValueError("num_workers must be a nonnegative integer smaller than 2**32")
-    if type(native_num_workers) is not int or not 1 <= native_num_workers <= sys.maxsize:
+    if native_num_workers is not None and (
+        type(native_num_workers) is not int or not 1 <= native_num_workers <= sys.maxsize
+    ):
         raise ValueError("native_num_workers must be a positive integer fitting sys.maxsize")
     if not isfinite(timeout) or timeout < 0:
         raise ValueError("timeout must be finite and nonnegative")
@@ -313,7 +316,7 @@ def make_dataloader(
     shuffle: bool,
     seed: int | None,
     samples_per_epoch: int | None,
-    worker_partition: Literal["split", "replicate"],
+    worker_partition: Literal["split", "replicate"] | None,
     batch_size: int,
     num_workers: int,
     sample_transform_fn: Callable[[CachedSample], T] | None,
@@ -321,7 +324,7 @@ def make_dataloader(
     drop_last: bool,
     pin_memory: bool,
     timeout: float,
-    native_num_workers: int,
+    native_num_workers: int | None,
     multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None,
     worker_init_fn: Callable[[int], None] | None,
     prefetch_factor: int | None,
@@ -354,6 +357,8 @@ def make_dataloader(
         raise ValueError(
             f"samples_per_epoch must be a positive integer <= {MAX_SAMPLE_BUDGET} or None"
         )
+    if worker_partition is None:
+        worker_partition = "replicate" if shuffle else "split"
     if worker_partition not in ("split", "replicate"):
         raise ValueError("worker_partition must be 'split' or 'replicate'")
     if not shuffle and seed is not None:
@@ -375,6 +380,11 @@ def make_dataloader(
     if samples_per_epoch is None and not 1 <= recipe.sample_count <= MAX_SAMPLE_BUDGET:
         raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
     replica = capture_replica()
+    resolved_native_workers = (
+        automatic_native_workers(num_workers=num_workers, world_size=replica.world_size)
+        if native_num_workers is None
+        else native_num_workers
+    )
     seed = common_seed(replica, shuffle, seed)
     artifacts = ConstructionArtifacts.create(work_dir)
     try:
@@ -401,7 +411,7 @@ def make_dataloader(
             replica,
             shuffle,
             seed,
-            native_num_workers,
+            resolved_native_workers,
             sample_transform_fn,
             sum(partition.sample_count for partition in partitions),
             partitions,

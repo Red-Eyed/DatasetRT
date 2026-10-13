@@ -628,9 +628,9 @@ epoch or draw-offset propagation remains a separate correctness improvement.
 | `num_workers=0`, `persistent_workers=True` | The worker-only flag is disabled for zero-worker loading; the main-process reader survives repeated passes. Positive loading workers persist by default. Explicitly disabling persistence with loading workers warns about replay. |
 | `shuffle=True`, `seed=None` | Weighted sampling with replacement; randomness is selected once per loader, not once per epoch. Persistence advances draw offsets while retaining the seed. |
 | `samples_per_epoch=None` | Inherits the dataset's configured epoch length at construction, which may be shorter than the population. A short epoch neither reduces the population nor guarantees coverage. |
-| `worker_partition="split"` | Fixed partitions and quotas based on sample counts can distort global weighted frequencies. Use `replicate` for full-population weighted sampling in each consumer; its private sampling state uses more RAM. |
+| `worker_partition=None` | Shuffled loading defaults to replicate for global weighted sampling; sequential loading defaults to split to avoid duplicate starts. Replicate retains full private sampling state. Explicit split can distort weighted frequencies. |
 | `batch_size=1`, `drop_last=False` | Keeps incomplete batches; distributed budgets may pad counts. Set batching and tail policy explicitly for training. |
-| `native_num_workers=1`, `prefetch_factor=None` | One native reader thread per consumer; Torch supplies its multiprocess prefetch default. Private buffers multiply across ranks and workers. |
+| `native_num_workers=None`, `prefetch_factor=None` | Select 1–4 native threads using affinity and visible cgroup limits, divided among loading consumers and local ranks. Torch supplies its multiprocess prefetch default. Private buffers multiply across ranks and workers. |
 | `multiprocessing_context=None` | Torch uses the platform default. Select a supported context explicitly when process initialization matters; CUDA loading should use spawn. |
 | `pin_memory=False`, `timeout=0` | No pinned-memory transfer optimization and no positive loader timeout. Choose these according to accelerator and failure-detection needs. |
 

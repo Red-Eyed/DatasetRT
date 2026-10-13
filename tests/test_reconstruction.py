@@ -343,8 +343,11 @@ def test_mapped_metadata_retains_shared_buffers(dataset: CachedDataset, tmp_path
     assert_frame_equal(restored.get_metadata(), frame)
 
 
+@pytest.mark.parametrize("partition", ["split", "replicate"])
 def test_worker_setup_avoids_ipc_and_metadata_gather(
-    dataset: CachedDataset, monkeypatch: pytest.MonkeyPatch
+    dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    partition: Literal["split", "replicate"],
 ) -> None:
     """A selected reader keeps the full mapped owner and only allocates native sampling rows."""
     frame = dataset.get_metadata().with_columns(pl.lit("x" * 1_000_000).alias("wide"))
@@ -355,7 +358,9 @@ def test_worker_setup_avoids_ipc_and_metadata_gather(
 
     monkeypatch.setattr(reconstruction, "metadata_ipc", reject_ipc)
     dataset.update_metadata(frame)
-    loader = dataset.to_torch_dataloader(shuffle=True, seed=7, num_workers=0, collate_fn=collate)
+    loader = dataset.to_torch_dataloader(
+        shuffle=True, seed=7, num_workers=0, collate_fn=collate, worker_partition=partition
+    )
     assert isinstance(loader.dataset, ReaderAdapter)
     loader.dataset.setup()
     from dataset_rt.integrations.loader import LocalReader
@@ -365,11 +370,16 @@ def test_worker_setup_avoids_ipc_and_metadata_gather(
     snapshot = worker._reader_recipe().metadata
     assert isinstance(snapshot, MetadataSnapshot)
     assert snapshot.table.num_rows == 10
-    assert snapshot.selection is not None
-    assert snapshot.selection.num_rows == 10
+    if partition == "split":
+        assert snapshot.selection is not None
+        assert snapshot.selection.num_rows == 10
+        expected = np.random.default_rng(7).permutation(10)
+    else:
+        assert snapshot.selection is None
+        expected = np.arange(10)
     np.testing.assert_array_equal(
         worker.get_metadata().get_column("sample_id").to_numpy(),
-        np.random.default_rng(7).permutation(10),
+        expected,
     )
 
 

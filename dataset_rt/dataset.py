@@ -276,13 +276,13 @@ class CachedDataset:
         shuffle: bool = True,
         seed: int | None = None,
         samples_per_epoch: PositiveInt | None = None,
-        worker_partition: Literal["split", "replicate"] = "split",
+        worker_partition: Literal["split", "replicate"] | None = None,
         work_dir: DirectoryPath | None = None,
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
-        native_num_workers: int = 1,
+        native_num_workers: int | None = None,
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
@@ -301,13 +301,13 @@ class CachedDataset:
         shuffle: bool = True,
         seed: int | None = None,
         samples_per_epoch: PositiveInt | None = None,
-        worker_partition: Literal["split", "replicate"] = "split",
+        worker_partition: Literal["split", "replicate"] | None = None,
         work_dir: DirectoryPath | None = None,
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
-        native_num_workers: int = 1,
+        native_num_workers: int | None = None,
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
@@ -326,13 +326,13 @@ class CachedDataset:
         shuffle: bool = True,
         seed: int | None = None,
         samples_per_epoch: PositiveInt | None = None,
-        worker_partition: Literal["split", "replicate"] = "split",
+        worker_partition: Literal["split", "replicate"] | None = None,
         work_dir: DirectoryPath | None = None,
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
-        native_num_workers: int = 1,
+        native_num_workers: int | None = None,
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
@@ -347,7 +347,7 @@ class CachedDataset:
         shuffle: bool = True,
         seed: int | None = None,
         samples_per_epoch: PositiveInt | None = None,
-        worker_partition: Literal["split", "replicate"] = "split",
+        worker_partition: Literal["split", "replicate"] | None = None,
         work_dir: DirectoryPath | None = None,
         batch_size: PositiveInt = 1,
         num_workers: int = 0,
@@ -358,7 +358,7 @@ class CachedDataset:
         drop_last: bool = False,
         pin_memory: bool = False,
         timeout: float = 0,
-        native_num_workers: int = 1,
+        native_num_workers: int | None = None,
         multiprocessing_context: Literal["fork", "spawn", "forkserver"] | BaseContext | None = None,
         worker_init_fn: Callable[[int], None] | None = None,
         prefetch_factor: int | None = None,
@@ -392,6 +392,11 @@ class CachedDataset:
         process zero warns with requested and effective counts. For N=1000,
         R=3, B=32, each gets 334 samples and 11 batches, or 320 samples and
         10 batches when dropping tails. A zero effective count yields no batches.
+
+        ``worker_partition=None`` (the default) selects replicate for shuffled
+        training and split for sequential reading. Replicate preserves global
+        weighted frequencies while retaining full private sampling state in
+        each consumer. Ten million f64 weights alone require 80 MB per consumer.
 
         ``worker_partition="split"`` divides active row positions across training
         processes, then their loading workers. Padding may repeat row positions.
@@ -444,7 +449,14 @@ class CachedDataset:
         A hard process kill can leave temporary artifacts behind.
         Native setup happens on first consumption, or before worker_init_fn in
         each worker. num_workers controls Torch processes; native_num_workers
-        controls Rust reader threads per consuming process. Queues remain bounded
+        controls Rust reader threads per consuming process. None automatically
+        selects 1–4 threads from CPU affinity and visible cgroup v1/v2 quota and
+        CPU-set limits, divided among loading consumers and local ranks.
+        LOCAL_WORLD_SIZE supplies local rank count; absent launcher information
+        conservatively uses distributed world size. Explicit positive integers
+        override detection. Fractional quotas round down with a one-thread
+        minimum; unreadable limits warn and fall back to one. This is a resource
+        budget, not a throughput guarantee. Queues remain bounded
         by ReaderConfig.prefetch_size. With num_workers>0, sample_transform_fn
         is checked for picklability before export or worker startup, for every
         start method. Other callbacks must also be picklable for spawn/forkserver.

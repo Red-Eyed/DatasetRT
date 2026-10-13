@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 import warnings
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataset_rt.records import RowSpan
+from dataset_rt.resources import available_cpu_count, native_worker_count
 
 U64_MAX = (1 << 64) - 1
+
+
+def automatic_native_workers(*, num_workers: int, world_size: int) -> int:
+    """Divide visible CPU capacity by launcher-local ranks, conservatively using all ranks otherwise."""
+    local_ranks = world_size
+    if world_size > 1:
+        configured = os.environ.get("LOCAL_WORLD_SIZE")
+        if configured is not None:
+            local_ranks = int(configured)
+            if not 1 <= local_ranks <= world_size:
+                raise ValueError(
+                    "LOCAL_WORLD_SIZE must be between one and the distributed world size"
+                )
+    return native_worker_count(
+        available_cpu_count(), num_workers=num_workers, local_ranks=local_ranks
+    )
 
 
 class ReplicaIdentity(BaseModel):

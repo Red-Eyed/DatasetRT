@@ -220,6 +220,31 @@ selected physical indices still scale with consumers.
 
 ## PyTorch DataLoader helper
 
+Loader defaults retain persistent workers and automatically budget native reader
+threads. `native_num_workers=None` selects 1–4 threads per consumer from the
+minimum of host CPUs, process affinity, and visible Linux cgroup v1/v2 CPU quotas
+and CPU-set constraints. Detection follows `/proc/self/cgroup` and mountinfo,
+checks visible ancestors, and supports remounted controller roots. Fractional
+quotas are rounded down with a one-thread minimum; malformed or unreadable limits
+warn and fall back to one. Hidden ancestor limits cannot be inferred.
+The reusable `dataset_rt.resources.available_cpu_count()` helper reports that
+whole-CPU budget without importing Torch.
+
+The budget is divided by `max(1, num_workers)` and the local training-rank count
+from `LOCAL_WORLD_SIZE`. Without launcher information, distributed world size
+is a conservative fallback. This may underuse separately pinned rank allocations.
+It cannot reserve CPUs from unrelated workloads, account for Python transform or
+training threads, or keep total native threads below the budget when consumers
+already outnumber CPUs. An explicit integer overrides automatic selection.
+For example, eight consumers sharing 32 CPUs receive four native threads each;
+a Docker quota of two CPUs reduces them to one thread each.
+
+`worker_partition=None` selects replicate for shuffled weighted training and
+split for sequential reading. Replicate preserves full-population weighted
+sampling but retains private weights and sampling arrays in every consumer.
+Ten million f64 weights alone use 80 MB per consumer. Explicit split remains
+available as a memory tradeoff and can change global weighted frequencies.
+
 `CachedDataset.to_torch_dataloader()` returns a finite PyTorch DataLoader for
 training or evaluation. The legacy `to_torch_iterable_dataset()` is unchanged.
 Neither shuffling nor worker partitioning implies a validation mode.

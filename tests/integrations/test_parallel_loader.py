@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, get_worker_info
 
 from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
 from dataset_rt.config import WriterConfig
+from dataset_rt.integrations import loading
 from dataset_rt.integrations.loader import EmptyPartition, LocalReader, PendingReader, ReaderAdapter
 from dataset_rt.integrations.loading import derive_seed
 from dataset_rt.reconstruction import load_configuration, load_metadata, select_population
@@ -169,6 +170,45 @@ def test_default_persistence_preserves_consuming_readers(
         loader = accepted_dataset.to_torch_dataloader(num_workers=workers)
     assert loader.persistent_workers == (workers > 0)
     assert not captured
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize(("cpus", "workers", "threads"), [(32, 8, 4), (2, 2, 1), (8, 0, 4)])
+def test_automatic_loader_resource_and_partition_defaults(
+    accepted_dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    shuffle: bool,
+    cpus: int,
+    workers: int,
+    threads: int,
+) -> None:
+    """Apply container capacity to compact plans while preserving weighted or sequential intent."""
+    monkeypatch.setattr(loading, "available_cpu_count", lambda: cpus)
+    loader = accepted_dataset.to_torch_dataloader(shuffle=shuffle, num_workers=workers)
+    adapter = loader.dataset
+    assert isinstance(adapter, ReaderAdapter)
+    assert adapter.native_num_workers == threads
+    active = [plan for plan in adapter.partitions if plan.sample_count > 0]
+    if shuffle:
+        assert all(plan.offset == 0 and plan.population_size == 3 for plan in active)
+    else:
+        assert sum(plan.population_size for plan in active) == 3
+
+
+def test_explicit_native_count_bypasses_automatic_detection(
+    accepted_dataset: CachedDataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honor deliberate thread overrides without probing system limits."""
+
+    def unavailable() -> int:
+        """Fail if the explicit configuration unexpectedly invokes CPU discovery."""
+        raise AssertionError("CPU detection should be bypassed")
+
+    monkeypatch.setattr(loading, "available_cpu_count", unavailable)
+    loader = accepted_dataset.to_torch_dataloader(native_num_workers=7)
+    adapter = loader.dataset
+    assert isinstance(adapter, ReaderAdapter)
+    assert adapter.native_num_workers == 7
 
 
 def initialize_worker(worker_id: int) -> None:
