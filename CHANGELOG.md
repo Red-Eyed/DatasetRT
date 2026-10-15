@@ -2,203 +2,110 @@
 
 All notable changes to DatasetRT are documented here.
 
-## 0.4.0rc7 - 2026-10-13
+## 0.4.0 - 2026-10-15
 
-### Backwards Incompatible Changes
+This release consolidates the 0.4 release candidates since 0.3.2.
 
-- Make DataLoader modes explicit: `num_workers="auto"`,
-  `native_num_workers="auto"`, `seed="random"`,
-  `persistent_workers="auto"`, and `prefetch_factor="auto"`.
-  Replace previous `None` selections with the corresponding literal.
-  Automatic persistence is enabled when loading workers exist; automatic
-  prefetch uses two batches per worker and is disabled with zero workers.
-  Explicit `persistent_workers=True` or integer prefetch with zero workers
-  now raises an error.
-- Default `multiprocessing_context` to `"spawn"`. Replace `None` with
-  `"inherit"` to use Python's platform default. Explicit start methods and
-  `BaseContext` objects remain supported; zero-worker loading omits the context.
-  Spawn requires a guarded application entry point and picklable callbacks.
-- Default shuffled loading to replicated populations, preserving global weighted
-  sampling instead of assigning equal quotas to independently weighted splits.
-  Sequential loading still defaults to split populations. Explicit
-  `worker_partition="split"` remains available. Replication keeps a private
-  weight vector and sampling state per consumer: 10M f64 weights alone require
-  80 MB per consumer, while immutable metadata buffers and indexes remain mapped.
+### Highlights
 
-### Improvements
-
-- Select up to four loading processes and 1–4 native reader threads per consumer
-  from CPU affinity and visible Docker/cgroup v1/v2 quota and CPU-set limits,
-  accounting for local ranks. A one-CPU budget selects zero loading processes;
-  unreadable limits warn and fall back conservatively. Explicit counts override
-  detection. Automatic counts can vary across machines; fix both counts when
-  reproducible worker topology is required.
-- Add default loader lifecycle diagnostics through the standard Python logger
-  `dataset_rt.loader`: resolved seeds, process/native thread counts, start method,
-  partition, persistence, prefetching, and reader starts/passes. Application
-  logging configuration controls INFO events; unconfigured processes use stderr.
-  `verbose=False` suppresses diagnostics but retains the nonpersistent replay
-  warning. New nonpersistent reader starts report `sampling_reset=True`.
-
-### Developers
-
-- Add `just test-correctness`, rebuilding the native extension before six fast
-  behavioral tests with real spawned workers. Check exact weighted-stream
-  continuation across short epochs, default worker lifetime, fresh-loader
-  reproducibility, finite batch counts, and replay warnings. The focused suite
-  ran in about 2.8 seconds on the development Mac, excluding rebuild startup.
-  Deliberately disabling persistence, resetting readers, and discarding weights
-  each caused the checks to fail.
-
-## 0.4.0rc6 - 2026-10-13
-
-### Fixed
-
-- Default `persistent_workers=True` for loading workers so repeated epochs
-  continue native sampling progress. Zero-worker loading disables the worker-only
-  flag and retains its main-process reader.
-- Warn when loading workers use `persistent_workers=False`: reconstructed readers
-  reuse their saved sampling seeds and reset draw offsets or sequential cursors,
-  repeating the same sample sequence each epoch, including with `seed=None`.
-  Use `persistent_workers=True` to continue multiworker training streams.
-- Document the training coverage failure and review loader defaults. Add real
-  short weighted epoch replay tests across fork, spawn, and forkserver workers.
-  Explicitly nonpersistent readers still restart; the warning does not advance them.
-
-## 0.4.0rc5 - 2026-10-12
-
-- Advance the release candidate version to package the completed reader memory
-  bounds and shared immutable cache indexes. No additional runtime changes.
-
-## 0.4.0rc4 - 2026-10-12
-
-### Backwards Incompatible Changes
-
-- Replace version 1 reconstruction bundles containing `metadata.parquet` with
-  version 2 bundles containing an immutable `metadata.arrow` snapshot. Old
-  Parquet exports are no longer accepted by `CachedDataset.from_config()`;
-  recreate them with `CachedDataset.dump_config()`. DataLoader construction
-  automatically creates snapshots in the new format.
-
-### Performance
-
-- Reduce metadata memory during DataLoader startup by sharing memory-mapped
-  Arrow columns across workers and retaining selected row views directly in
-  Rust. Shuffled splits share one mapped permutation per loader instead of
-  allocating a full permutation in every worker. Native cache indexes,
-  weights, and sampling arrays remain process-local.
-- Remove whole-table IPC copies from `get_metadata()` and `update_metadata()`.
-  Map original cache metadata lazily, share retained Arrow buffers between
-  Python and Rust, and stream construction exports in bounded row chunks.
-- Further reduce reader memory by replacing the process-local cache indexes
-  described above with read-only mappings shared across consumers on one host.
-  Eliminate a private 24-byte index entry per sample per reader and the transient
-  whole-file read. Preserve the binary format, shape validation, deterministic
-  reads, and opt-in checksum hashing. Weights and sampling arrays remain private.
-
-### Fixed
-
-- Bound the reader's combined active reads, queued results, and reorder buffer.
-  A delayed early read no longer allows later completed samples to accumulate
-  toward the epoch size; emission order and iterator-drop cancellation are preserved.
-
-## 0.4.0rc3 - 2026-10-10
-
-This candidate makes loader epochs finite, adds compact worker reconstruction,
-and restores optional source-process cache writing. CPU acceptance is verified;
-CUDA and physical multi-host validation remain pending on suitable hardware.
-
-### Added
-
-- Add optional spawned cache-source writers with `WriterConfig.num_processes`;
-  zero preserves serial writing. Sources must be picklable and importable.
-  Bound dispatch, preserve input-order outcomes, and stop without retries on
-  worker death or timeout. Add `scripts/bench_writer.py` for paired measurements.
-- Add `CachedDataset.update_manifests(version=3)` with typed migration outcomes.
-  Construct legacy datasets in their original cache order before migration to
-  preserve identities used by saved metadata tables. Migration is explicit,
-  resumable, and leaves sample files unchanged.
-- Add `python -m dataset_rt.run_benchmark` with automatic local rank launch,
-  external `torchrun` support, CPU/Gloo and CUDA/NCCL execution, generated or
-  existing caches, finite correctness checks, and JSON performance/resource
-  reports. Install optional dependencies with the `benchmark` extra. GPU and
-  physical multi-host execution require validation on suitable hardware.
-- Add `CachedDataset.dump_config(DirectoryPath) -> FilePath` and classmethod
-  `CachedDataset.from_config(FilePath)` for JSON construction settings and active
-  metadata Parquet snapshots, referencing existing cache payloads.
-- Add loader `work_dir`: managed temporary output by default, retained isolated
-  snapshots under a caller-selected existing directory.
-
-### Changed
-
-- Make the paired reader benchmark's worker counts configurable and share its
-  process-resource observer with the packaged distributed benchmark.
-- Send config paths and compact plans through process IPC instead of metadata
-  snapshots. Children reconstruct seeded partitions locally. Add NumPy and
-  PyArrow for columnar selection and synchronous Parquet reads.
+- Add finite, metadata-aware PyTorch DataLoaders with persistent sampling streams,
+  automatic worker sizing, and distributed sample budgets.
+- Add optional spawned cache-source writers and portable dataset reconstruction
+  settings that reference existing cache payloads.
+- Reduce reader memory with shared immutable Arrow metadata and mapped indexes,
+  and bound outstanding reads together with queued and reordered results.
 
 ### Backwards Incompatible Changes
 
 - Write new caches with v3 manifests and persistent name-derived `cache_id`
-  values, so identities survive reordered cache paths. V2 caches remain readable
-  with positional IDs until explicit migration. Treat IDs as opaque values;
-  replace code that indexes cache arrays directly with `cache_id`.
-- Reject invalid DataLoader worker combinations before metadata preparation,
-  including zero-worker persistence, contexts, and prefetch, nonfinite timeouts,
-  and nonboolean flags. Bound inherited and explicit sample budgets by
-  `min(sys.maxsize, 2**53)` to keep Torch's reported batch counts exact, and
-  require batch sizes to fit `sys.maxsize`.
-- Make `CachedDataset.to_torch_dataloader()` finite in both shuffle modes. Set
-  `samples_per_epoch` to the desired global sample count; `None` inherits
-  `len(dataset)`, including source `set_epoch_len()` overrides, at construction.
-  Replace externally limited infinite loops with iteration over the finite loader.
-- Add `worker_partition="split"` (default) and `"replicate"`. Split mode gives
-  consumers partitioned populations, using a common seeded ordering only when
-  `shuffle=True`; replicate mode gives each worker the full population.
-  Both share one global budget across ranks and workers. Use `"replicate"` for
-  full-population weighted draws in every worker. Randomized split populations approximate the
-  global weight distribution because quotas do not follow partition weight sums.
-- Reject an explicit `seed` with `shuffle=False` instead of silently ignoring it.
-  Omit the seed for sequential reading.
-- Require `batch_size` to be a positive integer and reject `None`. Collation now
-  always receives a list; use `batch_size=1` for individual-sample processing.
-- Divide global sample budgets equally across initialized DDP ranks. Pad with
-  `drop_last=False` or discard to complete local batches with `drop_last=True`;
-  warn in rank zero when the effective count changes. Report equal rank lengths.
-- Check multiprocess `sample_transform_fn` picklability before exporting artifacts,
-  including fork. Serial loaders still accept local callbacks.
+  values. Existing v2 caches remain readable with positional IDs. Treat IDs as
+  opaque; use `CachedDataset.update_manifests(version=3)` for explicit migration,
+  constructing legacy datasets in their original path order to preserve IDs.
+  Older releases that only read v2 cannot read migrated caches.
+- Make `CachedDataset.to_torch_dataloader()` epochs finite instead of the
+  infinite streams in early release candidates. Set `samples_per_epoch` for a
+  global sample budget, or omit it to inherit `len(dataset)` at construction.
+  Iterate the loader directly instead of externally limiting an infinite stream.
+  `batch_size` must be a positive integer; use `1` for single-sample collation.
+- Use explicit automatic modes for `num_workers`, `native_num_workers`,
+  `persistent_workers`, and `prefetch_factor` (`"auto"`), and for seeds
+  (`"random"`). Replace previous release-candidate `None` selections accordingly.
+  Sequential loading rejects an explicit seed. Automatic persistence is enabled
+  with loading workers; automatic prefetch uses two batches per worker and is
+  disabled with zero workers. Explicit persistence or integer prefetch with
+  zero workers raises an error.
+- Default loading processes to `multiprocessing_context="spawn"`. Use a guarded
+  application entry point and picklable callbacks. Replace release-candidate
+  `None` contexts with `"inherit"` to select Python's platform default.
+- Default shuffled loading to replicated populations for global weighted
+  sampling; sequential loading defaults to split populations. Explicit
+  `worker_partition="split"` remains available, but equal consumer quotas can
+  approximate the global weight distribution. Replication retains private
+  weights and sampling state per consumer; 10M f64 weights require 80 MB per
+  consumer, in addition to sampling state.
+- Divide global sample budgets equally across initialized DDP ranks, padding
+  with `drop_last=False` or discarding with `drop_last=True` to complete local
+  batches. Rank zero warns when the effective budget changes. Rank lengths and
+  reported loader lengths match emitted batches.
+- Replace release-candidate v1 reconstruction bundles containing
+  `metadata.parquet` with v2 bundles containing `metadata.arrow`. Recreate old
+  exports with `CachedDataset.dump_config()` before calling `from_config()`.
 
-### Fixed
+### New Features
 
-- Make `len(loader)` match the number of batches emitted for every worker count
-  by assigning whole-batch worker quotas and at most one incomplete tail per loader.
-  `drop_last=True` therefore drops at most one tail instead of one per worker.
+- Add `WriterConfig.num_processes` for bounded spawned source writers with
+  input-order outcomes; zero retains serial writing. Sources must be picklable
+  and importable. Worker death or timeout stops processing without retries.
+- Add `CachedDataset.dump_config()` and `CachedDataset.from_config()` for
+  reconstruction settings and immutable active metadata snapshots. Loader
+  `work_dir` controls retained snapshots; the default manages temporary output.
+- Add `python -m dataset_rt.run_benchmark` with the `benchmark` extra for local
+  rank launch or external `torchrun`, generated or existing caches, CPU/Gloo or
+  CUDA/NCCL execution, correctness checks, and JSON resource/performance reports.
 
-## 0.4.0rc2 - 2026-10-08
+### Improvements
 
-This release candidate adds process-local PyTorch loading to the 0.3.2 API.
-Parallel cache writing is still pending. The earlier 0.4.0rc1 writer experiment
-was reverted; users of that candidate should remove `WriterConfig.num_processes`
-and use the serial writer API for this release.
+- Resolve automatic loader counts from CPU affinity and visible container quota
+  and CPU-set limits, accounting for local ranks. Choose up to four loading
+  processes and 1–4 native threads per consumer; a one-CPU budget uses zero
+  loading processes. Set explicit counts for a reproducible worker topology.
+- Log loader configuration and reader lifecycle through `dataset_rt.loader`.
+  `verbose=False` suppresses diagnostics while retaining the warning that
+  explicitly nonpersistent workers repeat their sampling stream each epoch.
+- Validate worker options, finite timeouts, sample budgets, and multiprocess
+  transform picklability before exporting loader reconstruction artifacts.
 
-### Added
+### Bug Fixes
 
-- Add `CachedDataset.to_torch_dataloader()` with one-time process-local reader setup, optional sample transforms, infinite weighted shuffled streams, and finite sequential validation partitions. Support zero-worker loading and caller-selected fork/spawn/forkserver workers, including persistent readers and composed worker initialization.
-- Add a self-contained CPU DDP example and real macOS Gloo acceptance with two/four ranks, zero/one/two loading workers, both shuffle modes, seeded replay, persistent readers, and uneven sequential inputs. GPU and multi-host strategy validation remain outside this evidence.
-- Add `scripts/bench_parallel.py` to record reproducible serial preparation and transformation baselines with explicit workload sizes, JSON output, startup and cleanup timings, and process resource measurements.
-- Add `scripts/bench_reader.py` to compare direct native reading with zero/one/two/four-worker DataLoaders using paired CPU-heavy and cheap transform measurements, cold/repeated passes, process-tree resources, and explicit performance gates.
-- Add compatibility checks for existing imports, record pickle paths, configuration, and lazy PyTorch imports, plus process-local reader feasibility tests for serial, spawn, fork, and forkserver execution.
+- Continue sampling across short epochs by retaining loading workers by default.
+  Explicit `persistent_workers=False` still restarts reader progress and now
+  warns about repeated samples.
+- Preserve bounded reader memory when an early read completes late, while
+  retaining planned emission order and iterator-drop cancellation.
+- Allow fresh native runtimes after macOS `fork` without reusing an inherited
+  thread parker; bounded channels retain FIFO delivery and backpressure.
+- Assign whole-batch worker quotas so `len(loader)` matches emitted batches and
+  `drop_last=True` drops at most one local tail.
 
-### Changed
+### Performance
 
-- Include PyTorch and psutil in the optional `dev` dependencies so reader integration tests and resource benchmarks run from the project environment.
-- Split Python implementation into focused modules while preserving public imports, signatures, defaults, and pickle lookup paths. API documentation follows definitions behind the compatibility facade.
-- Enforce precise Python annotations with dedicated Ruff, pyrefly, and broad-type checks; run ordinary Python tests in parallel with pytest-xdist.
+- Share immutable memory-mapped Arrow metadata, selected row views, cache
+  indexes, and shuffled split permutations across consumers on one host.
+  Weights and sampling state remain private. Avoid whole-table IPC copies in
+  metadata access and updates, and stream reconstruction exports in bounded
+  chunks.
 
-### Fixed
+### Developers
 
-- Make the missing-PyTorch adapter test simulate dependency absence even when another test has already imported PyTorch.
-- Fix fresh native reader/writer runtimes crashing under macOS `fork` after the parent has used DatasetRT. Bounded native queues now wait on their own mutexes and condition variables, avoiding the inherited calling-thread semaphore while preserving backpressure and FIFO transport.
+- Add paired reader/writer benchmarks, CPU DDP acceptance examples, and
+  `just test-correctness` for fast behavioral checks with spawned workers.
+- Preserve public imports and pickle paths while splitting Python modules;
+  enforce precise annotations and run ordinary tests with pytest-xdist.
+
+### Validation coverage
+
+- CPU acceptance is verified. CUDA/NCCL and physical multi-host acceptance
+  remain planned validation work on suitable hardware.
 
 ## 0.3.2 - 2026-09-28
 
