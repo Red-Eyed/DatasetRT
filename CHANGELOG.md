@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## [Unreleased]
+
+### Documentation
+
+- Clarify DatasetRT's Python/Rust dataset caching purpose, add a runnable
+  quickstart, and expose documentation, repository, issue, and changelog URLs
+  in package metadata.
+
 ## 0.4.0 - 2026-10-15
 
 This release consolidates the 0.4 release candidates since 0.3.2.

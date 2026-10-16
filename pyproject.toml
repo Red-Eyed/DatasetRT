@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "dataset-rt"
-description = "Framework-independent dataset cache runtime"
+description = "Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling"
+keywords = ["dataset", "cache", "machine-learning", "sampling", "rust", "polars"]
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
@@ -33,6 +34,13 @@ dependencies = [
     "numpy>=1.26",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Red-Eyed/DatasetRT"
+Documentation = "https://red-eyed.github.io/DatasetRT/"
+Repository = "https://github.com/Red-Eyed/DatasetRT"
+Issues = "https://github.com/Red-Eyed/DatasetRT/issues"
+Changelog = "https://github.com/Red-Eyed/DatasetRT/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 benchmark = [
     "pydantic-settings>=2",
@@ -50,6 +58,9 @@ dev = [
     "psutil>=7.2.2",
     "types-psutil>=7.2.2",
 ]
+
+[dependency-groups]
+docs = ["mkdocs>=1.6,<2"]
 
 [tool.maturin]
 module-name = "dataset_rt._dataset_rt"

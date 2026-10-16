@@ -1,10 +1,10 @@
 [package]
 name = "dataset_rt"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
-description = "Framework-independent dataset cache runtime"
+description = "Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling"
 license = "MIT"
-documentation = "https://github.com/Red-Eyed/DatasetRT/tree/main/docs"
+documentation = "https://red-eyed.github.io/DatasetRT/"
 homepage = "https://github.com/Red-Eyed/DatasetRT"
 repository = "https://github.com/Red-Eyed/DatasetRT"
 

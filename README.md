@@ -1,8 +1,15 @@
-# DatasetRT
+# DatasetRT — Dataset Caching for Machine Learning
 
-DatasetRT is a correctness-first dataset cache for ML training loops that need
-fast restarts, deterministic sampling, and metadata-aware control over what gets
-sampled.
+[Documentation](https://red-eyed.github.io/DatasetRT/) ·
+[PyPI](https://pypi.org/project/dataset-rt/) ·
+[Issues](https://github.com/Red-Eyed/DatasetRT/issues)
+
+DatasetRT is a Python library with a Rust runtime for caching training datasets
+on disk. Reuse preprocessed samples, filter and rebalance data through Polars,
+and sample deterministically without rewriting cached payloads.
+
+Install **`dataset-rt`**, import **`dataset_rt`**, and use **DatasetRT** with your
+existing training framework.
 
 It keeps payloads immutable on disk, keeps sampling state in Rust, and lets your
 Python training code steer the dataset through one Polars metadata table.
@@ -89,10 +96,6 @@ length to the new table row count. Call `set_epoch_len` afterward to override it
 
 ## Installation
 
-For GPU and distributed loader measurements, see the
-[portable benchmark commands](docs/remote-validation.md):
-`python -m dataset_rt.run_benchmark --ranks 4 --num-workers 8 --device cuda`.
-
 DatasetRT supports Python 3.10 through 3.13.
 
 ```bash
@@ -107,29 +110,57 @@ pip install dataset-rt
 
 ## Quickstart
 
-Wrap your existing data source as a Python iterable that yields payload bytes and
-primitive metadata.
+Define a data source as an iterable that packs each Python record with `pickle`
+or `dill` and yields `CacheInput`. Put large dictionaries, arrays, and nested
+structures in the packed payload; keep fields used for filtering and weighting
+in primitive metadata columns.
+
+This complete example caches a dictionary per sample and unpacks it on read. Save it as
+`quickstart.py`, then run `uv run quickstart.py` after installing DatasetRT.
+Replace the source with your own preprocessing and serialization.
 
 ```python
+import pickle
+from collections.abc import Iterator
 from pathlib import Path
+
+from pydantic import TypeAdapter
+from typing_extensions import TypedDict
 
 import dataset_rt as drt
 
 
-class Images:
-    name = "train_images"
+class TrainingRecord(TypedDict):
+    """Describe the dictionary stored inside each serialized payload."""
 
-    def __iter__(self):
-        for image_id, image_bytes, label in load_my_images():
+    text: str
+    tokens: list[int]
+
+
+RECORD_ADAPTER = TypeAdapter(TrainingRecord)
+
+
+class TextSamples:
+    """Pack preprocessed records, preserving labels as queryable metadata."""
+
+    name = "train_records_v1"
+
+    def __iter__(self) -> Iterator[drt.CacheInput]:
+        """Stream payload bytes without building an in-memory dataset."""
+        for text, label in [("  Hello world  ", 0), ("Dataset caching", 1)]:
+            normalized = text.strip().lower()
+            record = TrainingRecord(
+                text=normalized, tokens=[ord(char) for char in normalized]
+            )
             yield drt.CacheInput(
-                data=image_bytes,
-                metadata={"image_id": image_id, "label": label},
+                data=pickle.dumps(record, protocol=pickle.HIGHEST_PROTOCOL),
+                metadata={"label": label},
             )
 
 
 runtime = drt.DatasetRuntime(num_workers=4)
 result = runtime.from_cache_sources(
-    Images(),
+    TextSamples(),
     Path("cache"),
     reader_config=drt.ReaderConfig(seed=42, shuffle=True),
 )
@@ -141,13 +172,19 @@ match result:
         raise RuntimeError(error)
 
 for sample in dataset:
-    image = decode_image(sample.data)
-    label = sample.metadata["label"]
-    train(image, label)
+    record = RECORD_ADAPTER.validate_python(pickle.loads(sample.data))
+    print(record["text"], record["tokens"], sample.metadata["label"])
 ```
 
-The Rust cache stores bytes. DatasetRT does not decode JPEGs, tensors, tokens, or
-framework objects in the core; your Python code owns domain decoding.
+Run it again to reuse `cache/train_records_v1` without repeating preprocessing.
+Use a new source name or cache root when preprocessing or source contents change;
+reuse does not automatically detect those changes. Shuffled reads sample with
+replacement, so this example can emit the same record twice.
+
+`pickle` is included with Python. You can use `dill.dumps()` and `dill.loads()`
+instead after installing `dill` when your record types require it. The source
+packs the record, DatasetRT stores its bytes, and your read transform unpacks it.
+See the [serialization guide](https://red-eyed.github.io/DatasetRT/serialization/).
 
 ## When To Use It
 
@@ -165,18 +202,22 @@ those pieces.
 
 ## Documentation
 
-- [Python API](docs/python-api.md)
-- [Runtime Model](docs/runtime.md)
-- [Determinism](docs/determinism.md)
-- [Storage Format](docs/storage-format.md)
-- [Architecture](docs/architecture.md)
-- [Serialization Boundary](docs/serialization.md)
-- [Build Artifacts](docs/build.md)
-- [Development](docs/development.md)
+- [Documentation home](https://red-eyed.github.io/DatasetRT/)
+- [Cache training data in Python](https://red-eyed.github.io/DatasetRT/cache-training-data/)
+- [Class balancing with Polars](https://red-eyed.github.io/DatasetRT/polars-sampling/)
+- [PyTorch DataLoader tutorial](https://red-eyed.github.io/DatasetRT/pytorch-dataloader/)
+- [Reader benchmarks](https://red-eyed.github.io/DatasetRT/benchmarks/)
+- [Compare dataset tools](https://red-eyed.github.io/DatasetRT/comparisons/)
+- [Python API](https://red-eyed.github.io/DatasetRT/python-api/)
+- [Runtime guide](https://red-eyed.github.io/DatasetRT/runtime-guide/)
+- [Determinism](https://red-eyed.github.io/DatasetRT/determinism/)
+- [Storage Format](https://red-eyed.github.io/DatasetRT/storage-format/)
+- [Architecture](https://red-eyed.github.io/DatasetRT/overview/)
+- [Serialization Boundary](https://red-eyed.github.io/DatasetRT/serialization/)
 
 ## Status
 
-DatasetRT is early production infrastructure. The core cache lifecycle,
+DatasetRT is production infrastructure for immutable dataset caching. The core cache lifecycle,
 immutable storage format, runtime metadata table, deterministic weighted
 sampling, and Rust-owned reader/writer prefetching are in place.
 
