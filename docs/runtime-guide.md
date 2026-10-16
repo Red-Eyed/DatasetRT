@@ -55,6 +55,29 @@ sampling progress between passes. Explicitly disabling persistence reconstructs
 readers and repeats their initial sequence, even if the loader selected a random
 seed at construction. See the [complete PyTorch example](pytorch-dataloader.md).
 
+## Share metadata and indexes with mmap
+
+Multiprocessing loaders reduce repeated metadata and index allocations through
+read-only, file-backed memory mapping (`mmap`). Each loader exports one immutable
+Arrow metadata snapshot. Its workers map that same file, so the operating system
+can share the physical file-cache pages between them on the same host. Four
+workers can reference the same metadata buffers instead of each decoding a
+complete private copy of the table.
+
+Workers map the cache's original `index.bin` files too. Those index pages can be
+shared even across independently constructed loaders reading the same caches.
+For shuffled split loading, workers also map the loader's shared partition-order
+file. Workers open their mappings independently, so this design works with
+`spawn`, `fork`, and `forkserver` without inheriting live native readers.
+
+This is file-backed sharing rather than a named shared-memory segment. Separate
+metadata exports have separate backing files, and processes on different hosts
+do not share RAM. Weights, selected sample indices, sampling state, decoded
+records, and prefetched batches still allocate memory per consumer. Explicit
+DataFrame operations can also allocate new buffers. Summed process RSS can count
+shared mapped pages more than once; use private/proportional memory measures
+when evaluating the savings.
+
 ## Account for weights, ordering, and memory
 
 Shuffled loaders default to replicated populations to preserve global weighted

@@ -4,25 +4,33 @@
 [PyPI](https://pypi.org/project/dataset-rt/) ·
 [Issues](https://github.com/Red-Eyed/DatasetRT/issues)
 
-DatasetRT is a Python library with a Rust runtime for caching training datasets
-on disk. Reuse preprocessed samples, filter and rebalance data through Polars,
-and sample deterministically without rewriting cached payloads.
+DatasetRT is a Rust-powered dataset cache for Python machine learning pipelines.
+It combines fast native sample reads with a separate metadata table for analyzing,
+filtering, and weighting training data without unpacking or rewriting its payloads.
+
+Each dataset has two connected parts:
+
+| Part | Contains | Used for |
+| --- | --- | --- |
+| Payload store | Serialized bytes, typically dictionaries or large Python structures packed with pickle or dill | Read and unpack the samples needed for training |
+| Metadata table | Sample identities, primitive attributes such as labels and splits, and sampling weights | Analyze the population, filter samples, and control how often each sample is drawn |
+
+The Python API exposes the metadata table as a **Polars DataFrame**. The payloads
+remain in indexed disk shards, linked to metadata by `(cache_id, sample_id)`.
 
 Install **`dataset-rt`**, import **`dataset_rt`**, and use **DatasetRT** with your
 existing training framework.
 
-It keeps payloads immutable on disk, keeps sampling state in Rust, and lets your
-Python training code steer the dataset through one Polars metadata table.
+For example, create a development subset by editing only the metadata:
 
 ```python
 metadata = dataset.get_metadata()
 
 dev_run = metadata.head(100)
 dataset.update_metadata(dev_run)
-
-for sample in dataset:
-    train(sample.data, sample.metadata)
 ```
+
+Future reads draw from that subset, and your read transform unpacks `sample.data`.
 
 Rows in the active metadata table are the rows DatasetRT samples from. Remove
 rows for a fast development run, duplicate rows or update `weight` for class
@@ -31,37 +39,42 @@ validate that every row still maps to an immutable cache sample.
 
 ## Why It Exists
 
-Dataset bugs are expensive. A silent shuffle change, corrupt shard, mismatched
-metadata row, or weight vector applied to the wrong sample can waste training
-runs and make experiments impossible to reproduce.
+Training experiments often reuse the same expensive preprocessed records while
+changing which samples they use. Keeping metadata separate from large serialized
+payloads makes those changes possible without reading every payload:
 
-DatasetRT is for the boring, high-stakes part of ML infrastructure:
+- **Analyze:** inspect class counts, splits, or stored quality scores using the
+  metadata table.
+- **Filter:** select development subsets or exclude records without making new
+  copies of the cache.
+- **Weight:** rebalance classes or prioritize hard examples by changing sampling
+  weights while payload bytes remain immutable.
+- **Read quickly:** Rust performs indexed payload reads with native workers and
+  bounded prefetching; Python unpacks and transforms the delivered records.
+- **Save RAM across loading processes:** workers map a shared immutable metadata
+  snapshot and cache indexes read-only with `mmap`. The OS can share their backing
+  pages on the same host, avoiding a full private copy of those buffers per worker.
+- **Reproduce:** repeat sampling from identical cache contents, active metadata,
+  seed, and stream history.
 
-- cache expensive preprocessing once and restart quickly
-- keep payload bytes immutable while metadata stays editable at runtime
-- filter or rebalance samples without rewriting cache files
-- sample deterministically from the same cache contents, seed, epoch, and active
-  metadata table
-- validate metadata and weights against stable `(cache_id, sample_id)` identities
-- keep reader and writer queues bounded in Rust
-
-The design rule is simple:
-
-**If it affects correctness, Rust owns it.**
-
-Python remains the ergonomic edge: it describes sources, edits metadata with
-Polars, and decodes payload bytes into tensors, images, arrays, or domain
-objects.
+See the [reader measurements](https://red-eyed.github.io/DatasetRT/benchmarks/)
+for startup, throughput, and memory results. End-to-end speed also depends on
+storage, payload size, unpacking, transforms, and worker configuration.
+Weights, sampling state, decoded records, and prefetched batches still consume
+memory per worker; see the [multiprocessing memory guide](https://red-eyed.github.io/DatasetRT/runtime-guide/#share-metadata-and-indexes-with-mmap).
 
 ## The Core Idea
 
-DatasetRT exposes the active dataset as a Polars table:
+DatasetRT exposes the active **metadata**, including sampling weights, as a
+Polars table:
 
 ```text
 cache_id | sample_id | <stored metadata columns...> | weight | <extra columns...>
 ```
 
-That table is the runtime control plane.
+Each row points to a stored payload; the payload itself is not a DataFrame cell.
+Analyze or edit this table without unpickling the sample records. For example,
+assign inverse-frequency class weights:
 
 ```python
 import polars as pl

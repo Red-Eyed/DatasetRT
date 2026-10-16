@@ -5,8 +5,9 @@ description: Filter cached training samples and assign inverse-frequency weights
 
 # Filter and rebalance datasets with Polars
 
-DatasetRT exposes the active sampling population as a Polars table. You can
-filter rows or change their weights while cached payloads stay immutable.
+DatasetRT exposes the metadata for the active sampling population as a Polars
+table. Serialized sample payloads are stored separately. You can analyze
+attributes, filter rows, or change their weights without unpacking those payloads.
 
 Suppose class 0 has 9 records and class 1 has 3. Uniform per-record weights give
 the classes expected shares of 75% and 25%. Assigning weight `1 / class_count`

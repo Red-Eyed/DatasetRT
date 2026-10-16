@@ -1,13 +1,30 @@
 ---
 title: Dataset Caching for Machine Learning
-description: Cache preprocessed training data in Python with DatasetRT's Rust runtime, immutable disk storage, deterministic weighted sampling, and Polars metadata.
+description: Read cached training samples with a fast Rust runtime, and analyze, filter, or weight a separate metadata table without unpacking serialized payloads.
 ---
 
 # DatasetRT — Dataset Caching for Machine Learning
 
-DatasetRT is a Python library with a Rust runtime for caching training datasets
-on disk. Reuse preprocessed samples, filter and rebalance data through Polars,
-and sample deterministically without rewriting cached payloads.
+DatasetRT is a Rust-powered dataset cache for Python machine learning pipelines.
+It combines fast native sample reads with a separate metadata table for analyzing,
+filtering, and weighting training data without unpacking or rewriting its payloads.
+
+## Payloads and metadata
+
+| Part | What it stores | What you do with it |
+| --- | --- | --- |
+| Payload store | Serialized bytes in indexed disk shards; commonly pickled dictionaries, arrays, or nested Python structures | Read selected samples and unpack them for training |
+| Metadata table | Sample identities, primitive attributes, and sampling weights | Analyze class distributions, filter the population, and adjust sampling probabilities |
+
+The metadata table is exposed through a **Polars DataFrame** in Python. Payloads
+are stored separately and linked by `(cache_id, sample_id)`. Updating metadata
+does not require unpickling the records or rewriting their cached bytes.
+
+Rust owns indexed sample reading, native workers, and bounded prefetching.
+See the [reader benchmarks](benchmarks.md) for measured throughput, startup time,
+and memory use. Your Python code owns unpacking and training transforms.
+
+## Installation
 
 Install **`dataset-rt`**, import **`dataset_rt`**, and use **DatasetRT** with your
 existing training framework.
@@ -46,17 +63,23 @@ Rust owns validation, sampling, reader and writer worker pools, and bounded
 prefetching. Python owns preprocessing, serialization, decoding, and framework
 integration.
 
-## Control sampling through metadata
+## Analyze, filter, and weight through metadata
 
 ```python
 import polars as pl
 
 metadata = dataset.get_metadata()
+print(metadata.group_by("label").agg(pl.len().alias("samples")))
 training = metadata.filter(pl.col("split") == "train")
+training = training.with_columns(
+    (1.0 / pl.len().over("label")).alias("weight")
+)
 dataset.update_metadata(training)
 ```
 
-This excerpt assumes a loaded dataset with a stored `split` column. Metadata
+This excerpt assumes a loaded dataset with stored `label` and `split` columns.
+It analyzes class counts, selects training records, and assigns inverse-frequency
+class weights using only metadata. Metadata
 updates affect future iterators and leave payload files unchanged. Rust validates
 identities and positive, finite weights before accepting changes.
 
@@ -64,6 +87,19 @@ With `shuffle=True`, reads use weighted sampling **with replacement**: a record
 can appear more than once while another is absent. Sequential reads follow active
 table order and wrap when the requested epoch is longer than the population.
 See [deterministic sampling](determinism.md) for stream and epoch semantics.
+
+## Save RAM with multiprocessing loaders
+
+Workers of the same loader use read-only, file-backed `mmap` to access one
+immutable metadata snapshot. Cache indexes are also memory-mapped from their
+original files. The operating system can share the backing pages between
+processes on the same host, reducing duplicated RAM instead of allocating a
+complete private copy of these buffers for each worker.
+
+This sharing works with spawned workers too. Weights, sampling state, decoded
+records, and batch buffers remain private allocations. See the
+[mmap memory guide](runtime-guide.md#share-metadata-and-indexes-with-mmap)
+for the boundaries of that sharing.
 
 ## Choose your next step
 

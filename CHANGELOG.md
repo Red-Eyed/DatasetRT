@@ -6,6 +6,9 @@ All notable changes to DatasetRT are documented here.
 
 ### Documentation
 
+- Distinguish serialized payload storage from the separate metadata table, and
+  explain metadata analysis, filtering, weighted sampling, native read speed,
+  and mmap sharing of metadata and indexes across loading processes.
 - Clarify DatasetRT's Python/Rust dataset caching purpose, add a runnable
   quickstart, and expose documentation, repository, issue, and changelog URLs
   in package metadata.

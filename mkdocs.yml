@@ -1,5 +1,5 @@
 site_name: DatasetRT
-site_description: Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling and Polars metadata.
+site_description: Rust-powered dataset cache for Python with fast sample reads and separate metadata for analysis, filtering, and weighted sampling.
 site_url: https://red-eyed.github.io/DatasetRT/
 repo_url: https://github.com/Red-Eyed/DatasetRT
 repo_name: DatasetRT on GitHub

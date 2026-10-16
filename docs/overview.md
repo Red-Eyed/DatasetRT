@@ -9,6 +9,25 @@ DatasetRT separates application-specific data handling from cache correctness.
 Python describes the source and the meaning of its bytes. Rust manages the
 storage and sampling contracts used by every application.
 
+## Two connected parts
+
+The payload store contains serialized sample bytes in indexed disk shards. The
+separate columnar metadata table contains sample identities, primitive attributes,
+and sampling weights. `(cache_id, sample_id)` links a metadata row to a payload.
+
+Python exposes the metadata through Polars for analysis, filtering, and weight
+editing. Those operations do not unpack the stored sample records. Rust validates
+the accepted population and weights, selects samples, and reads their payloads
+with native workers and bounded prefetching. Python then unpacks the delivered
+bytes for training. See the [reader measurements](benchmarks.md) for the runtime's
+measured performance and workload boundaries.
+
+For multiprocessing loading, workers share an immutable Arrow metadata snapshot
+through read-only, file-backed `mmap`. They also map the original cache indexes.
+The OS can share those physical pages between processes on one host, reducing
+duplicated RAM. Private weights, sampling state, decoded records, and batch buffers
+still scale with consumer count; see the [memory guide](runtime-guide.md#share-metadata-and-indexes-with-mmap).
+
 | Responsibility | Owner |
 | --- | --- |
 | Find source records and perform preprocessing | Your Python source |

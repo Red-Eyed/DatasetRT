@@ -1,8 +1,8 @@
 [package]
 name = "dataset_rt"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
-description = "Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling"
+description = "Rust-powered dataset cache for Python with fast sample reads and separate metadata for analysis, filtering, and weighted sampling"
 license = "MIT"
 documentation = "https://red-eyed.github.io/DatasetRT/"
 homepage = "https://github.com/Red-Eyed/DatasetRT"

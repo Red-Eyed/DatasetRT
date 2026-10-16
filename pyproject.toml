@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "dataset-rt"
-description = "Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling"
+description = "Rust-powered dataset cache for Python with fast sample reads and separate metadata for analysis, filtering, and weighted sampling"
 keywords = ["dataset", "cache", "machine-learning", "sampling", "rust", "polars"]
 readme = "README.md"
 requires-python = ">=3.10"

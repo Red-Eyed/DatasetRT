@@ -15,7 +15,7 @@ October 16, 2026.
 
 | Tool | Storage and access model | Relevant built-in behavior | A reason to evaluate it |
 | --- | --- | --- | --- |
-| DatasetRT | Immutable local payload shards with a sample index and Arrow metadata | Rust-owned validation, bounded readers/writers, runtime Polars population edits, weighted sampling with replacement | Reuse serialized training data while changing its sampling population without rewriting payloads |
+| DatasetRT | Immutable local payload shards with a sample index and a separate Arrow metadata table | Native reads, Rust-owned validation, metadata analysis/filtering/weight edits through Polars, weighted sampling with replacement | Analyze and change the sampling population without unpacking or rewriting payloads |
 | WebDataset | Samples grouped in tar shards, with streaming pipelines and local or remote input | Shard-oriented processing, resampling, and optional local caching | Stream large datasets from tar archives or object storage |
 | LMDB / py-lmdb | Memory-mapped transactional key-value storage | Transactions, key lookup, cursors, and optional buffer access | Build a custom dataset representation around transactional key-value records |
 | Hugging Face Datasets | Arrow-backed map-style datasets or streaming iterable datasets | Dataset loading and transforms; fingerprinted transform caching for regular datasets | Use an integrated loading/preprocessing ecosystem with table-like or streaming access |
