@@ -14,9 +14,12 @@
 !/LICENSE
 !/justfile
 !/.vscode/settings.json
+!/docs_overrides/main.html
+!/docs/benchmark-results.json
 !/tests/fixtures/manifest-v2/**
 
 /.venv/
 /target/
 /dist/
 /plan/
+/site/

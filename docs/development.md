@@ -1,5 +1,11 @@
 # Development
 
+Build the documentation with `just docs-build`, or preview it with
+`just docs-serve`. Both synchronize the API reference automatically. `just check`
+includes a strict documentation build. See
+[documentation publishing and Google search visibility](discoverability.md)
+for deployment and indexing verification.
+
 DatasetRT is implemented as a Python package backed by a Rust extension module.
 
 ## Toolchain

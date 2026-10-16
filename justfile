@@ -47,7 +47,16 @@ api-docs-check:
 
 test: test-rust test-python
 
-check: fmt-check lint typecheck api-docs-check test-rust clippy test-python
+docs-build: sync-api-docs
+    uv run --python {{python}} --locked --only-group docs mkdocs build --strict
+
+docs-serve: sync-api-docs
+    uv run --python {{python}} --locked --only-group docs mkdocs serve
+
+docs-check: api-docs-check
+    uv run --python {{python}} --locked --only-group docs mkdocs build --strict
+
+check: fmt-check lint typecheck api-docs-check docs-check test-rust clippy test-python
 
 smoke: develop
     {{py}} scripts/bench_smoke.py

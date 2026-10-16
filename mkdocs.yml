@@ -1,0 +1,57 @@
+site_name: DatasetRT
+site_description: Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling and Polars metadata.
+site_url: https://red-eyed.github.io/DatasetRT/
+repo_url: https://github.com/Red-Eyed/DatasetRT
+repo_name: DatasetRT on GitHub
+edit_uri: blob/main/docs/
+site_dir: site
+strict: true
+
+exclude_docs: |
+  /architecture.md
+  /runtime.md
+  /inversion-analysis.md
+  /inversion-checklists.md
+  /fork-reproducer.md
+  /development.md
+  /build.md
+  /discoverability.md
+  /cache-training-data.md
+  /polars-sampling.md
+  /pytorch-dataloader.md
+  /runtime-guide.md
+  /overview.md
+  /benchmarks.md
+  /comparisons.md
+  /benchmark-results.json
+
+theme:
+  name: mkdocs
+  custom_dir: docs_overrides
+  highlightjs: false
+
+plugins:
+  - search
+
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc:
+      permalink: true
+
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Reference:
+      - Python API: python-api.md
+      - Deterministic sampling: determinism.md
+      - Cache storage format: storage-format.md
+      - Serialization: serialization.md
+  - Benchmark commands: remote-validation.md

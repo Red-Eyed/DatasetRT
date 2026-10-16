@@ -10,6 +10,15 @@ All notable changes to DatasetRT are documented here.
   quickstart, and expose documentation, repository, issue, and changelog URLs
   in package metadata.
 
+- Add a static public documentation build with canonical URLs, page descriptions,
+  a search index, a sitemap, and a GitHub Pages workflow. Exclude internal
+  investigations, agent review checklists, and maintainer instructions.
+
+### Developers
+
+- Add `just docs-build`, `just docs-serve`, and strict documentation validation
+  to `just check`, using an isolated documentation dependency group.
+
 ## 0.4.0 - 2026-10-15
 
 This release consolidates the 0.4 release candidates since 0.3.2.

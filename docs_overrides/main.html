@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block htmltitle %}
+<title>{% if page %}{{ page.meta.get('title', page.title) | e }} | {% endif %}{{ config.site_name | e }}</title>
+{% endblock %}
+
+{% block extrahead %}
+{% if page and not page.is_homepage %}
+<meta name="description" content="{{ page.meta.get('description', page.title ~ ' documentation for DatasetRT, a Python dataset cache for machine learning powered by Rust.') | e }}">
+{% endif %}
+<meta property="og:site_name" content="{{ config.site_name | e }}">
+{% if page %}
+<meta property="og:title" content="{{ page.meta.get('title', page.title) | e }} | {{ config.site_name | e }}">
+<meta property="og:description" content="{{ page.meta.get('description', config.site_description) | e }}">
+<meta property="og:url" content="{{ page.canonical_url | e }}">
+<meta property="og:type" content="website">
+{% endif %}
+{% endblock %}
