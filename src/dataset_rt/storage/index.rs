@@ -51,8 +51,10 @@ impl MappedIndex {
     /// Scan entries in physical order while retaining only the current decoded row.
     pub fn iter(&self) -> impl Iterator<Item = CacheResult<IndexEntry>> + '_ {
         self.bytes()
-            .chunks_exact(INDEX_ROW_BYTES)
-            .map(read_index_entry)
+            .as_chunks::<INDEX_ROW_BYTES>()
+            .0
+            .iter()
+            .map(|row| read_index_entry(row))
     }
 
     /// Treat a valid zero-row index as an empty byte view without mapping an empty file.
