@@ -68,7 +68,10 @@ See [deterministic sampling](determinism.md) for stream and epoch semantics.
 ## Choose your next step
 
 - Read the [complete runnable quickstart](https://github.com/Red-Eyed/DatasetRT#quickstart).
-- Inspect the [Python API](python-api.md).
+- [Cache preprocessed training data in Python](cache-training-data.md).
+- [Filter and rebalance datasets with Polars](polars-sampling.md).
+- [Use DatasetRT with a PyTorch DataLoader](pytorch-dataloader.md).
+- Inspect the [Python API](python-api.md) and [PyTorch loader contract](runtime-guide.md).
 - Understand the [immutable cache format](storage-format.md).
 - Run [CPU, GPU, and distributed benchmarks](remote-validation.md).
 - Report a problem in [GitHub Issues](https://github.com/Red-Eyed/DatasetRT/issues)

@@ -9,10 +9,12 @@ All notable changes to DatasetRT are documented here.
 - Clarify DatasetRT's Python/Rust dataset caching purpose, add a runnable
   quickstart, and expose documentation, repository, issue, and changelog URLs
   in package metadata.
-
 - Add a static public documentation build with canonical URLs, page descriptions,
   a search index, a sitemap, and a GitHub Pages workflow. Exclude internal
   investigations, agent review checklists, and maintainer instructions.
+- Add runnable caching, Polars weighting, and PyTorch loading tutorials, with
+  application-facing runtime and architecture guides. Show iterable sources
+  packing Python records with pickle or dill and read transforms unpacking them.
 
 ### Developers
 

@@ -1,0 +1,44 @@
+---
+title: DatasetRT Architecture Overview
+description: Understand DatasetRT's public boundaries between Python preprocessing and serialization, Rust cache integrity and sampling, immutable storage, and optional PyTorch loading.
+---
+
+# DatasetRT architecture overview
+
+DatasetRT separates application-specific data handling from cache correctness.
+Python describes the source and the meaning of its bytes. Rust manages the
+storage and sampling contracts used by every application.
+
+| Responsibility | Owner |
+| --- | --- |
+| Find source records and perform preprocessing | Your Python source |
+| Serialize and decode images, tensors, text, or domain records | Your Python application |
+| Publish complete caches and validate storage structure | Rust runtime |
+| Validate identities, metadata edits, and sample weights | Rust runtime |
+| Select samples and preserve planned reader order | Rust runtime |
+| Bound native tasks, results, and prefetch | Rust runtime |
+| Express population filters and weights | Polars expressions in Python |
+| Transform and collate training batches | Optional PyTorch integration and application callbacks |
+
+## From source to training sample
+
+1. A named iterable source packs Python records or dictionaries with `pickle`
+   or `dill`, then yields `CacheInput` with those bytes and primitive metadata.
+2. DatasetRT writes payload shards, an index, Arrow metadata, and a manifest.
+   A complete manifest marks the cache as published.
+3. A dataset loads one or more cache directories. Each physical sample has a
+   stable `(cache_id, sample_id)` identity. Treat IDs as opaque values.
+4. Future iterators read from the current active population, using either
+   sequential order or deterministic weighted sampling with replacement.
+5. Python decodes the delivered payload. An optional PyTorch loader performs
+   application transforms and batching in configured loading processes.
+
+## Immutable storage, editable sampling
+
+Runtime metadata edits change which cached samples are selected and how much
+weight they receive. They do not rewrite payloads or persisted metadata.
+Already-created iterators retain their snapshots. New loaders capture the
+population when they are constructed.
+
+See the [storage format](storage-format.md), [sampling semantics](determinism.md),
+and [runtime guide](runtime-guide.md) for the contracts relevant to applications.

@@ -16,11 +16,6 @@ exclude_docs: |
   /development.md
   /build.md
   /discoverability.md
-  /cache-training-data.md
-  /polars-sampling.md
-  /pytorch-dataloader.md
-  /runtime-guide.md
-  /overview.md
   /benchmarks.md
   /comparisons.md
   /benchmark-results.json
@@ -49,9 +44,15 @@ validation:
 
 nav:
   - Home: index.md
+  - Tutorials:
+      - Cache training data: cache-training-data.md
+      - Class balancing with Polars: polars-sampling.md
+      - PyTorch DataLoader: pytorch-dataloader.md
   - Reference:
       - Python API: python-api.md
+      - Runtime and PyTorch loading: runtime-guide.md
       - Deterministic sampling: determinism.md
       - Cache storage format: storage-format.md
       - Serialization: serialization.md
+      - Architecture overview: overview.md
   - Benchmark commands: remote-validation.md
