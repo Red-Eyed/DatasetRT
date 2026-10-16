@@ -3,7 +3,7 @@ site_description: Rust-powered dataset cache for Python with fast sample reads a
 site_url: https://red-eyed.github.io/DatasetRT/
 repo_url: https://github.com/Red-Eyed/DatasetRT
 repo_name: DatasetRT on GitHub
-edit_uri: blob/main/docs/
+edit_uri: ""
 site_dir: site
 strict: true
 
@@ -18,9 +18,12 @@ exclude_docs: |
   /discoverability.md
 
 theme:
-  name: mkdocs
+  name: readthedocs
   custom_dir: docs_overrides
   highlightjs: false
+  collapse_navigation: false
+  navigation_depth: 2
+  titles_only: true
 
 plugins:
   - search
@@ -40,19 +43,21 @@ validation:
     unrecognized_links: warn
 
 nav:
-  - Home: index.md
-  - Tutorials:
-      - Cache training data: cache-training-data.md
-      - Class balancing with Polars: polars-sampling.md
-      - PyTorch DataLoader: pytorch-dataloader.md
-  - Evaluation:
-      - Benchmarks: benchmarks.md
-      - Compare dataset tools: comparisons.md
-  - Reference:
+  - Getting started:
+      - Overview and installation: index.md
+      - Quickstart — cache your first dataset: cache-training-data.md
+  - User guides:
+      - Serialize Python records: serialization.md
+      - Analyze, filter, and weight samples: polars-sampling.md
+      - Load batches with PyTorch: pytorch-dataloader.md
+  - Concepts:
+      - Runtime, workers, and shared memory: runtime-guide.md
+      - Sampling and reproducibility: determinism.md
+      - Architecture: overview.md
+  - API reference:
       - Python API: python-api.md
-      - Runtime and PyTorch loading: runtime-guide.md
-      - Deterministic sampling: determinism.md
       - Cache storage format: storage-format.md
-      - Serialization: serialization.md
-      - Architecture overview: overview.md
-  - Benchmark commands: remote-validation.md
+  - Benchmarks:
+      - Reader measurements: benchmarks.md
+      - Run your own benchmarks: remote-validation.md
+      - Compare dataset tools: comparisons.md

@@ -2,10 +2,13 @@
 
 All notable changes to DatasetRT are documented here.
 
-## [Unreleased]
+## 0.4.7
 
 ### Documentation
 
+- Organize documentation into a persistent sidebar with getting-started, guide,
+  concept, API, and benchmark sections. Keep the quickstart on-site and remove
+  automatic GitHub edit links.
 - Distinguish serialized payload storage from the separate metadata table, and
   explain metadata analysis, filtering, weighted sampling, native read speed,
   and mmap sharing of metadata and indexes across loading processes.
