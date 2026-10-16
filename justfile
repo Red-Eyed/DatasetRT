@@ -61,6 +61,9 @@ check: fmt-check lint typecheck api-docs-check docs-check test-rust clippy test-
 smoke: develop
     {{py}} scripts/bench_smoke.py
 
+bench-reader *args: develop
+    {{py}} scripts/bench_reader.py {{args}}
+
 build-all:
     {{py}} scripts/build_local.py
 

@@ -74,6 +74,8 @@ See [deterministic sampling](determinism.md) for stream and epoch semantics.
 - Inspect the [Python API](python-api.md) and [PyTorch loader contract](runtime-guide.md).
 - Understand the [immutable cache format](storage-format.md).
 - Run [CPU, GPU, and distributed benchmarks](remote-validation.md).
+- Examine [local reader measurements](benchmarks.md) and
+  [compare dataset tools](comparisons.md).
 - Report a problem in [GitHub Issues](https://github.com/Red-Eyed/DatasetRT/issues)
   or inspect the [changelog](https://github.com/Red-Eyed/DatasetRT/blob/main/CHANGELOG.md).
 

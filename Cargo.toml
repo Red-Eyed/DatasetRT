@@ -1,6 +1,6 @@
 [package]
 name = "dataset_rt"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 description = "Python dataset caching for machine learning, powered by Rust, with deterministic weighted sampling"
 license = "MIT"

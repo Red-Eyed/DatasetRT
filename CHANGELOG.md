@@ -15,11 +15,14 @@ All notable changes to DatasetRT are documented here.
 - Add runnable caching, Polars weighting, and PyTorch loading tutorials, with
   application-facing runtime and architecture guides. Show iterable sources
   packing Python records with pickle or dill and read transforms unpacking them.
+- Document reproducible reader measurements with raw JSON evidence and compare
+  dataset tools using their upstream documentation.
 
 ### Developers
 
 - Add `just docs-build`, `just docs-serve`, and strict documentation validation
   to `just check`, using an isolated documentation dependency group.
+- Add `just bench-reader` to build the extension automatically before benchmarking.
 
 ## 0.4.0 - 2026-10-15
 

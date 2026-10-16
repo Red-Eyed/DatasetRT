@@ -1,0 +1,997 @@
+{
+  "environment": {
+    "recorded_at": "2026-10-16T04:49:47.414196Z",
+    "revision": "8945dca5fc84694b3cbc0b3dd56ccd05f7a3b90f",
+    "worktree_dirty": true,
+    "benchmark_sha256": "c11f705a24f422fef4222cc6a0f2ccd45da451038611e73493c44ae08ac1e6d3",
+    "reader_sha256": "6c7b7729a9f98a516417b4e2fb19b99b6c738b594053988e4c9ab324ac5bf803",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "torch": "2.14.1",
+    "psutil": "7.2.2",
+    "cpus": 10,
+    "memory_bytes": 25769803776
+  },
+  "settings": {
+    "samples_per_cache": 4096,
+    "caches": 2,
+    "payload_bytes": 16384,
+    "metadata_bytes": 0,
+    "transform_rounds": 0,
+    "seed": 7,
+    "batch_size": 64,
+    "native_workers": 2,
+    "prefetch_size": 64,
+    "prefetch_factor": 2,
+    "contexts": [
+      "spawn"
+    ],
+    "worker_counts": [
+      1,
+      2
+    ],
+    "workloads": [
+      "cheap"
+    ],
+    "shuffles": [
+      false
+    ],
+    "repeats": 5,
+    "trial_timeout": 120.0,
+    "persistent_workers": true,
+    "output": "/private/tmp/datasetrt-discoverability-reader.json",
+    "quiet": false,
+    "internal_trial": false
+  },
+  "trials": [
+    {
+      "case": {
+        "mode": "native",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 0,
+      "construction_seconds": 0.00043741700937971473,
+      "cold": {
+        "iterator_seconds": 5.409820005297661e-7,
+        "first_batch_seconds": 0.0007280829886440188,
+        "steady_seconds": 0.08439750000252388,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65390
+        ],
+        "resources": {
+          "rss_bytes": 255098880,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 3.33995558321476e-7,
+        "first_batch_seconds": 0.0006959169986657798,
+        "steady_seconds": 0.08671095801400952,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65390
+        ],
+        "resources": {
+          "rss_bytes": 255115264,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.013083166995784268
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 0,
+      "construction_seconds": 0.012337708001723513,
+      "cold": {
+        "iterator_seconds": 0.0001365409989375621,
+        "first_batch_seconds": 0.001625540986424312,
+        "steady_seconds": 0.08788549999007955,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65393
+        ],
+        "resources": {
+          "rss_bytes": 259588096,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0000432920060120523,
+        "first_batch_seconds": 0.0008470829925499856,
+        "steady_seconds": 0.08790416602278128,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65393
+        ],
+        "resources": {
+          "rss_bytes": 259604480,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.014264124998589978
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 1,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 0,
+      "construction_seconds": 0.009132832987233996,
+      "cold": {
+        "iterator_seconds": 0.007540208986029029,
+        "first_batch_seconds": 0.459053333994234,
+        "steady_seconds": 0.09681583402561955,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65403
+        ],
+        "resources": {
+          "rss_bytes": 535347200,
+          "threads": 19,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00015341700054705143,
+        "first_batch_seconds": 0.0010480000055395067,
+        "steady_seconds": 0.09435291599947959,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65403
+        ],
+        "resources": {
+          "rss_bytes": 535396352,
+          "threads": 19,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "cleanup_seconds": 0.1398665420128964
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 2,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 0,
+      "construction_seconds": 0.009219125000527129,
+      "cold": {
+        "iterator_seconds": 0.010579791007330641,
+        "first_batch_seconds": 0.558023541001603,
+        "steady_seconds": 0.051706999976886436,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65419,
+          65420
+        ],
+        "resources": {
+          "rss_bytes": 800456704,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0001976249914150685,
+        "first_batch_seconds": 0.0011936250084545463,
+        "steady_seconds": 0.04927645798306912,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65419,
+          65420
+        ],
+        "resources": {
+          "rss_bytes": 800489472,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "cleanup_seconds": 0.16937274998053908
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 1,
+      "construction_seconds": 0.009333166002761573,
+      "cold": {
+        "iterator_seconds": 0.00014537500101141632,
+        "first_batch_seconds": 0.0016113330202642828,
+        "steady_seconds": 0.08925412499229424,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65439
+        ],
+        "resources": {
+          "rss_bytes": 259309568,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00004583402187563479,
+        "first_batch_seconds": 0.0008409170259255916,
+        "steady_seconds": 0.09057466700323857,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65439
+        ],
+        "resources": {
+          "rss_bytes": 259325952,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.013320875004865229
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 1,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 1,
+      "construction_seconds": 0.00824033297249116,
+      "cold": {
+        "iterator_seconds": 0.009102707990678027,
+        "first_batch_seconds": 0.5138622499944177,
+        "steady_seconds": 0.09398037500795908,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65458
+        ],
+        "resources": {
+          "rss_bytes": 535937024,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0001529589935671538,
+        "first_batch_seconds": 0.0010194999922532588,
+        "steady_seconds": 0.09064983300049789,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65458
+        ],
+        "resources": {
+          "rss_bytes": 535969792,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "cleanup_seconds": 0.11574216702138074
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 2,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 1,
+      "construction_seconds": 0.008983624982647598,
+      "cold": {
+        "iterator_seconds": 0.0118521660042461,
+        "first_batch_seconds": 0.49614687499706633,
+        "steady_seconds": 0.04935683400253765,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65465,
+          65466
+        ],
+        "resources": {
+          "rss_bytes": 798425088,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0001865419908426702,
+        "first_batch_seconds": 0.0010972089949063957,
+        "steady_seconds": 0.04624983298708685,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65465,
+          65466
+        ],
+        "resources": {
+          "rss_bytes": 798490624,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "cleanup_seconds": 0.17344091599807143
+    },
+    {
+      "case": {
+        "mode": "native",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 1,
+      "construction_seconds": 0.0004311669908929616,
+      "cold": {
+        "iterator_seconds": 3.7500285543501377e-7,
+        "first_batch_seconds": 0.0007273330120369792,
+        "steady_seconds": 0.08566125002107583,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65467
+        ],
+        "resources": {
+          "rss_bytes": 255426560,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 4.169996827840805e-7,
+        "first_batch_seconds": 0.0007269580091815442,
+        "steady_seconds": 0.08853645800263621,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65467
+        ],
+        "resources": {
+          "rss_bytes": 255442944,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.01386812501004897
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 1,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 2,
+      "construction_seconds": 0.009283833001973107,
+      "cold": {
+        "iterator_seconds": 0.00826762500219047,
+        "first_batch_seconds": 0.47512241601361893,
+        "steady_seconds": 0.10551995801506564,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65471
+        ],
+        "resources": {
+          "rss_bytes": 535625728,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00018208401161246002,
+        "first_batch_seconds": 0.001167292008176446,
+        "steady_seconds": 0.0938327919866424,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65471
+        ],
+        "resources": {
+          "rss_bytes": 535658496,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "cleanup_seconds": 0.12715433299308643
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 2,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 2,
+      "construction_seconds": 0.00911662500584498,
+      "cold": {
+        "iterator_seconds": 0.01347991600050591,
+        "first_batch_seconds": 0.5236715829814784,
+        "steady_seconds": 0.045629416999872774,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65476,
+          65477
+        ],
+        "resources": {
+          "rss_bytes": 799293440,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0001937500201165676,
+        "first_batch_seconds": 0.0011340000201016665,
+        "steady_seconds": 0.04577316698851064,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65476,
+          65477
+        ],
+        "resources": {
+          "rss_bytes": 799326208,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "cleanup_seconds": 0.1541842500155326
+    },
+    {
+      "case": {
+        "mode": "native",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 2,
+      "construction_seconds": 0.00044958299258723855,
+      "cold": {
+        "iterator_seconds": 2.500019036233425e-7,
+        "first_batch_seconds": 0.0006893329846207052,
+        "steady_seconds": 0.08522725000511855,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65478
+        ],
+        "resources": {
+          "rss_bytes": 255279104,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 2.500019036233425e-7,
+        "first_batch_seconds": 0.0007092500163707882,
+        "steady_seconds": 0.10006399999838322,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65478
+        ],
+        "resources": {
+          "rss_bytes": 255328256,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.012838541995733976
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 2,
+      "construction_seconds": 0.008949624985689297,
+      "cold": {
+        "iterator_seconds": 0.0001404999929945916,
+        "first_batch_seconds": 0.0015845000161789358,
+        "steady_seconds": 0.08728350000455976,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65479
+        ],
+        "resources": {
+          "rss_bytes": 259555328,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00004441698547452688,
+        "first_batch_seconds": 0.0008565419993828982,
+        "steady_seconds": 0.08842762498534285,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65479
+        ],
+        "resources": {
+          "rss_bytes": 259571712,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.013299915997777134
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 2,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 3,
+      "construction_seconds": 0.008051167009398341,
+      "cold": {
+        "iterator_seconds": 0.01136545799090527,
+        "first_batch_seconds": 0.49265691699110903,
+        "steady_seconds": 0.051539250009227544,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65482,
+          65483
+        ],
+        "resources": {
+          "rss_bytes": 798588928,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00019287498435005546,
+        "first_batch_seconds": 0.001243334001628682,
+        "steady_seconds": 0.04685079099726863,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65482,
+          65483
+        ],
+        "resources": {
+          "rss_bytes": 798638080,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "cleanup_seconds": 0.1554565830156207
+    },
+    {
+      "case": {
+        "mode": "native",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 3,
+      "construction_seconds": 0.0004630410112440586,
+      "cold": {
+        "iterator_seconds": 2.910092007368803e-7,
+        "first_batch_seconds": 0.0006606660026591271,
+        "steady_seconds": 0.08795645801001228,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65484
+        ],
+        "resources": {
+          "rss_bytes": 255098880,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 3.3300602808594704e-7,
+        "first_batch_seconds": 0.0006826659955549985,
+        "steady_seconds": 0.0878605830075685,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65484
+        ],
+        "resources": {
+          "rss_bytes": 255115264,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.013066082989098504
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 3,
+      "construction_seconds": 0.009152292012004182,
+      "cold": {
+        "iterator_seconds": 0.0001720000000204891,
+        "first_batch_seconds": 0.0017075419891625643,
+        "steady_seconds": 0.08605470799375325,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65486
+        ],
+        "resources": {
+          "rss_bytes": 259555328,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00004504199023358524,
+        "first_batch_seconds": 0.0008451250032521784,
+        "steady_seconds": 0.08580187501502223,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65486
+        ],
+        "resources": {
+          "rss_bytes": 259604480,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.013661291974131018
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 1,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 3,
+      "construction_seconds": 0.009216375008691102,
+      "cold": {
+        "iterator_seconds": 0.0077596659830305725,
+        "first_batch_seconds": 0.5244345410028473,
+        "steady_seconds": 0.31048341700807214,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65489
+        ],
+        "resources": {
+          "rss_bytes": 536264704,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.0002004999842029065,
+        "first_batch_seconds": 0.0010670409828890115,
+        "steady_seconds": 0.08939283402287401,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65489
+        ],
+        "resources": {
+          "rss_bytes": 536313856,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "cleanup_seconds": 0.14047041701269336
+    },
+    {
+      "case": {
+        "mode": "native",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 4,
+      "construction_seconds": 0.0004847919917665422,
+      "cold": {
+        "iterator_seconds": 5.00003807246685e-7,
+        "first_batch_seconds": 0.0006497080030385405,
+        "steady_seconds": 0.08856270898832008,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65506
+        ],
+        "resources": {
+          "rss_bytes": 255377408,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 2.9199873097240925e-7,
+        "first_batch_seconds": 0.0007749999931547791,
+        "steady_seconds": 0.08826154100825079,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65506
+        ],
+        "resources": {
+          "rss_bytes": 255393792,
+          "threads": 7,
+          "file_descriptors": 11,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.014714375021867454
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 0,
+        "context": "serial"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 4,
+      "construction_seconds": 0.010938249994069338,
+      "cold": {
+        "iterator_seconds": 0.00014512499910779297,
+        "first_batch_seconds": 0.0016562090022489429,
+        "steady_seconds": 0.0852175839827396,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65514
+        ],
+        "resources": {
+          "rss_bytes": 259653632,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00004649997572414577,
+        "first_batch_seconds": 0.0007892919820733368,
+        "steady_seconds": 0.0861360419949051,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65514
+        ],
+        "resources": {
+          "rss_bytes": 259670016,
+          "threads": 11,
+          "file_descriptors": 13,
+          "processes": 1
+        }
+      },
+      "cleanup_seconds": 0.014595541986636817
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 1,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 4,
+      "construction_seconds": 0.009152457991149276,
+      "cold": {
+        "iterator_seconds": 0.00814558399724774,
+        "first_batch_seconds": 0.4584746669861488,
+        "steady_seconds": 0.0947750830091536,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65518
+        ],
+        "resources": {
+          "rss_bytes": 535412736,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00013516598846763372,
+        "first_batch_seconds": 0.0010186249855905771,
+        "steady_seconds": 0.09585716700530611,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65518
+        ],
+        "resources": {
+          "rss_bytes": 535445504,
+          "threads": 18,
+          "file_descriptors": 57,
+          "processes": 3
+        }
+      },
+      "cleanup_seconds": 0.11610370798734948
+    },
+    {
+      "case": {
+        "mode": "loader",
+        "workers": 2,
+        "context": "spawn"
+      },
+      "shuffle": false,
+      "workload": "cheap",
+      "pair": 4,
+      "construction_seconds": 0.008173624984920025,
+      "cold": {
+        "iterator_seconds": 0.012123874999815598,
+        "first_batch_seconds": 0.5064127079967875,
+        "steady_seconds": 0.05052612497820519,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65521,
+          65522
+        ],
+        "resources": {
+          "rss_bytes": 798507008,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "warm": {
+        "iterator_seconds": 0.00020166701870039105,
+        "first_batch_seconds": 0.001140834006946534,
+        "steady_seconds": 0.046690666989888996,
+        "steady_samples": 8128,
+        "accepted": 8192,
+        "bytes_read": 134217728,
+        "transform_pids": [
+          65521,
+          65522
+        ],
+        "resources": {
+          "rss_bytes": 798556160,
+          "threads": 28,
+          "file_descriptors": 86,
+          "processes": 4
+        }
+      },
+      "cleanup_seconds": 0.1559762499819044
+    }
+  ],
+  "gates": [
+    {
+      "shuffle": false,
+      "workload": "cheap",
+      "metric": "serial_regression",
+      "context": "serial",
+      "paired_ratios": [
+        0.013760752229020179,
+        0.023021126511992174,
+        -0.11628932496430688,
+        -0.023431531206308143,
+        -0.02408182532352332
+      ],
+      "median": -0.023431531206308143,
+      "threshold": 0.1,
+      "sufficient_repeats": true,
+      "passed": true
+    }
+  ]
+}

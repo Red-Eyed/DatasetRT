@@ -16,9 +16,6 @@ exclude_docs: |
   /development.md
   /build.md
   /discoverability.md
-  /benchmarks.md
-  /comparisons.md
-  /benchmark-results.json
 
 theme:
   name: mkdocs
@@ -48,6 +45,9 @@ nav:
       - Cache training data: cache-training-data.md
       - Class balancing with Polars: polars-sampling.md
       - PyTorch DataLoader: pytorch-dataloader.md
+  - Evaluation:
+      - Benchmarks: benchmarks.md
+      - Compare dataset tools: comparisons.md
   - Reference:
       - Python API: python-api.md
       - Runtime and PyTorch loading: runtime-guide.md
