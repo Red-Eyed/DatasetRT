@@ -124,3 +124,9 @@ For distributed global sample budgets, padding, and ordering guarantees, see
 the [loader contract](runtime-guide.md) and [API reference](python-api.md). Run the
 [portable benchmark](remote-validation.md) on your own hardware before choosing
 a worker count.
+
+Additional PyTorch options can be passed with
+`dataloader_kwargs={"in_order": False}`. This allows batches to arrive in
+completion order and can affect reproducibility. The installed PyTorch version
+must support the supplied options. Keys matching explicit helper arguments,
+`dataset`, `sampler`, or `batch_sampler` are rejected.

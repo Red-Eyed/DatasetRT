@@ -9,6 +9,9 @@ from scripts.check_precise_types import check_source
     "source",
     [
         "x: object",
+        "def f(dataloader_kwargs: Any): pass",
+        "def f(dataloader_kwargs): return object()",
+        "extra_kwargs: Any",
         "x: typing.Any",
         "x = object()",
         'x: "list[object]"',
@@ -33,6 +36,8 @@ def test_rejects_broad_types(source: str) -> None:
         'x: Literal["object", "Any"]',
         "x: \"typing.Literal['object']\"",
         'x: "list[int]"',
+        "def f(dataloader_kwargs: Mapping[str, object] | None): pass",
+        "extra_kwargs: dict[str, object]",
         'x: "tuple[ReaderRecipe, int]"',
         "def __reduce__(self) -> tuple[object, tuple[object, ...]]: pass",
         'def __reduce__(self) -> "tuple[object, ...]": pass',

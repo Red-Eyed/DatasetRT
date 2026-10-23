@@ -26,7 +26,7 @@ from dataset_rt.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from multiprocessing.context import BaseContext
 
     import polars as pl
@@ -289,6 +289,7 @@ class CachedDataset:
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
         verbose: bool = True,
+        dataloader_kwargs: Mapping[str, object] | None = None,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of transformed samples into a caller-defined result."""
         ...
@@ -316,6 +317,7 @@ class CachedDataset:
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
         verbose: bool = True,
+        dataloader_kwargs: Mapping[str, object] | None = None,
     ) -> DataLoader[CachedSample | T]:
         """Collate lists of cache records without a sample transform."""
         ...
@@ -343,6 +345,7 @@ class CachedDataset:
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
         verbose: bool = True,
+        dataloader_kwargs: Mapping[str, object] | None = None,
     ) -> DataLoader[CachedSample | T]:
         """Delegate to Torch default collation when no custom callback is supplied."""
         ...
@@ -371,6 +374,7 @@ class CachedDataset:
         prefetch_factor: int | Literal["auto"] = "auto",
         persistent_workers: bool | Literal["auto"] = "auto",
         verbose: bool = True,
+        dataloader_kwargs: Mapping[str, object] | None = None,
     ) -> DataLoader[CachedSample | T]:
         """Build a finite PyTorch DataLoader for training or evaluation.
 
@@ -495,6 +499,11 @@ class CachedDataset:
         Logs describe configured budgets, not measured thread activity or exact
         native draw offsets. Sampling seeds do not seed random user transforms.
 
+        dataloader_kwargs forwards additional PyTorch options, for example
+        {"in_order": False}. Keys matching explicit helper arguments, dataset,
+        sampler, or batch_sampler are rejected. PyTorch validates remaining keys.
+        in_order=False allows completion-order batches and can affect reproducibility.
+
         Collation always receives a list, including when batch_size=1. The list
         contains transformed samples if sample_transform_fn is supplied, otherwise
         CachedSample values. multiprocessing_context selects how workers start:
@@ -526,6 +535,7 @@ class CachedDataset:
             prefetch_factor=prefetch_factor,
             persistent_workers=persistent_workers,
             verbose=verbose,
+            dataloader_kwargs=dataloader_kwargs,
         )
 
     def samples_metadata(self) -> pl.DataFrame:

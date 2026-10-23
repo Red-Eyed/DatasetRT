@@ -33,7 +33,7 @@ from dataset_rt.reconstruction import (
 from dataset_rt.records import CachedSample, RowSpan
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from multiprocessing.context import BaseContext
 
     from pydantic import DirectoryPath, FilePath
@@ -396,8 +396,41 @@ def make_dataloader(
     persistent_workers: bool | Literal["auto"],
     verbose: bool,
     work_dir: DirectoryPath | None,
+    dataloader_kwargs: Mapping[str, object] | None = None,
 ) -> DataLoader[CachedSample | T]:
     """Snapshot in the training process; delegate batching and lifecycle to Torch."""
+    extra_kwargs: dict[str, object] = (
+        dict(dataloader_kwargs) if dataloader_kwargs is not None else {}
+    )
+    reserved = {
+        "dataset",
+        "sampler",
+        "batch_sampler",
+        "shuffle",
+        "seed",
+        "samples_per_epoch",
+        "worker_partition",
+        "work_dir",
+        "batch_size",
+        "num_workers",
+        "sample_transform_fn",
+        "collate_fn",
+        "drop_last",
+        "pin_memory",
+        "timeout",
+        "native_num_workers",
+        "multiprocessing_context",
+        "worker_init_fn",
+        "prefetch_factor",
+        "persistent_workers",
+        "verbose",
+        "dataloader_kwargs",
+    }
+    conflicts = reserved.intersection(extra_kwargs)
+    if conflicts:
+        raise ValueError(
+            f"dataloader_kwargs contains reserved arguments: {', '.join(sorted(conflicts))}"
+        )
     options = LoaderOptions(
         shuffle=shuffle,
         seed=seed,
@@ -449,6 +482,8 @@ def make_dataloader(
             worker_init_fn=WorkerInitializer(worker_init_fn),
             prefetch_factor=workers.prefetch,
             persistent_workers=workers.persistent,
+            # PyTorch validates values for version-dependent extension options.
+            **extra_kwargs,  # pyrefly: ignore[bad-argument-type]
         )
         if options.verbose:
             seeds = ",".join(f"{plan.worker_id}:{plan.seed}" for plan in adapter.partitions)

@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.8
+
+### Improvements
+
+- Add `dataloader_kwargs` to `to_torch_dataloader()` for additional PyTorch
+  options such as `in_order=False`, rejecting overrides of DatasetRT-controlled
+  arguments and existing explicit options.
+
 ## 0.4.7
 
 ### Documentation

@@ -83,6 +83,17 @@ def check_source(source: str) -> list[Violation]:
         if isinstance(node, ast.FunctionDef) and node.name == "__reduce__" and node.returns:
             allowed.update(item for item in references(node.returns) if item.name == "object")
             allowed_annotations.add(id(node.returns))
+    # Version-dependent Torch kwargs remain opaque until Torch validates them.
+    for node in ast.walk(tree):
+        annotation = None
+        match node:
+            case ast.arg(arg="dataloader_kwargs", annotation=value):
+                annotation = value
+            case ast.AnnAssign(target=ast.Name(id="extra_kwargs"), annotation=value):
+                annotation = value
+        if annotation is not None:
+            allowed.update(item for item in references(annotation) if item.name == "object")
+            allowed_annotations.add(id(annotation))
     violations = references(tree)
     for annotation in collect_annotations(tree):
         for name in quoted_references(annotation):

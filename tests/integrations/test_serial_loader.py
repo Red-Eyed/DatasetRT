@@ -679,3 +679,43 @@ def test_default_start_method(dataset: CachedDataset) -> None:
     assert loader.multiprocessing_context is not None
     assert loader.multiprocessing_context.get_start_method() == "spawn"
     assert [value for batch in loader for value in batch] == list(range(10))
+
+
+def test_additional_dataloader_options(dataset: CachedDataset) -> None:
+    """Forward Torch options without mutating the caller's mapping."""
+    options = {"in_order": False}
+    loader = dataset.to_torch_dataloader(
+        num_workers=0, shuffle=False, collate_fn=indices, dataloader_kwargs=options
+    )
+    assert loader.in_order is False
+    assert options == {"in_order": False}
+    assert sum(len(batch) for batch in loader) == len(dataset)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "dataset",
+        "sampler",
+        "batch_sampler",
+        "shuffle",
+        "batch_size",
+        "num_workers",
+        "collate_fn",
+        "prefetch_factor",
+        "persistent_workers",
+        "worker_init_fn",
+    ],
+)
+def test_reserved_dataloader_options(dataset: CachedDataset, tmp_path: Path, key: str) -> None:
+    """Reject overrides before allocating reconstruction artifacts."""
+    existing_paths = set(tmp_path.iterdir())
+    with pytest.raises(ValueError, match=f"reserved arguments: {key}"):
+        dataset.to_torch_dataloader(num_workers=0, work_dir=tmp_path, dataloader_kwargs={key: None})
+    assert set(tmp_path.iterdir()) == existing_paths
+
+
+def test_unknown_dataloader_option(dataset: CachedDataset) -> None:
+    """Let installed Torch reject unsupported keyword arguments."""
+    with pytest.raises(TypeError, match="unexpected keyword argument 'unknown_option'"):
+        dataset.to_torch_dataloader(num_workers=0, dataloader_kwargs={"unknown_option": True})

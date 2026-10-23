@@ -1,6 +1,6 @@
 [package]
 name = "dataset_rt"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 description = "Rust-powered dataset cache for Python with fast sample reads and separate metadata for analysis, filtering, and weighted sampling"
 license = "MIT"
