@@ -2,10 +2,16 @@ use lz4_flex::block::{compress_prepend_size, decompress_size_prepended};
 
 use crate::types::{CacheError, CacheResult, CompressionAlgo, ShardCompression};
 
-pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> Vec<u8> {
+/// Reject payload lengths that cannot round-trip through the LZ4 u32 size prefix.
+pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheResult<Vec<u8>> {
     match compression.algo {
-        CompressionAlgo::None => data,
-        CompressionAlgo::Lz4 => compress_prepend_size(&data),
+        CompressionAlgo::None => Ok(data),
+        CompressionAlgo::Lz4 => {
+            u32::try_from(data.len()).map_err(|_| {
+                CacheError::InvalidInput("LZ4 payload exceeds u32 size-prefix limit".to_string())
+            })?;
+            Ok(compress_prepend_size(&data))
+        }
     }
 }
 

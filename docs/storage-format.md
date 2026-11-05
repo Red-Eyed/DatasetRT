@@ -72,7 +72,12 @@ Older DatasetRT releases that only accept v2 cannot read upgraded v3 caches.
 
 ## Metadata
 
-`metadata.arrow` stores one row per physical sample. Metadata is separate from payload bytes so sampling and filtering can inspect metadata without opening payload shards.
+`metadata.arrow` stores one row per physical sample. Writers split rows into Arrow
+record batches bounded by row count and total string bytes, keeping each UTF-8
+column within its signed 32-bit offset limit. A single row may exceed the batch
+byte target, but individual strings exceeding the Arrow limit are rejected with
+a typed input error before array construction. Batch boundaries do not change
+sample order or the cache format. Metadata is separate from payload bytes so sampling and filtering can inspect metadata without opening payload shards.
 
 The same metadata is also embedded redundantly in each shard record. That copy is for debugging, visualization, and sample-level inspection when iterating through raw shard records. Readers compare the embedded metadata with `metadata.arrow` when materializing a sample and reject mismatches.
 

@@ -286,7 +286,7 @@ impl CacheBuilder {
             CacheError::InvalidInput("payload byte length does not fit in u64".to_string())
         })?;
         let compression_started_at = Instant::now();
-        let stored_payload = compress_payload(data, &self.shard_compression);
+        let stored_payload = compress_payload(data, &self.shard_compression)?;
         let compression = compression_started_at.elapsed();
         let record_started_at = Instant::now();
         let record = encode_sample_record(&stored_payload, &self.schema, &metadata_row)?;
@@ -362,11 +362,19 @@ impl CacheBuilder {
         if self.current_shard.byte_len == 0 {
             return Ok(());
         }
-        if self.current_shard.byte_len + next_payload_len <= self.max_shard_bytes {
+        if next_payload_len
+            <= self
+                .max_shard_bytes
+                .saturating_sub(self.current_shard.byte_len)
+        {
             return Ok(());
         }
 
-        let next_id = self.current_shard.id + 1;
+        let next_id = self
+            .current_shard
+            .id
+            .checked_add(1)
+            .ok_or_else(|| CacheError::InvalidInput("shard id overflowed u64".to_string()))?;
         let closed = std::mem::replace(
             &mut self.current_shard,
             OpenShard::create(&self.path, next_id)?,
@@ -434,12 +442,17 @@ impl OpenShard {
         uncompressed_byte_len: u64,
     ) -> CacheResult<IndexEntry> {
         let offset = self.byte_len;
-        self.writer.write_all(data)?;
-        self.hasher.update(data);
-        self.byte_len += u64::try_from(data.len()).map_err(|_| {
-            CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
-        })?;
-        self.uncompressed_byte_len = self
+        let byte_len = self
+            .byte_len
+            .checked_add(u64::try_from(data.len()).map_err(|_| {
+                CacheError::InvalidInput(
+                    "stored payload byte length does not fit in u64".to_string(),
+                )
+            })?)
+            .ok_or_else(|| {
+                CacheError::InvalidInput("shard byte length overflowed u64".to_string())
+            })?;
+        let uncompressed_byte_len = self
             .uncompressed_byte_len
             .checked_add(uncompressed_byte_len)
             .ok_or_else(|| {
@@ -447,6 +460,10 @@ impl OpenShard {
                     "shard uncompressed byte length overflowed u64".to_string(),
                 )
             })?;
+        self.writer.write_all(data)?;
+        self.hasher.update(data);
+        self.byte_len = byte_len;
+        self.uncompressed_byte_len = uncompressed_byte_len;
         Ok(IndexEntry {
             shard_id: self.id,
             offset,
@@ -545,18 +562,60 @@ fn write_metadata_file(
             .map(|field| Field::new(&field.name, arrow_type(&field.kind), false))
             .collect::<Vec<_>>(),
     ));
-    let columns = schema
-        .iter()
-        .enumerate()
-        .map(|(column_index, field)| build_array(column_index, &field.kind, rows))
-        .collect::<CacheResult<Vec<_>>>()?;
-    let batch = RecordBatch::try_new(arrow_schema.clone(), columns)?;
     let metadata_path = path.join("metadata.arrow");
     let file = File::create(&metadata_path)?;
     let mut writer = FileWriter::try_new(BufWriter::new(file), &arrow_schema)?;
-    writer.write(&batch)?;
+    let mut remaining = rows;
+    while !remaining.is_empty() {
+        let len = metadata_batch_len(remaining, 65_536, 8 * 1024 * 1024)?;
+        let (batch_rows, rest) = remaining.split_at_checked(len).ok_or_else(|| {
+            CacheError::InvalidInput("metadata batch range is invalid".to_string())
+        })?;
+        let columns = schema
+            .iter()
+            .enumerate()
+            .map(|(column, field)| build_array(column, &field.kind, batch_rows))
+            .collect::<CacheResult<Vec<_>>>()?;
+        writer.write(&RecordBatch::try_new(arrow_schema.clone(), columns)?)?;
+        remaining = rest;
+    }
     writer.finish()?;
     hash_file(&metadata_path)
+}
+
+/// Bound Arrow conversion by rows and total string bytes before building i32 offsets.
+fn metadata_batch_len(
+    rows: &[Vec<MetadataValue>],
+    max_rows: usize,
+    max_string_bytes: usize,
+) -> CacheResult<usize> {
+    let mut bytes = 0_usize;
+    let mut count = 0;
+    for row in rows.iter().take(max_rows) {
+        let mut row_bytes = 0_usize;
+        for cell in row {
+            if let MetadataValue::String(value) = cell {
+                if value.len() > i32::MAX as usize {
+                    return Err(CacheError::InvalidInput(
+                        "metadata string exceeds Arrow UTF-8 offset limit".to_string(),
+                    ));
+                }
+                row_bytes = row_bytes.checked_add(value.len()).ok_or_else(|| {
+                    CacheError::InvalidInput(
+                        "metadata row byte length overflowed usize".to_string(),
+                    )
+                })?;
+            }
+        }
+        if count > 0 && row_bytes > max_string_bytes.saturating_sub(bytes) {
+            break;
+        }
+        bytes = bytes.checked_add(row_bytes).ok_or_else(|| {
+            CacheError::InvalidInput("metadata batch byte length overflowed usize".to_string())
+        })?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn read_metadata_file(
@@ -724,8 +783,16 @@ fn encode_sample_record(
     let metadata_len = u64::try_from(metadata_json.len()).map_err(|_| {
         CacheError::InvalidInput("metadata record length does not fit in u64".to_string())
     })?;
-    let mut record =
-        Vec::with_capacity(RECORD_METADATA_LEN_BYTES + metadata_json.len() + stored_payload.len());
+    let capacity = RECORD_METADATA_LEN_BYTES
+        .checked_add(metadata_json.len())
+        .and_then(|len| len.checked_add(stored_payload.len()))
+        .ok_or_else(|| {
+            CacheError::InvalidInput("record byte length overflowed usize".to_string())
+        })?;
+    let mut record = Vec::new();
+    record.try_reserve_exact(capacity).map_err(|error| {
+        CacheError::InvalidInput(format!("cannot allocate sample record: {error}"))
+    })?;
     record.extend_from_slice(&metadata_len.to_le_bytes());
     record.extend_from_slice(&metadata_json);
     record.extend_from_slice(stored_payload);
@@ -930,4 +997,21 @@ fn hash_file(path: &Path) -> CacheResult<String> {
     }
 
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod metadata_batch_tests {
+    use super::*;
+
+    /// Exercise byte and row limits without allocating multi-gigabyte strings.
+    #[test]
+    fn batches_bound_offsets_and_always_make_progress() -> CacheResult<()> {
+        let rows = vec![vec![MetadataValue::String("abcd".to_string())]; 5];
+        assert_eq!(metadata_batch_len(&rows, 10, 8)?, 2);
+        assert_eq!(metadata_batch_len(&rows, 1, 100)?, 1);
+        assert_eq!(metadata_batch_len(&rows, 10, 3)?, 1);
+        assert_eq!(metadata_batch_len(&rows, 10, 12)?, 3);
+        assert_eq!(metadata_batch_len(&[], 10, 8)?, 0);
+        Ok(())
+    }
 }

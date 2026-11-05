@@ -234,3 +234,32 @@ def test_embedded_metadata_mismatch_is_rejected_during_iteration(tmp_path: Path)
 
     with pytest.raises(ValueError, match="embedded metadata does not match"):
         list(load_cache(cache_path))
+
+
+@pytest.mark.parametrize(("sample_count", "string_bytes"), [(10, 1_000_000), (65_537, 0)])
+def test_metadata_byte_batched_cache_round_trips(
+    tmp_path: Path, sample_count: int, string_bytes: int
+) -> None:
+    """Multiple Arrow batches preserve metadata order and redundant-record validation."""
+    import polars as pl
+    import pyarrow.ipc as ipc
+
+    class LargeMetadataSource:
+        name = "byte-batched"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Cross the metadata byte budget with a bounded number of records."""
+            for index in range(sample_count):
+                yield CacheInput(bytes([index % 256]), {"text": "x" * string_bytes, "index": index})
+
+    results = RUNTIME.write_cache(LargeMetadataSource(), tmp_path)
+    assert isinstance(results[0], CacheWriteSuccess)
+    path = results[0].path
+    table = pl.read_ipc(path / "metadata.arrow", rechunk=False)
+    with ipc.open_file(path / "metadata.arrow") as reader:
+        assert reader.num_record_batches > 1
+    assert table["index"].equals(pl.Series("index", range(sample_count)))
+    dataset = load_cache(path)
+    assert len(dataset) == sample_count
+    for index, sample in enumerate(dataset):
+        assert sample.data == bytes([index % 256])

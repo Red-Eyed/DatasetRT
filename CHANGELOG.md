@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.9
+
+### Fixes
+
+- Bound metadata Arrow batches by rows and string bytes to avoid UTF-8 offset
+  overflow when writing large caches. Preserve the existing cache format.
+- Reject oversized LZ4 payloads and check shard and record size arithmetic.
+
 ## 0.4.8
 
 ### Improvements
