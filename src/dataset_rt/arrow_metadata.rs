@@ -8,7 +8,7 @@ use arrow_select::take::take_record_batch;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyCapsuleMethods};
 
-use crate::types::{CacheError, CacheResult};
+use crate::types::{native_result, CacheError, CacheResult};
 
 pub mod mapped;
 
@@ -120,17 +120,19 @@ impl ArrowMetadata {
 
     /// Write a new explicit snapshot with bounded chunks and durable file contents.
     pub fn write_file(&self, path: &Path) -> CacheResult<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        let mut writer = arrow_ipc::writer::FileWriter::try_new(file, &self.schema)?;
-        for batch in self.reader() {
-            writer.write(&batch?)?;
-        }
-        writer.finish()?;
-        writer.get_ref().sync_all()?;
-        Ok(())
+        native_result("Arrow metadata snapshot write", || {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            let mut writer = arrow_ipc::writer::FileWriter::try_new(file, &self.schema)?;
+            for batch in self.reader() {
+                writer.write(&batch?)?;
+            }
+            writer.finish()?;
+            writer.get_ref().sync_all()?;
+            Ok(())
+        })
     }
 }
 
@@ -166,15 +168,13 @@ pub fn import_table(capsule: Bound<'_, PyCapsule>) -> PyResult<ArrowMetadata> {
     // The named Arrow capsule transfers a valid stream once; from_raw clears its release callback.
     // The capsule remains alive during the move, and Arrow retains each imported array's owner.
     let stream = unsafe { FFI_ArrowArrayStream::from_raw(pointer.cast().as_ptr()) };
-    let reader = ArrowArrayStreamReader::try_new(stream)
-        .map_err(CacheError::from)
-        .map_err(CacheError::into_py_err)?;
-    let schema = reader.schema();
-    let batches = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CacheError::from)
-        .map_err(CacheError::into_py_err)?;
-    ArrowMetadata::new(schema, batches).map_err(CacheError::into_py_err)
+    native_result("Arrow stream import", || {
+        let reader = ArrowArrayStreamReader::try_new(stream)?;
+        let schema = reader.schema();
+        let batches = reader.collect::<Result<Vec<_>, _>>()?;
+        ArrowMetadata::new(schema, batches)
+    })
+    .map_err(CacheError::into_py_err)
 }
 
 struct MetadataReader {
@@ -191,7 +191,7 @@ impl Iterator for MetadataReader {
             return None;
         }
         if self.table.selection.is_none() {
-            let result = self.shared_batch();
+            let result = native_result("Arrow metadata export", || self.shared_batch());
             if result.is_err() {
                 self.position = self.table.len();
             }
@@ -199,7 +199,7 @@ impl Iterator for MetadataReader {
                 result.map_err(|error| ArrowError::InvalidArgumentError(error.to_string())),
             );
         }
-        let result = self.selected_batch();
+        let result = native_result("Arrow selected metadata export", || self.selected_batch());
         if result.is_err() {
             self.position = self.table.len();
         }

@@ -220,3 +220,9 @@ fn queued_payloads_drop_outside_lock() -> CacheResult<()> {
         .map_err(|_| CacheError::WorkerFailed)?);
     Ok(())
 }
+
+/// Impossible queue capacities return errors before allocation rather than unwinding.
+#[test]
+fn rejects_capacity_overflow() {
+    assert!(bounded::<u64>(usize::MAX).is_err());
+}

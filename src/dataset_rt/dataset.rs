@@ -333,9 +333,9 @@ impl DatasetState {
         }
 
         let start_draw = guard.shuffled_draw_offset;
-        guard.shuffled_draw_offset = advance_draw_offset(start_draw, epoch_len)?;
-        match &guard.active {
-            ActiveMetadata::Full => Ok(EpochPlan::Shuffled {
+        let next_draw = advance_draw_offset(start_draw, epoch_len)?;
+        let plan = match &guard.active {
+            ActiveMetadata::Full => Ok::<EpochPlan, CacheError>(EpochPlan::Shuffled {
                 sampler: Box::new(EpochSampler::uniform(
                     self.total_samples,
                     self.seed,
@@ -353,7 +353,9 @@ impl DatasetState {
                 )?),
                 physical_indices: Some(active.physical_indices.clone()),
             }),
-        }
+        }?;
+        guard.shuffled_draw_offset = next_draw;
+        Ok(plan)
     }
 
     /// Return the finite number of samples emitted by future dataset iterators.

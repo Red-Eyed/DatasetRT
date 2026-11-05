@@ -2,7 +2,7 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
-use crate::types::{CacheError, CacheResult};
+use crate::types::{native_result, CacheError, CacheResult};
 
 #[derive(Clone)]
 pub enum EpochSampler {
@@ -49,8 +49,10 @@ impl EpochSampler {
         epoch_len: usize,
     ) -> CacheResult<Self> {
         validate_weights(weights, weights.len())?;
-        let distribution = WeightedIndex::new(weights)
-            .map_err(|error| CacheError::InvalidInput(format!("invalid weights: {error}")))?;
+        let distribution = native_result("weighted sampler construction", || {
+            WeightedIndex::new(weights)
+                .map_err(|error| CacheError::InvalidInput(format!("invalid weights: {error}")))
+        })?;
         Ok(Self::Weighted {
             distribution,
             seed,
@@ -113,11 +115,18 @@ pub fn validate_weights(weights: &[f64], sample_count: usize) -> CacheResult<()>
         )));
     }
 
+    let mut total = 0.0_f64;
     for (index, weight) in weights.iter().enumerate() {
         if !weight.is_finite() || *weight <= 0.0 {
             return Err(CacheError::InvalidInput(format!(
                 "weight {index} must be positive and finite"
             )));
+        }
+        total += weight;
+        if !total.is_finite() {
+            return Err(CacheError::InvalidInput(
+                "weight total must be finite".to_string(),
+            ));
         }
     }
 

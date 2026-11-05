@@ -53,10 +53,16 @@ pub(crate) fn bounded<T>(capacity: usize) -> CacheResult<(Sender<T>, Receiver<T>
             "channel capacity must be positive".to_string(),
         ));
     }
+    let mut queue = VecDeque::new();
+    queue.try_reserve_exact(capacity).map_err(|error| {
+        CacheError::InvalidInput(format!(
+            "cannot allocate channel capacity {capacity}: {error}"
+        ))
+    })?;
     let channel = Arc::new(Channel {
         capacity,
         state: Mutex::new(State {
-            queue: VecDeque::with_capacity(capacity),
+            queue,
             senders_open: true,
             receivers_open: true,
         }),

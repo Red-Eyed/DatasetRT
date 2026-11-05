@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::arrow_metadata::ArrowMetadata;
 use crate::sampling::validate_weights;
 use crate::storage::LoadedCache;
-use crate::types::{CacheError, CacheResult, MetadataField, MetadataKind};
+use crate::types::{native_result, CacheError, CacheResult, MetadataField, MetadataKind};
 
 /// Bound identity construction and serialization work independently of cache row counts.
 pub const METADATA_BATCH_ROWS: usize = 65_536;
@@ -108,36 +108,38 @@ pub fn extract_metadata_ipc(
     cache_lookup: &HashMap<u64, usize>,
     schema: &[MetadataField],
 ) -> CacheResult<ActiveMetadataTable> {
-    let mut weights = Vec::new();
-    let mut physical_indices = Vec::new();
-    let mut row_count = 0_usize;
-    let reader = FileReader::try_new(Cursor::new(ipc), None)?;
-    let arrow_schema = reader.schema();
-    let mut batches = Vec::new();
+    native_result("samples metadata IPC import", || {
+        let mut weights = Vec::new();
+        let mut physical_indices = Vec::new();
+        let mut row_count = 0_usize;
+        let reader = FileReader::try_new(Cursor::new(ipc), None)?;
+        let arrow_schema = reader.schema();
+        let mut batches = Vec::new();
 
-    for batch in reader {
-        let batch = batch?;
-        row_count = row_count.checked_add(batch.num_rows()).ok_or_else(|| {
-            CacheError::InvalidInput("samples metadata row count overflowed usize".to_string())
-        })?;
-        validate_required_metadata_columns(&batch, schema)?;
-        apply_metadata_batch(
-            &batch,
-            caches,
-            cache_offsets,
-            cache_lookup,
-            &mut physical_indices,
-            &mut weights,
-        )?;
-        batches.push(batch);
-    }
+        for batch in reader {
+            let batch = batch?;
+            row_count = row_count.checked_add(batch.num_rows()).ok_or_else(|| {
+                CacheError::InvalidInput("samples metadata row count overflowed usize".to_string())
+            })?;
+            validate_required_metadata_columns(&batch, schema)?;
+            apply_metadata_batch(
+                &batch,
+                caches,
+                cache_offsets,
+                cache_lookup,
+                &mut physical_indices,
+                &mut weights,
+            )?;
+            batches.push(batch);
+        }
 
-    validate_active_metadata(row_count)?;
-    validate_weights(&weights, row_count)?;
-    Ok(ActiveMetadataTable {
-        physical_indices: Arc::new(physical_indices),
-        weights,
-        metadata: ArrowMetadata::new(arrow_schema, batches)?,
+        validate_active_metadata(row_count)?;
+        validate_weights(&weights, row_count)?;
+        Ok(ActiveMetadataTable {
+            physical_indices: Arc::new(physical_indices),
+            weights,
+            metadata: ArrowMetadata::new(arrow_schema, batches)?,
+        })
     })
 }
 
@@ -198,20 +200,22 @@ pub fn write_samples_metadata_file(
     cache_offsets: &[usize],
     schema: &[MetadataField],
 ) -> CacheResult<()> {
-    let arrow_schema = samples_metadata_schema(schema);
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    let mut writer = FileWriter::try_new(file, &arrow_schema)?;
-    visit_samples_metadata(
-        caches,
-        cache_offsets,
-        schema,
-        &arrow_schema,
-        &WeightState::Uniform,
-        |batch| writer.write(&batch).map_err(CacheError::from),
-    )?;
-    writer.finish()?;
-    writer.get_ref().sync_all()?;
-    Ok(())
+    native_result("samples metadata snapshot write", || {
+        let arrow_schema = samples_metadata_schema(schema);
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let mut writer = FileWriter::try_new(file, &arrow_schema)?;
+        visit_samples_metadata(
+            caches,
+            cache_offsets,
+            schema,
+            &arrow_schema,
+            &WeightState::Uniform,
+            |batch| writer.write(&batch).map_err(CacheError::from),
+        )?;
+        writer.finish()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    })
 }
 
 /// Process immutable cache batches in physical order without retaining prior batches.
@@ -412,15 +416,17 @@ fn weight_len(weights: &WeightSlice) -> usize {
 
 /// Serialize Arrow record batches sharing one schema to an IPC file payload.
 pub fn write_metadata_ipc(table: &ArrowMetadata) -> CacheResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    {
-        let mut writer = FileWriter::try_new(&mut bytes, &table.schema)?;
-        for batch in table.reader() {
-            writer.write(&batch?)?;
+    native_result("samples metadata IPC export", || {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, &table.schema)?;
+            for batch in table.reader() {
+                writer.write(&batch?)?;
+            }
+            writer.finish()?;
         }
-        writer.finish()?;
-    }
-    Ok(bytes)
+        Ok(bytes)
+    })
 }
 
 /// Apply one Arrow record batch of active metadata without converting rows through Python.

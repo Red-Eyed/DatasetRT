@@ -1106,3 +1106,21 @@ def test_from_cache_sources_returns_error_when_no_cache_was_written(tmp_path: Pa
             assert message == "no caches were written: empty: cache source yielded no samples"
         case result:
             raise AssertionError(result)
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_overflowing_weight_total_preserves_dataset(
+    tiny_cache_paths: list[Path],
+    shuffle: bool,
+) -> None:
+    """Reject finite weights whose total overflows before replacing authoritative state."""
+    config = ReaderConfig(seed=7, shuffle=shuffle)
+    tiny_dataset = RUNTIME.cached_dataset(tiny_cache_paths, reader_config=config)
+    reference = RUNTIME.cached_dataset(tiny_cache_paths, reader_config=config)
+    before = tiny_dataset.samples_metadata()
+    with pytest.raises(ValueError, match="weight total must be finite"):
+        tiny_dataset.set_samples_metadata(before.with_columns(pl.lit(1e308).alias("weight")))
+    assert tiny_dataset.samples_metadata().equals(before)
+    assert [sample.sample_id for sample in tiny_dataset] == [
+        sample.sample_id for sample in reference
+    ]

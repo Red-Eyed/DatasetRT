@@ -22,6 +22,8 @@ pub enum CacheError {
     KeyboardInterrupt(String),
     #[error("{0}")]
     SystemExit(String),
+    #[error("native operation failed: {0}")]
+    NativeFailure(String),
     #[error("runtime worker failed")]
     WorkerFailed,
 }
@@ -34,9 +36,12 @@ impl CacheError {
             }
             Self::KeyboardInterrupt(message) => PyKeyboardInterrupt::new_err(message),
             Self::SystemExit(message) => PySystemExit::new_err(message),
-            Self::Io(_) | Self::Json(_) | Self::Arrow(_) | Self::Python(_) | Self::WorkerFailed => {
-                PyRuntimeError::new_err(self.to_string())
-            }
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::Arrow(_)
+            | Self::Python(_)
+            | Self::NativeFailure(_)
+            | Self::WorkerFailed => PyRuntimeError::new_err(self.to_string()),
         }
     }
 }
@@ -249,4 +254,16 @@ pub struct LoadedSample {
     pub metadata: Vec<MetadataValue>,
     pub cache_id: CacheId,
     pub sample_id: SampleId,
+}
+
+/// Retain dependency panic diagnostics; callers must discard mutated state on failure.
+pub fn native_result<T>(context: &str, action: impl FnOnce() -> CacheResult<T>) -> CacheResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic payload");
+        Err(CacheError::NativeFailure(format!("{context}: {message}")))
+    })
 }

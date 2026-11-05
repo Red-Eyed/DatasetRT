@@ -2,6 +2,17 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.4.10
+
+### Fixes
+
+- Reject overflowing weight totals before updating dataset state; failed sampler
+  construction no longer advances the shuffled draw position.
+- Validate metadata shapes, indexed record bounds, and LZ4 size envelopes before
+  column access or payload allocation. Use fallible queue and payload allocation.
+- Preserve unexpected native panic diagnostics in Python runtime errors and
+  contain dependency unwinds at Arrow and sampler boundaries.
+
 ## 0.4.9
 
 ### Fixes

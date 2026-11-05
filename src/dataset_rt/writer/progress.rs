@@ -117,7 +117,9 @@ impl SourceListProgress {
         let elapsed_seconds = self.started_at.elapsed().as_secs_f64().max(0.001);
         let sources_per_second = self.completed as f64 / elapsed_seconds;
         let remaining = self.total.saturating_sub(self.completed) as f64;
-        let eta = Duration::from_secs_f64(remaining / sources_per_second);
+        let Ok(eta) = Duration::try_from_secs_f64(remaining / sources_per_second) else {
+            return "ETA --".to_string();
+        };
         format!(
             "{:.1} sources/s | ETA {}",
             sources_per_second,

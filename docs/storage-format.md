@@ -148,3 +148,16 @@ Writers calculate SHA-256 checksums while committing files. Readers verify:
 - Embedded shard metadata matches `metadata.arrow` when a sample is read.
 
 Reader validation happens before iteration starts.
+
+## Native error handling
+
+Readers reject indexed record ranges outside their declared shard before payload
+allocation. LZ4 size prefixes must fit within the shard's declared uncompressed
+length, and decoded lengths must match their prefix. Full metadata validation
+checks column count, names, types, and null values before reading cells.
+
+Input and cache validation errors reach Python as `ValueError`. Unexpected native
+unwinds contained at worker and dependency boundaries become `RuntimeError` with
+the operation and original diagnostic. Payload and channel reservations are
+fallible; allocator aborts, OS termination, and invalid memory access remain
+outside this recovery contract.

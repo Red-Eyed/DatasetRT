@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::compression::{compress_payload, decompress_payload};
 use crate::types::{
-    CacheError, CacheId, CacheResult, CacheSample, MetadataField, MetadataKind, MetadataValue,
-    ShardCompression,
+    native_result, CacheError, CacheId, CacheResult, CacheSample, MetadataField, MetadataKind,
+    MetadataValue, ShardCompression,
 };
 
 pub const FORMAT_VERSION: u32 = 3;
@@ -91,8 +91,22 @@ impl LoadedCache {
         let byte_len = usize::try_from(entry.byte_len).map_err(|_| {
             CacheError::InvalidCache("payload byte length does not fit in usize".to_string())
         })?;
-        let mut record = vec![0; byte_len];
+        let end = entry.offset.checked_add(entry.byte_len).ok_or_else(|| {
+            CacheError::InvalidCache("record offset and length overflowed u64".to_string())
+        })?;
         let reader = readers.reader_for(&shard_path)?;
+        if end > shard.byte_len {
+            return Err(CacheError::InvalidCache(
+                "record extends beyond shard length".to_string(),
+            ));
+        }
+        let mut record = Vec::new();
+        record.try_reserve_exact(byte_len).map_err(|error| {
+            CacheError::InvalidCache(format!(
+                "cannot allocate record of {byte_len} bytes: {error}"
+            ))
+        })?;
+        record.resize(byte_len, 0);
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut record)?;
         let (embedded_metadata, stored_payload) =
@@ -105,7 +119,11 @@ impl LoadedCache {
                 validate_redundant_metadata(metadata, &embedded_metadata, sample_index)
             })?;
         }
-        let data = decompress_payload(stored_payload, &shard.compression)?;
+        let data = decompress_payload(
+            stored_payload,
+            &shard.compression,
+            shard.uncompressed_byte_len,
+        )?;
 
         Ok(CacheSample {
             data,
@@ -556,31 +574,33 @@ fn write_metadata_file(
     schema: &[MetadataField],
     rows: &[Vec<MetadataValue>],
 ) -> CacheResult<String> {
-    let arrow_schema = Arc::new(Schema::new(
-        schema
-            .iter()
-            .map(|field| Field::new(&field.name, arrow_type(&field.kind), false))
-            .collect::<Vec<_>>(),
-    ));
-    let metadata_path = path.join("metadata.arrow");
-    let file = File::create(&metadata_path)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &arrow_schema)?;
-    let mut remaining = rows;
-    while !remaining.is_empty() {
-        let len = metadata_batch_len(remaining, 65_536, 8 * 1024 * 1024)?;
-        let (batch_rows, rest) = remaining.split_at_checked(len).ok_or_else(|| {
-            CacheError::InvalidInput("metadata batch range is invalid".to_string())
-        })?;
-        let columns = schema
-            .iter()
-            .enumerate()
-            .map(|(column, field)| build_array(column, &field.kind, batch_rows))
-            .collect::<CacheResult<Vec<_>>>()?;
-        writer.write(&RecordBatch::try_new(arrow_schema.clone(), columns)?)?;
-        remaining = rest;
-    }
-    writer.finish()?;
-    hash_file(&metadata_path)
+    native_result("metadata Arrow write", || {
+        let arrow_schema = Arc::new(Schema::new(
+            schema
+                .iter()
+                .map(|field| Field::new(&field.name, arrow_type(&field.kind), false))
+                .collect::<Vec<_>>(),
+        ));
+        let metadata_path = path.join("metadata.arrow");
+        let file = File::create(&metadata_path)?;
+        let mut writer = FileWriter::try_new(BufWriter::new(file), &arrow_schema)?;
+        let mut remaining = rows;
+        while !remaining.is_empty() {
+            let len = metadata_batch_len(remaining, 65_536, 8 * 1024 * 1024)?;
+            let (batch_rows, rest) = remaining.split_at_checked(len).ok_or_else(|| {
+                CacheError::InvalidInput("metadata batch range is invalid".to_string())
+            })?;
+            let columns = schema
+                .iter()
+                .enumerate()
+                .map(|(column, field)| build_array(column, &field.kind, batch_rows))
+                .collect::<CacheResult<Vec<_>>>()?;
+            writer.write(&RecordBatch::try_new(arrow_schema.clone(), columns)?)?;
+            remaining = rest;
+        }
+        writer.finish()?;
+        hash_file(&metadata_path)
+    })
 }
 
 /// Bound Arrow conversion by rows and total string bytes before building i32 offsets.
@@ -622,18 +642,41 @@ fn read_metadata_file(
     path: &Path,
     schema: &[MetadataField],
 ) -> CacheResult<Vec<Vec<MetadataValue>>> {
-    let file = File::open(path)?;
-    let reader = FileReader::try_new(BufReader::new(file), None)?;
-    let mut rows = Vec::new();
+    native_result("metadata Arrow validation", || {
+        let file = File::open(path)?;
+        let reader = FileReader::try_new(BufReader::new(file), None)?;
+        let mut rows = Vec::new();
 
-    for batch in reader {
-        let batch = batch?;
-        for row_index in 0..batch.num_rows() {
-            rows.push(read_metadata_row(&batch, schema, row_index)?);
+        for batch in reader {
+            let batch = batch?;
+            if batch.num_columns() != schema.len() {
+                return Err(CacheError::InvalidCache(
+                    "metadata column count does not match manifest schema".to_string(),
+                ));
+            }
+            for (actual, expected) in batch.schema().fields().iter().zip(schema) {
+                if actual.name() != &expected.name {
+                    return Err(CacheError::InvalidCache(format!(
+                        "metadata column name does not match '{}'",
+                        expected.name
+                    )));
+                }
+            }
+            for (column, field) in batch.columns().iter().zip(schema) {
+                if column.data_type() != &arrow_type(&field.kind) || column.null_count() != 0 {
+                    return Err(CacheError::InvalidCache(format!(
+                        "metadata '{}' has invalid type or null values",
+                        field.name
+                    )));
+                }
+            }
+            for row_index in 0..batch.num_rows() {
+                rows.push(read_metadata_row(&batch, schema, row_index)?);
+            }
         }
-    }
 
-    Ok(rows)
+        Ok(rows)
+    })
 }
 
 fn read_metadata_row(
@@ -645,7 +688,9 @@ fn read_metadata_row(
         .iter()
         .enumerate()
         .map(|(column_index, field)| {
-            let column = batch.column(column_index);
+            let column = batch.columns().get(column_index).ok_or_else(|| {
+                CacheError::InvalidCache("metadata column is missing".to_string())
+            })?;
             match field.kind {
                 MetadataKind::Bool => {
                     let array =

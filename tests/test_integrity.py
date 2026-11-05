@@ -263,3 +263,42 @@ def test_metadata_byte_batched_cache_round_trips(
     assert len(dataset) == sample_count
     for index, sample in enumerate(dataset):
         assert sample.data == bytes([index % 256])
+
+
+@pytest.mark.parametrize("invalid_length", [2**64 - 1, 2**32])
+def test_invalid_record_length_returns_value_error(tmp_path: Path, invalid_length: int) -> None:
+    """Reject impossible index ranges before allocating payload memory."""
+    path = write_integrity_cache(tmp_path)
+    index_path = path / "index.bin"
+    index = bytearray(index_path.read_bytes())
+    index[16:24] = invalid_length.to_bytes(8, "little")
+    index_path.write_bytes(index)
+    dataset = RUNTIME.cached_dataset([path], reader_config=ReaderConfig(seed=1, shuffle=False))
+    with pytest.raises(ValueError, match="record.*(overflow|beyond)"):
+        next(iter(dataset))
+
+
+@pytest.mark.parametrize("invalid_schema", ["missing", "type", "null", "name"])
+def test_invalid_metadata_schema_returns_error(tmp_path: Path, invalid_schema: str) -> None:
+    """Malformed Arrow shape produces an actionable error without worker panic."""
+    import polars as pl
+
+    path = write_integrity_cache(tmp_path)
+    metadata_path = path / "metadata.arrow"
+    match invalid_schema:
+        case "missing":
+            table = pl.DataFrame({"index": [0, 1]})
+        case "type":
+            table = pl.DataFrame({"index": [0.0, 1.0], "split": ["train", "train"]})
+        case "null":
+            table = pl.DataFrame({"index": [0, None], "split": ["train", "train"]})
+        case "name":
+            table = pl.DataFrame({"other": [0, 1], "split": ["train", "train"]})
+        case _:
+            raise AssertionError(invalid_schema)
+    table.write_ipc(metadata_path)
+    manifest = read_manifest(path)
+    manifest.metadata_sha256 = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    write_manifest(path, manifest)
+    with pytest.raises(ValueError, match="metadata"):
+        load_cache(path)

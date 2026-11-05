@@ -11,7 +11,7 @@ use arrow_ipc::{root_as_footer, Block};
 use arrow_schema::{ArrowError, SchemaRef};
 use memmap2::Mmap;
 
-use crate::types::{CacheError, CacheResult};
+use crate::types::{native_result, CacheError, CacheResult};
 
 /// Read-only cache mapping; decoded Arrow buffers retain their mapped pages.
 pub struct MappedMetadataReader {
@@ -50,10 +50,16 @@ impl MappedMetadataReader {
             .ok_or_else(invalid_footer)?;
         let footer = root_as_footer(footer_bytes)
             .map_err(|error| CacheError::InvalidCache(error.to_string()))?;
-        let schema = Arc::new(fb_to_schema(footer.schema().ok_or_else(invalid_footer)?));
+        let schema = native_result("metadata Arrow schema", || {
+            Ok(Arc::new(fb_to_schema(
+                footer.schema().ok_or_else(invalid_footer)?,
+            )))
+        })?;
         let mut decoder = FileDecoder::new(schema.clone(), footer.version());
         for block in footer.dictionaries().iter().flatten() {
-            decoder.read_dictionary(block, &block_buffer(&buffer, block, footer_start)?)?;
+            native_result("metadata Arrow dictionary", || {
+                Ok(decoder.read_dictionary(block, &block_buffer(&buffer, block, footer_start)?)?)
+            })?;
         }
         let blocks = footer
             .recordBatches()
@@ -99,16 +105,23 @@ impl Iterator for MappedMetadataReader {
     /// Decode one batch; properly aligned uncompressed buffers remain shared.
     fn next(&mut self) -> Option<Self::Item> {
         let block = self.blocks.next()?;
-        Some(
-            block_buffer(&self.buffer, &block, self.buffer.len())
+        let result = block_buffer(&self.buffer, &block, self.buffer.len())
+            .map_err(|error| ArrowError::ParseError(error.to_string()))
+            .and_then(|buffer| {
+                native_result("metadata Arrow record batch", || {
+                    Ok(self.decoder.read_record_batch(&block, &buffer)?)
+                })
                 .map_err(|error| ArrowError::ParseError(error.to_string()))
-                .and_then(|buffer| self.decoder.read_record_batch(&block, &buffer))
-                .and_then(|batch| {
-                    batch.ok_or_else(|| {
-                        ArrowError::ParseError("missing metadata record batch".to_string())
-                    })
-                }),
-        )
+            })
+            .and_then(|batch| {
+                batch.ok_or_else(|| {
+                    ArrowError::ParseError("missing metadata record batch".to_string())
+                })
+            });
+        if result.is_err() {
+            self.blocks = Vec::new().into_iter();
+        }
+        Some(result)
     }
 }
 
