@@ -641,3 +641,72 @@ epoch or draw-offset propagation remains a separate correctness improvement.
   population across two passes, with explicit and omitted seeds. Restarted worker
   PIDs differ while their draw sequences repeat. Checking saved weights alone
   would not detect this failure.
+
+## Writer memory failure analysis — 2026-11-05
+
+Status: **unresolved production scalability defect**. The Arrow offset fix and
+panic hardening address specific failures; they do not establish bounded total
+writer memory. No production memory ceiling or time-to-failure has been measured.
+
+### Cause and scale
+
+Source: [CacheBuilder in storage.rs](../src/dataset_rt/storage.rs).
+`push_sample()` writes the payload record to its shard, then appends the metadata
+row to `metadata_rows` and the index entry to `index`. Both collections remain
+alive until `finish()` writes the metadata and index files. Payload bytes are
+streamed, but metadata and index state accumulate with accepted sample count.
+
+For ten million samples with 200 bytes of string metadata per sample, retained
+string bytes alone total 2 GB (decimal). Three `u64` fields per index entry add
+240 MB before vector spare capacity. This excludes each row's vector, metadata
+enum values, string/vector capacities, allocator overhead, other metadata values,
+shard manifests, source-process memory, and bounded in-flight payloads. It is an
+illustrative accounting example, not an RSS measurement or a safe size limit.
+
+Retained state grows as O(total metadata bytes + samples × metadata columns +
+shards). Independent writer processes add their own retained state. A bounded
+pipeline limits in-flight work, not these completed-sample accumulators.
+`max_shard_bytes` rotates payload files; it does not flush metadata or index rows.
+Reducing `prefetch_size` cannot bound the accumulating portion of writer memory.
+
+### What can fail
+
+| Failure | Observable effect | Recovery and integrity limit |
+| --- | --- | --- |
+| Memory pressure and swapping | Throughput can collapse as the cache grows; other training or preprocessing processes compete for RAM. | A write may still complete, but no predictable RAM ceiling exists. |
+| Collection growth | Row/index vector growth can require a larger allocation and additional transient memory, depending on allocator behavior. | These accumulators still use infallible allocation paths; panic containment does not make allocator aborts recoverable. |
+| Allocation abort or OS kill | The process can exit without returning a Python error, potentially after hours of source work. | Destructors and handled-error cleanup do not run reliably on abrupt termination. |
+| Interrupted publication | Shards and partially written auxiliary files can remain in the temporary cache directory. | No completed cache is published before the manifest and publication steps succeed; abandoned temporary files can consume disk space. |
+| Late failure and retry | Metadata/index finalization starts only after ingestion, so accumulated RAM and substantial completed I/O coexist near the end. | The writer has no ingestion checkpoint/resume contract; a retry must rebuild the failed source rather than continue its accepted rows. |
+
+The user-provided backtrace confirms an Arrow byte-array offset overflow in
+54.3.1. The cache writer constructed a whole-cache `StringArray`, whose signed
+32-bit offsets cannot represent a string column above roughly 2 GiB. Version
+0.4.9 introduced row- and string-byte-bounded Arrow batches. Version 0.4.10 adds
+validation, fallible allocations on selected paths, and diagnostic containment
+for dependency unwinds. Those mitigations do not remove the retained row/index
+collections. Catching an unwind also cannot recover an allocator abort, OS kill,
+or invalid memory access.
+
+### Required design and acceptance evidence
+
+Stream metadata batches and fixed-width index entries into their final cache
+files during ingestion, under the existing temporary cache directory. Keep only
+the current bounded batch, counters, shard descriptors, and bounded pipeline
+state. These files are cache artifacts, not an internal Python/Rust transport.
+Preserve deterministic row order, checksums, durability, handled-failure cleanup,
+and manifest-last publication. Explicitly account for shard-manifest state,
+which still grows with shard count.
+
+- [ ] Remove full-cache metadata-row and index-entry collections from the writer.
+- [ ] Bound metadata batches by row count and bytes, including a documented policy
+  for a single row larger than the normal batch target.
+- [ ] Show a memory plateau as sample count increases with fixed schema, sample
+  size, queue settings, and controlled shard count; account separately for
+  O(shards) manifest state and independent processes.
+- [ ] Exercise high metadata volume and many samples across multiple caches;
+  report process memory and throughput rather than inferring bounds from queues.
+- [ ] Inject metadata/index write failures and interruptions before publication;
+  verify typed errors, cleanup, rejection of incomplete caches, and retry behavior.
+- [ ] Verify output ordering, sample identities, checksums, and compatibility for
+  both compressed and uncompressed caches.

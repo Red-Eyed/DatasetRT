@@ -44,3 +44,24 @@ workers to continue native streams, or zero-worker loading to retain state in th
 main process. This warning does not fix replay automatically. The detailed
 [failure analysis and default review](inversion-checklists.md#training-failure-analysis-nonpersistent-worker-replay--2026-10-13)
 records the cause, impact limits, regression coverage, and remaining epoch-state work.
+
+## Writer memory failure analysis — 2026-11-05
+
+The reported Arrow `offset overflow` exposed a dataset-scale design error:
+metadata for an entire cache was converted into one UTF-8 array. Version 0.4.9
+bounds that conversion by rows and string bytes; 0.4.10 adds validation and
+native error containment. Neither change makes total writer memory bounded.
+
+`CacheBuilder` still retains every metadata row and index entry until publication.
+For example, ten million samples with 200 bytes of string metadata retain about
+2 GB of string bytes and 240 MB of index entries, before other values, row
+containers, vector capacity, allocator overhead, and pipeline buffers. Rotating
+shards or reducing prefetch does not release those accumulated rows.
+
+A large write can therefore slow down through memory pressure, abort on an
+allocation failure, or be killed by the OS after substantial work. Process death
+cannot become a Python exception and can leave unpublished temporary files.
+The cache remains unavailable until publication; incomplete writes are not
+resumable. This is an unresolved production scalability defect. The detailed
+[writer memory failure analysis](inversion-checklists.md#writer-memory-failure-analysis--2026-11-05)
+records the failure modes and acceptance criteria for bounded-memory writing.
