@@ -136,7 +136,7 @@ def test_existing_method_parameters_and_default_objects() -> None:
         "cache_id",
         "sample_id",
     )
-    assert api.DEFAULT_SHARD_COMPRESSION == api.ShardCompression()
+    assert api.DEFAULT_SHARD_COMPRESSION == api.Lz4Fast(acceleration=1)
     assert api.DEFAULT_WRITER_PROFILER_CONFIG == api.WriterProfilerConfig()
 
 

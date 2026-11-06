@@ -17,6 +17,7 @@ from dataset_rt import (
     CacheWriteResult,
     CacheWriteSuccess,
     DatasetRuntime,
+    NoCompression,
     ReaderConfig,
     ShardCompression,
     WriterConfig,
@@ -170,7 +171,7 @@ def test_shard_records_embed_metadata_for_debugging(tmp_path: Path) -> None:
         RUNTIME.write_cache(
             TinySource(),
             tmp_path / "cache",
-            writer_config=WriterConfig(show_progress=False),
+            writer_config=WriterConfig(shard_compression=NoCompression(), show_progress=False),
         )
     )
     cache_path = written[0]
@@ -181,7 +182,7 @@ def test_shard_records_embed_metadata_for_debugging(tmp_path: Path) -> None:
     metadata_len = int.from_bytes(first_record[:8], "little")
     embedded_metadata = json.loads(first_record[8 : 8 + metadata_len])
 
-    assert manifest["format_version"] == 3
+    assert manifest["format_version"] == 4
     assert embedded_metadata == {"index": 0, "kept": True, "label": "a", "score": 1.5}
 
 

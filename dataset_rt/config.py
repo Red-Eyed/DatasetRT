@@ -117,10 +117,7 @@ RecordCompression: TypeAlias = Annotated[
 ]
 """Closed whole-record policies with codec-specific settings."""
 
-# Keep implicit defaults quiet and retain their historical v3 storage behavior.
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    DEFAULT_SHARD_COMPRESSION = ShardCompression()
+DEFAULT_SHARD_COMPRESSION = Lz4Fast()
 
 
 class WriterProfilerConfig(BaseModel):

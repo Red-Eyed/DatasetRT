@@ -131,7 +131,10 @@ Next: [filter and rebalance samples with Polars](polars-sampling.md) or
 
 ## Control per-sample compression
 
-Use a typed policy to compress the metadata JSON and serialized payload together:
+`WriterConfig()` defaults to `Lz4Fast(acceleration=1)`: a balanced policy that
+compresses each complete record, including metadata and runs of zero bytes.
+Choose HC explicitly when more write effort is acceptable, or disable
+compression explicitly when needed:
 
 ```python
 from dataset_rt import Lz4Fast, Lz4HC, NoCompression, WriterConfig
@@ -145,10 +148,11 @@ Each sample is an independent record. Fast acceleration ranges from 1 to 65537;
 higher values favor faster writes. HC level ranges from 1 to 12; higher values
 increase compression effort. Level 1 still means HC compression, not disabled
 compression. Neither parameter guarantees a target compressed size. Measure
-write throughput and cache size on representative records before rebuilding a
-large cache. Decoding does not require the writer's compression effort setting.
+write throughput, read throughput, and cache size on representative records
+before rebuilding a large cache. Whole-record decoding can affect read throughput. Decoding does not require the writer's compression effort setting.
 
-These policies opt new writes into format v4. Existing `ShardCompression` calls
+Default writes and these typed policies use format v4. Existing
+`ShardCompression` calls
 keep their payload-only v3 layout and warn when explicitly constructed; `ratio`
 is retained for compatibility and never controlled compression. Existing caches
 remain reusable. With `reuse_existing=True`, the writer keeps the existing cache

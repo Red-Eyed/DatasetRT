@@ -10,8 +10,9 @@ All notable changes to DatasetRT are documented here.
   compression policies with Rust-side validation and statically bundled LZ4.
 - New policies write format v4, compressing each complete metadata/payload record
   independently while preserving random access and stable sample identities.
-- Readers support mixed v2/v3/v4 caches. Existing writer calls retain their v3
-  layout and historical compression behavior; no cache rebuild is required.
+- Default new writes to `Lz4Fast(acceleration=1)` for complete-record compression.
+  Readers support mixed v2/v3/v4 caches without changes to old-cache loading.
+  Explicit legacy `ShardCompression` calls retain their v3 layout and behavior.
 
 ### Fixes
 

@@ -165,7 +165,8 @@ block-size limit; unsupported sizes return errors before compression.
 Existing `ShardCompression(...)` configurations retain their v3 payload-only
 behavior and emit a Python deprecation warning when constructed explicitly.
 Their historical `ratio` remains manifest metadata and is never used as a level.
-Implicit defaults retain v3 without warnings. Old caches stay readable without
+The default for new writes is `Lz4Fast(acceleration=1)`, using v4 without a
+deprecation warning. Old caches stay readable without
 rewriting, and a dataset can combine v2, v3, and v4 caches. Older DatasetRT
 releases reject v4. Manifest-only identity migration still targets v3 and leaves
 v4 caches unchanged; it cannot convert record layouts.

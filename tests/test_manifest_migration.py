@@ -27,6 +27,7 @@ from dataset_rt import (
     Err,
     Ok,
     ReaderConfig,
+    ShardCompression,
     WriterConfig,
 )
 
@@ -254,7 +255,11 @@ def test_new_v3_hash_identity(
     result = runtime.write_cache(
         NewSource(),
         tmp_path / "new",
-        writer_config=WriterConfig(num_processes=processes, show_progress=False),
+        writer_config=WriterConfig(
+            num_processes=processes,
+            show_progress=False,
+            shard_compression=ShardCompression(algo="none"),
+        ),
     )[0]
     assert isinstance(result, CacheWriteSuccess)
     current = manifest(result.path)

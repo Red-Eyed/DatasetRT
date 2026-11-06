@@ -7,7 +7,15 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from dataset_rt import CachedDataset, CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig
+from dataset_rt import (
+    CachedDataset,
+    CacheInput,
+    CacheWriteSuccess,
+    DatasetRuntime,
+    NoCompression,
+    ReaderConfig,
+    WriterConfig,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -48,7 +56,11 @@ class IntegritySource:
 
 
 def write_integrity_cache(tmp_path: Path) -> Path:
-    results = RUNTIME.write_cache(IntegritySource(), tmp_path / "cache")
+    results = RUNTIME.write_cache(
+        IntegritySource(),
+        tmp_path / "cache",
+        writer_config=WriterConfig(shard_compression=NoCompression(), show_progress=False),
+    )
     match results[0]:
         case CacheWriteSuccess(path=path):
             return path

@@ -178,14 +178,13 @@ def test_invalid_variants_cannot_fall_back_to_legacy(wire: str) -> None:
         WriterConfig.model_validate_json('{"shard_compression":' + wire + "}")
 
 
-def test_implicit_default_remains_quiet_and_legacy() -> None:
-    """Unmodified integrations keep their historical default without import-time warnings."""
+def test_implicit_default_uses_fast_lz4_without_warnings() -> None:
+    """Omitted compression selects the balanced whole-record policy without warnings."""
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         config = WriterConfig()
     assert not captured
-    assert config.shard_compression.algo == "none"
-    assert isinstance(config.shard_compression, ShardCompression)
+    assert config.shard_compression == Lz4Fast(acceleration=1)
 
 
 @pytest.mark.parametrize("replacement", ['"level": 13', '"level": 9, "acceleration": 1'])
@@ -238,3 +237,29 @@ def test_corrupt_record_size_prefix_is_rejected(tmp_path: Path, runtime: Dataset
     )
     with pytest.raises(ValueError, match="size prefix exceeds"):
         next(iter(dataset))
+
+
+def test_default_compression_shrinks_zeroes(tmp_path: Path, runtime: DatasetRuntime) -> None:
+    """Default writing compresses zero-filled payloads and preserves their complete record."""
+
+    class ZeroSource:
+        name = "zeroes"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Expose one compressible record without selecting an explicit policy."""
+            yield CacheInput(bytes(8192), {"image_path": "/test/zeroes"})
+
+    result = runtime.write_cache(
+        ZeroSource(), tmp_path, writer_config=WriterConfig(show_progress=False)
+    )[0]
+    assert isinstance(result, CacheWriteSuccess)
+    manifest = Manifest.model_validate_json((result.path / "manifest.json").read_text())
+    assert manifest.format_version == 4
+    assert manifest.shards[0].compression == Lz4Fast(acceleration=1)
+    assert manifest.shards[0].byte_len < 8192 // 10
+    dataset = runtime.cached_dataset(
+        [result.path], reader_config=ReaderConfig(seed=7, shuffle=False, validate_cache=True)
+    )
+    sample = next(iter(dataset))
+    assert sample.data == bytes(8192)
+    assert sample.metadata == {"image_path": "/test/zeroes"}
