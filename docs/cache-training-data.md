@@ -137,8 +137,9 @@ Choose HC explicitly when more write effort is acceptable, or disable
 compression explicitly when needed:
 
 ```python
-from dataset_rt import Lz4Fast, Lz4HC, NoCompression, WriterConfig
+from dataset_rt import Brotli, Lz4Fast, Lz4HC, NoCompression, WriterConfig
 
+text = WriterConfig(shard_compression=Brotli(level=5))
 compact = WriterConfig(shard_compression=Lz4HC(level=9))
 fast = WriterConfig(shard_compression=Lz4Fast(acceleration=1))
 plain = WriterConfig(shard_compression=NoCompression())
@@ -158,3 +159,19 @@ is retained for compatibility and never controlled compression. Existing caches
 remain reusable. With `reuse_existing=True`, the writer keeps the existing cache
 and its recorded settings; use a new destination to build a differently
 compressed copy. New v4 caches require an updated reader.
+
+### Optional Brotli for text
+
+`Brotli(level=5)` uses a pure-Rust encoder and decoder. Levels 0–11 are validated
+in Python and Rust; higher levels spend more write effort on compression. Each
+sample remains independently readable, with the metadata JSON and serialized
+payload compressed together. The separate Arrow metadata table remains unchanged.
+A four-byte decoded-size prefix bounds record output before decoding; malformed
+streams and inconsistent lengths return errors.
+
+Brotli is optional and does not replace the fast-LZ4 default. Smaller text records
+do not imply equal read throughput: benchmark your actual data before selecting
+it for training. Its encoder uses portable floating-point calculations for
+reproducible output across supported targets. No system Brotli library is needed.
+Older builds without Brotli support reject its manifest settings; existing
+v2/v3 caches and LZ4 v4 caches remain readable by this release.

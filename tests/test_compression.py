@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from dataset_rt import (
+    Brotli,
     CacheInput,
     CacheWriteSuccess,
     DatasetRuntime,
@@ -85,6 +86,9 @@ def runtime() -> DatasetRuntime:
         Lz4HC(level=1),
         Lz4HC(level=9),
         Lz4HC(level=12),
+        Brotli(level=0),
+        Brotli(level=5),
+        Brotli(level=11),
     ],
 )
 @pytest.mark.parametrize("processes", [0, 2])
@@ -114,7 +118,7 @@ def test_whole_record_round_trip(
         assert dataset.get_item(manifest.cache_id, index).data.startswith(
             index.to_bytes(4, "little")
         )
-    if policy.algo == "lz4":
+    if policy.algo in ("lz4", "brotli"):
         assert sum(shard.byte_len for shard in manifest.shards) < sum(
             shard.uncompressed_byte_len for shard in manifest.shards
         )
@@ -134,6 +138,12 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
         tmp_path,
         writer_config=WriterConfig(shard_compression=Lz4HC(), show_progress=False),
     )[0]
+    brotli_cache = runtime.write_cache(
+        CompressionSource(name="brotli"),
+        tmp_path,
+        writer_config=WriterConfig(shard_compression=Brotli(), show_progress=False),
+    )[0]
+    assert isinstance(brotli_cache, CacheWriteSuccess)
     assert isinstance(legacy, CacheWriteSuccess)
     assert isinstance(modern, CacheWriteSuccess)
     manifest = Manifest.model_validate_json((legacy.path / "manifest.json").read_text())
@@ -142,10 +152,10 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         dataset = runtime.cached_dataset(
-            [legacy.path, modern.path],
+            [legacy.path, modern.path, brotli_cache.path],
             reader_config=ReaderConfig(seed=7, shuffle=False, validate_cache=True),
         )
-        assert len(list(dataset)) == 256
+        assert len(list(dataset)) == 384
     assert not captured
     report = dataset.update_manifests(version=3)
     match report:
@@ -170,6 +180,11 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
         '{"algo":"lz4","mode":"fast","level":9}',
         '{"algo":"none","mode":"none","level":9}',
         '{"algo":"none","mode":"hc","level":9}',
+        '{"algo":"brotli","mode":"brotli","level":-1}',
+        '{"algo":"brotli","mode":"brotli","level":12}',
+        '{"algo":"brotli","mode":"brotli","level":true}',
+        '{"algo":"brotli","mode":"brotli","level":5,"acceleration":1}',
+        '{"algo":"lz4","mode":"brotli","level":5}',
     ],
 )
 def test_invalid_variants_cannot_fall_back_to_legacy(wire: str) -> None:
@@ -222,12 +237,15 @@ def test_record_scope_cannot_be_relabelled_as_v3(tmp_path: Path, runtime: Datase
         runtime.cached_dataset([result.path], reader_config=ReaderConfig(seed=7))
 
 
-def test_corrupt_record_size_prefix_is_rejected(tmp_path: Path, runtime: DatasetRuntime) -> None:
+@pytest.mark.parametrize("policy", [Lz4HC(), Brotli()])
+def test_corrupt_record_size_prefix_is_rejected(
+    tmp_path: Path, runtime: DatasetRuntime, policy: RecordCompression
+) -> None:
     """Reject a corrupt decoded size before allocating a whole-record buffer."""
     result = runtime.write_cache(
         CompressionSource(),
         tmp_path,
-        writer_config=WriterConfig(shard_compression=Lz4HC(), show_progress=False),
+        writer_config=WriterConfig(shard_compression=policy, show_progress=False),
     )[0]
     assert isinstance(result, CacheWriteSuccess)
     with (result.path / "shards" / "000000.bin").open("r+b") as shard:
@@ -263,3 +281,55 @@ def test_default_compression_shrinks_zeroes(tmp_path: Path, runtime: DatasetRunt
     sample = next(iter(dataset))
     assert sample.data == bytes(8192)
     assert sample.metadata == {"image_path": "/test/zeroes"}
+
+
+def test_brotli_text_round_trip(tmp_path: Path, runtime: DatasetRuntime) -> None:
+    """Natural UTF-8 prose is compressed and restored as bytes, including metadata."""
+    text = (
+        "Міська бібліотека працює до восьмої години вечора. "
+        "Читачі можуть повернути книжки та відвідати зустріч з письменницею. "
+        "Для участі у зустрічі потрібно зареєструватися на сайті бібліотеки. "
+        "Працівники бібліотеки підготували нові книжки для дітей та дорослих."
+    ).encode()
+
+    class TextSource:
+        name = "brotli-text"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Supply text directly without pickle, tokenization, or repeated padding."""
+            yield CacheInput(text, {"image_path": "/corpus/document.txt"})
+
+    result = runtime.write_cache(
+        TextSource(),
+        tmp_path,
+        writer_config=WriterConfig(shard_compression=Brotli(), show_progress=False),
+    )[0]
+    assert isinstance(result, CacheWriteSuccess)
+    manifest = Manifest.model_validate_json((result.path / "manifest.json").read_text())
+    assert manifest.shards[0].compression == Brotli(level=5)
+    assert manifest.shards[0].byte_len < manifest.shards[0].uncompressed_byte_len
+    dataset = runtime.cached_dataset(
+        [result.path], reader_config=ReaderConfig(seed=7, shuffle=False, validate_cache=True)
+    )
+    sample = next(iter(dataset))
+    assert sample.data == text
+    assert sample.metadata == {"image_path": "/corpus/document.txt"}
+
+
+@pytest.mark.parametrize("replacement", ['"level": 12', '"level": 5, "acceleration": 1'])
+def test_invalid_brotli_manifest_is_rejected(
+    tmp_path: Path, runtime: DatasetRuntime, replacement: str
+) -> None:
+    """Rust rejects unsupported Brotli parameters before returning a dataset."""
+    result = runtime.write_cache(
+        CompressionSource(),
+        tmp_path,
+        writer_config=WriterConfig(shard_compression=Brotli(), show_progress=False),
+    )[0]
+    assert isinstance(result, CacheWriteSuccess)
+    path = result.path / "manifest.json"
+    original = path.read_text()
+    assert '"level": 5' in original
+    path.write_text(original.replace('"level": 5', replacement))
+    with pytest.raises(RuntimeError):
+        runtime.cached_dataset([result.path], reader_config=ReaderConfig(seed=7))

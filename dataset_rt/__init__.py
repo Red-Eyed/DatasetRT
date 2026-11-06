@@ -1,5 +1,6 @@
 from dataset_rt.api import (
     AbsentManifestTarget,
+    Brotli,
     CachedDataset,
     CachedSample,
     CacheInput,
@@ -29,6 +30,7 @@ from dataset_rt.api import (
 )
 
 __all__ = [
+    "Brotli",
     "CacheInput",
     "CacheSource",
     "CacheSourcesDatasetError",

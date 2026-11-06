@@ -1,8 +1,10 @@
+mod brotli;
+
 use lz4_flex::block::{compress_into, decompress_into, get_maximum_output_size};
 
 use crate::types::{native_result, CacheError, CacheResult, CompressionAlgo, ShardCompression};
 
-/// Reject payload lengths that cannot round-trip through the LZ4 u32 size prefix.
+/// Dispatch validated policies while preserving legacy and whole-record codec envelopes.
 pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheResult<Vec<u8>> {
     match compression {
         ShardCompression::None
@@ -10,6 +12,7 @@ pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheR
             algo: CompressionAlgo::None,
             ..
         }) => Ok(data),
+        ShardCompression::Brotli { level } => brotli::compress(data, *level),
         ShardCompression::Lz4Fast { acceleration } => {
             compress_record(data, lz4::block::CompressionMode::FAST(*acceleration))
         }
@@ -72,6 +75,23 @@ fn byte_buffer(len: usize) -> CacheResult<Vec<u8>> {
 
 /// Validate compression envelopes before decoding into a fallibly allocated buffer.
 pub fn decompress_payload(
+    data: &[u8],
+    compression: &ShardCompression,
+    max_uncompressed_len: u64,
+) -> CacheResult<Vec<u8>> {
+    match compression {
+        ShardCompression::Brotli { .. } => brotli::decompress(data, max_uncompressed_len),
+        ShardCompression::Legacy(_)
+        | ShardCompression::None
+        | ShardCompression::Lz4Fast { .. }
+        | ShardCompression::Lz4HC { .. } => {
+            decompress_lz4_or_plain(data, compression, max_uncompressed_len)
+        }
+    }
+}
+
+/// Keep legacy LZ4 framing separate from the Brotli stream decoder.
+fn decompress_lz4_or_plain(
     data: &[u8],
     compression: &ShardCompression,
     max_uncompressed_len: u64,

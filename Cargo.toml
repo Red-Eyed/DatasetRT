@@ -1,6 +1,6 @@
 [package]
 name = "dataset_rt"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Rust-powered dataset cache for Python with fast sample reads and separate metadata for analysis, filtering, and weighted sampling"
 license = "MIT"
@@ -31,6 +31,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
 lz4 = "1.28.1"
+brotli = { version = "9.1.1", features = ["portable-float", "disallow_large_window_size"] }
 
 [profile.release]
 # Preserve Mach-O LINKEDIT alignment: https://github.com/rust-lang/rust/issues/157750

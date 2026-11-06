@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.1
+
+### Improvements
+
+- Add optional `Brotli(level=5)` whole-record compression using the pure-Rust
+  encoder and decoder, with validated levels 0–11 and bounded decoded output.
+  Fast LZ4 remains the default; existing metadata layout and caches are preserved.
+
 ## 0.5.0
 
 ### Improvements

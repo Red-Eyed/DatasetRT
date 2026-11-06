@@ -236,6 +236,15 @@ Metadata columns are included for ergonomic filtering and auditing. They are not
 
 _Generated from public docstrings behind the `dataset_rt.api` facade._
 
+### `Brotli`
+
+Compress independent complete records with the pure-Rust Brotli codec.
+
+Fields:
+- `algo: Literal['brotli']`: Persist the Brotli stream codec discriminator.
+- `mode: Literal['brotli']`: Select the Brotli variant independently of LZ4 settings.
+- `level: int`: Accept 0–11; higher values spend more write effort seeking smaller output.
+
 ### `CacheInput`
 
 One sample yielded by a `CacheSource`.
@@ -768,7 +777,7 @@ Fields:
 
 ```python
 RecordCompression = Annotated[
-    NoCompression | Lz4Fast | Lz4HC, Field(discriminator="mode")
+    NoCompression | Lz4Fast | Lz4HC | Brotli, Field(discriminator="mode")
 ]
 ```
 

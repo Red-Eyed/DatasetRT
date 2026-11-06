@@ -9,6 +9,7 @@ from dataset_rt.config import (
 from dataset_rt.config import (
     DEFAULT_WRITER_PROFILER_CONFIG as DEFAULT_WRITER_PROFILER_CONFIG,
 )
+from dataset_rt.config import Brotli as Brotli
 from dataset_rt.config import (
     CompressionAlgo as CompressionAlgo,
 )

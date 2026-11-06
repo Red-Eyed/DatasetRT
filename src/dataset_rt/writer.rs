@@ -524,6 +524,13 @@ fn extract_shard_compression(value: &Bound<'_, PyAny>) -> CacheResult<ShardCompr
             let mode = mode.extract::<String>().map_err(py_error)?;
             match (algo, mode.as_str()) {
                 (CompressionAlgo::None, "none") => Ok(ShardCompression::None),
+                (CompressionAlgo::Brotli, "brotli") => ShardCompression::brotli(
+                    value
+                        .getattr("level")
+                        .map_err(py_error)?
+                        .extract::<i32>()
+                        .map_err(py_error)?,
+                ),
                 (CompressionAlgo::Lz4, "fast") => ShardCompression::fast(
                     value
                         .getattr("acceleration")

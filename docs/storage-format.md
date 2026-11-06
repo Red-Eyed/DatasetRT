@@ -137,7 +137,7 @@ For v2/v3, compression is applied per indexed payload, after the redundant metad
 
 ### Format v4: complete-record compression
 
-Explicit `NoCompression`, `Lz4Fast`, and `Lz4HC` policies write format v4.
+Typed `NoCompression`, `Lz4Fast`, `Lz4HC`, and `Brotli` policies write format v4.
 The logical record remains an eight-byte metadata length, metadata JSON, then
 payload bytes. LZ4 compresses that entire record as one independent block, with
 a four-byte little-endian decoded-length prefix. `NoCompression` writes the
@@ -150,8 +150,13 @@ V4 compression settings are typed variants:
 - `{ "algo": "none", "mode": "none" }`
 - `{ "algo": "lz4", "mode": "fast", "acceleration": 1 }`
 - `{ "algo": "lz4", "mode": "hc", "level": 9 }`
+- `{ "algo": "brotli", "mode": "brotli", "level": 5 }`
 
 Fast acceleration accepts integers 1–65537; HC levels accept integers 1–12.
+Brotli accepts levels 0–11. Brotli records contain a four-byte little-endian
+decoded-length prefix followed by a standard Brotli stream of the complete
+logical record. The decoder writes into an exactly bounded output buffer and
+requires the actual decoded length to match the prefix.
 Higher acceleration favors write speed; higher HC levels increase compression
 effort. No setting promises a particular size ratio. The reader uses the same
 standard LZ4 block decoder for both compressed modes. Compression mode, record

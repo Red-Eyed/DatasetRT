@@ -160,6 +160,7 @@ impl NumWorkers {
 pub enum CompressionAlgo {
     None,
     Lz4,
+    Brotli,
 }
 
 impl CompressionAlgo {
@@ -167,6 +168,7 @@ impl CompressionAlgo {
         match value {
             "none" => Ok(Self::None),
             "lz4" => Ok(Self::Lz4),
+            "brotli" => Ok(Self::Brotli),
             _ => Err(CacheError::InvalidInput(format!(
                 "unsupported shard compression algorithm '{value}'"
             ))),
@@ -189,6 +191,7 @@ pub enum ShardCompression {
     None,
     Lz4Fast { acceleration: i32 },
     Lz4HC { level: i32 },
+    Brotli { level: i32 },
 }
 
 /// Modern wire modes reject parameters belonging to other variants.
@@ -198,6 +201,7 @@ enum RecordOptions {
     None,
     Fast { acceleration: i32 },
     Hc { level: i32 },
+    Brotli { level: i32 },
 }
 
 /// Parse historical and modern settings once, without guessing from numeric values.
@@ -215,6 +219,11 @@ enum CompressionWire {
 impl ShardCompression {
     /// Preserve legacy ratios as metadata while validating their historical contract.
     pub fn new(algo: CompressionAlgo, ratio: f64) -> CacheResult<Self> {
+        if algo == CompressionAlgo::Brotli {
+            return Err(CacheError::InvalidInput(
+                "Brotli requires the typed whole-record policy".to_string(),
+            ));
+        }
         if !ratio.is_finite() || ratio <= 0.0 {
             return Err(CacheError::InvalidInput(
                 "shard_compression.ratio must be positive and finite".to_string(),
@@ -248,12 +257,22 @@ impl ShardCompression {
         Ok(Self::Lz4HC { level })
     }
 
+    /// Reject unsupported effort levels before codec allocation or manifest acceptance.
+    pub fn brotli(level: i32) -> CacheResult<Self> {
+        if !(0..=11).contains(&level) {
+            return Err(CacheError::InvalidInput(
+                "Brotli level must be between 0 and 11".to_string(),
+            ));
+        }
+        Ok(Self::Brotli { level })
+    }
+
     /// Only explicit modern variants change the on-disk record scope.
     pub fn whole_record(&self) -> bool {
         !matches!(self, Self::Legacy(_))
     }
 
-    /// All LZ4 modes share the standard block decoder.
+    /// Uncompressed variants bypass codec allocation.
     pub fn compressed(&self) -> bool {
         !matches!(
             self,
@@ -280,6 +299,10 @@ impl Serialize for ShardCompression {
                 options: RecordOptions::Fast {
                     acceleration: *acceleration,
                 },
+            },
+            Self::Brotli { level } => CompressionWire::Record {
+                algo: CompressionAlgo::Brotli,
+                options: RecordOptions::Brotli { level: *level },
             },
             Self::Lz4HC { level } => CompressionWire::Record {
                 algo: CompressionAlgo::Lz4,
@@ -308,6 +331,10 @@ impl<'de> Deserialize<'de> for ShardCompression {
                 algo: CompressionAlgo::Lz4,
                 options: RecordOptions::Hc { level },
             } => Self::hc(level),
+            CompressionWire::Record {
+                algo: CompressionAlgo::Brotli,
+                options: RecordOptions::Brotli { level },
+            } => Self::brotli(level),
             _ => Err(CacheError::InvalidInput(
                 "compression algorithm and mode disagree".to_string(),
             )),

@@ -59,12 +59,13 @@ class ShardCompression(BaseModel):
                     value
                 ):
                     raise ValueError(
-                        "compression options belong to NoCompression, Lz4Fast, or Lz4HC"
+                        "compression options belong to NoCompression, Lz4Fast, Lz4HC, or Brotli"
                     )
         result = handler(value)
         warnings.warn(
             "ShardCompression is deprecated; use NoCompression(), Lz4Fast(acceleration=1), "
-            "or Lz4HC(level=9). Legacy ratio never controlled compression and remains ignored. "
+            "Lz4HC(level=9), or Brotli(level=5). "
+            "Legacy ratio never controlled compression and remains ignored. "
             "Legacy calls write payload-only v3 caches; new variants write whole-record v4 caches.",
             DeprecationWarning,
             stacklevel=3,
@@ -106,14 +107,27 @@ class Lz4HC(BaseModel):
     """Accept 1–12; higher values increase HC compression effort."""
 
 
+class Brotli(BaseModel):
+    """Compress independent complete records with the pure-Rust Brotli codec."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algo: Literal["brotli"] = "brotli"
+    """Persist the Brotli stream codec discriminator."""
+    mode: Literal["brotli"] = "brotli"
+    """Select the Brotli variant independently of LZ4 settings."""
+    level: int = Field(default=5, ge=0, le=11, strict=True)
+    """Accept 0–11; higher values spend more write effort seeking smaller output."""
+
+
 # Resolve variant annotations before assigning their stable public pickle paths.
 NoCompression.__module__ = "dataset_rt.api"
 Lz4Fast.__module__ = "dataset_rt.api"
 Lz4HC.__module__ = "dataset_rt.api"
+Brotli.__module__ = "dataset_rt.api"
 
 
 RecordCompression: TypeAlias = Annotated[
-    NoCompression | Lz4Fast | Lz4HC, Field(discriminator="mode")
+    NoCompression | Lz4Fast | Lz4HC | Brotli, Field(discriminator="mode")
 ]
 """Closed whole-record policies with codec-specific settings."""
 
