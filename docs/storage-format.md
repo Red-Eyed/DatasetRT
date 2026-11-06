@@ -19,7 +19,7 @@ cache/
 The manifest records:
 
 - Format version.
-- Persistent integer `cache_id` in format v3.
+- Persistent integer `cache_id` in formats v3 and v4.
 - Source name.
 - Sample count.
 - Metadata schema.
@@ -117,7 +117,7 @@ Keep published cache files immutable while readers are alive.
 
 Shard files contain concatenated sample records. The index is the authority for locating each record.
 
-Each indexed record stores:
+In formats v2/v3, each indexed record stores:
 
 - Metadata JSON byte length as a little-endian unsigned 64-bit value.
 - Metadata JSON object.
@@ -130,10 +130,45 @@ Each shard manifest entry records:
 - `name`
 - `uncompressed_byte_len`
 - `byte_len`
-- `compression`: `{ "algo": "none", "ratio": 1.0 }` or `{ "algo": "lz4", "ratio": ... }`
+- `compression`: legacy `{ "algo": "none", "ratio": 1.0 }` / `{ "algo": "lz4", "ratio": ... }`, or a v4 mode described below.
 - `sha256`
 
-Compression is applied per indexed payload, after the redundant metadata envelope. `index.bin` offsets and byte lengths point to full sample records in the shard. Readers parse the metadata envelope, validate it against `metadata.arrow`, and then decompress the single addressed payload before returning sample bytes.
+For v2/v3, compression is applied per indexed payload, after the redundant metadata envelope. `index.bin` offsets and byte lengths point to full sample records in the shard. Readers parse the metadata envelope, validate it against `metadata.arrow`, and then decompress the single addressed payload before returning sample bytes.
+
+### Format v4: complete-record compression
+
+Explicit `NoCompression`, `Lz4Fast`, and `Lz4HC` policies write format v4.
+The logical record remains an eight-byte metadata length, metadata JSON, then
+payload bytes. LZ4 compresses that entire record as one independent block, with
+a four-byte little-endian decoded-length prefix. `NoCompression` writes the
+logical record directly. Index offsets and lengths address the stored record;
+reading one sample never requires decoding adjacent samples or a whole shard.
+The metadata copy in `metadata.arrow` remains available for columnar queries.
+
+V4 compression settings are typed variants:
+
+- `{ "algo": "none", "mode": "none" }`
+- `{ "algo": "lz4", "mode": "fast", "acceleration": 1 }`
+- `{ "algo": "lz4", "mode": "hc", "level": 9 }`
+
+Fast acceleration accepts integers 1–65537; HC levels accept integers 1–12.
+Higher acceleration favors write speed; higher HC levels increase compression
+effort. No setting promises a particular size ratio. The reader uses the same
+standard LZ4 block decoder for both compressed modes. Compression mode, record
+scope, and manifest version must agree, or the cache is rejected.
+
+For v4, `uncompressed_byte_len` sums complete logical record bytes, including
+metadata envelopes. In v2/v3 it sums payload bytes only. `byte_len` always counts
+actual stored shard bytes. LZ4 input records must fit the backend's validated
+block-size limit; unsupported sizes return errors before compression.
+
+Existing `ShardCompression(...)` configurations retain their v3 payload-only
+behavior and emit a Python deprecation warning when constructed explicitly.
+Their historical `ratio` remains manifest metadata and is never used as a level.
+Implicit defaults retain v3 without warnings. Old caches stay readable without
+rewriting, and a dataset can combine v2, v3, and v4 caches. Older DatasetRT
+releases reject v4. Manifest-only identity migration still targets v3 and leaves
+v4 caches unchanged; it cannot convert record layouts.
 
 ## Integrity
 

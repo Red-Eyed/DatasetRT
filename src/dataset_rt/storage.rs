@@ -18,7 +18,7 @@ use crate::types::{
     MetadataValue, ShardCompression,
 };
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 mod index;
 mod manifest;
 pub mod migration;
@@ -109,26 +109,16 @@ impl LoadedCache {
         record.resize(byte_len, 0);
         reader.seek(std::io::SeekFrom::Start(entry.offset))?;
         reader.read_exact(&mut record)?;
-        let (embedded_metadata, stored_payload) =
-            split_sample_record(&record, &self.manifest.fields().metadata_schema)?;
+        let sample = decode_stored_record(record, &self.manifest, shard)?;
         if self.validate_embedded_metadata {
             self.with_metadata_rows(|metadata_rows| {
                 let metadata = metadata_rows.get(sample_index).ok_or_else(|| {
                     CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
                 })?;
-                validate_redundant_metadata(metadata, &embedded_metadata, sample_index)
+                validate_redundant_metadata(metadata, &sample.metadata, sample_index)
             })?;
         }
-        let data = decompress_payload(
-            stored_payload,
-            &shard.compression,
-            shard.uncompressed_byte_len,
-        )?;
-
-        Ok(CacheSample {
-            data,
-            metadata: embedded_metadata,
-        })
+        Ok(sample)
     }
 
     /// Lazily load `metadata.arrow` for validation or compatibility paths that need full rows.
@@ -300,15 +290,12 @@ impl CacheBuilder {
         let metadata_started_at = Instant::now();
         let metadata_row = self.validate_metadata(metadata)?;
         let metadata_validate = metadata_started_at.elapsed();
-        let uncompressed_byte_len = u64::try_from(data.len()).map_err(|_| {
-            CacheError::InvalidInput("payload byte length does not fit in u64".to_string())
-        })?;
-        let compression_started_at = Instant::now();
-        let stored_payload = compress_payload(data, &self.shard_compression)?;
-        let compression = compression_started_at.elapsed();
-        let record_started_at = Instant::now();
-        let record = encode_sample_record(&stored_payload, &self.schema, &metadata_row)?;
-        let record_encode = record_started_at.elapsed();
+        let EncodedRecord {
+            bytes: record,
+            uncompressed_byte_len,
+            compression,
+            record_encode,
+        } = encode_stored_record(data, &self.schema, &metadata_row, &self.shard_compression)?;
         let stored_byte_len = u64::try_from(record.len()).map_err(|_| {
             CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
         })?;
@@ -349,7 +336,7 @@ impl CacheBuilder {
         let index_started_at = Instant::now();
         let index_sha256 = write_index_file(&self.path, &self.index)?;
         let index = index_started_at.elapsed();
-        let manifest = Manifest::V3(ManifestV3 {
+        let manifest_data = ManifestV3 {
             cache_id: cache_id_from_name(&self.source_name),
             fields: ManifestFields {
                 source_name: self.source_name,
@@ -360,7 +347,12 @@ impl CacheBuilder {
                 shards: self.shards,
                 extra: BTreeMap::new(),
             },
-        });
+        };
+        let manifest = if self.shard_compression.whole_record() {
+            Manifest::V4(manifest_data)
+        } else {
+            Manifest::V3(manifest_data)
+        };
         // The manifest is the publication marker: readers reject caches until it exists.
         let manifest_started_at = Instant::now();
         write_manifest(&self.path, &manifest)?;
@@ -816,6 +808,78 @@ fn build_array(
 fn metadata_cell(row: &[MetadataValue], column_index: usize) -> CacheResult<&MetadataValue> {
     row.get(column_index)
         .ok_or_else(|| CacheError::InvalidInput("metadata column is out of range".to_string()))
+}
+
+/// One bounded encoded record retains timing and size counters for its actual codec input.
+struct EncodedRecord {
+    bytes: Vec<u8>,
+    uncompressed_byte_len: u64,
+    compression: Duration,
+    record_encode: Duration,
+}
+
+/// Preserve legacy byte layout while compressing the complete envelope for modern policies.
+fn encode_stored_record(
+    data: Vec<u8>,
+    schema: &[MetadataField],
+    metadata: &[MetadataValue],
+    compression: &ShardCompression,
+) -> CacheResult<EncodedRecord> {
+    if compression.whole_record() {
+        let started = Instant::now();
+        let record = encode_sample_record(&data, schema, metadata)?;
+        drop(data);
+        let record_encode = started.elapsed();
+        let uncompressed_byte_len = u64::try_from(record.len())
+            .map_err(|_| CacheError::InvalidInput("record length does not fit u64".to_string()))?;
+        let started = Instant::now();
+        let bytes = compress_payload(record, compression)?;
+        return Ok(EncodedRecord {
+            bytes,
+            uncompressed_byte_len,
+            record_encode,
+            compression: started.elapsed(),
+        });
+    }
+    let uncompressed_byte_len = u64::try_from(data.len())
+        .map_err(|_| CacheError::InvalidInput("payload length does not fit u64".to_string()))?;
+    let started = Instant::now();
+    let payload = compress_payload(data, compression)?;
+    let compression_time = started.elapsed();
+    let started = Instant::now();
+    let bytes = encode_sample_record(&payload, schema, metadata)?;
+    Ok(EncodedRecord {
+        bytes,
+        uncompressed_byte_len,
+        compression: compression_time,
+        record_encode: started.elapsed(),
+    })
+}
+
+/// Decode from the manifest-selected scope; remove v4 envelopes without a second payload allocation.
+fn decode_stored_record(
+    record: Vec<u8>,
+    manifest: &Manifest,
+    shard: &ShardManifest,
+) -> CacheResult<CacheSample> {
+    let schema = &manifest.fields().metadata_schema;
+    if manifest.whole_record() {
+        let mut decoded = if shard.compression.compressed() {
+            decompress_payload(&record, &shard.compression, shard.uncompressed_byte_len)?
+        } else {
+            record
+        };
+        let (metadata, payload) = split_sample_record(&decoded, schema)?;
+        let envelope_len = decoded.len() - payload.len();
+        decoded.drain(..envelope_len);
+        return Ok(CacheSample {
+            data: decoded,
+            metadata,
+        });
+    }
+    let (metadata, payload) = split_sample_record(&record, schema)?;
+    let data = decompress_payload(payload, &shard.compression, shard.uncompressed_byte_len)?;
+    Ok(CacheSample { data, metadata })
 }
 
 fn encode_sample_record(

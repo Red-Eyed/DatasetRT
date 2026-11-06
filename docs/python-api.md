@@ -738,17 +738,49 @@ Fields:
 - `shuffle: bool`: Whether future iterators use deterministic weighted sampling.
 - `validate_cache: bool`: Whether cache checksums are verified while loading metadata and indexes.
 
+### `Lz4Fast`
+
+Compress complete records with LZ4; higher acceleration favors write speed.
+
+Fields:
+- `algo: Literal['lz4']`: Persist the standard LZ4 block codec discriminator.
+- `mode: Literal['fast']`: Select the fast encoder with acceleration control.
+- `acceleration: int`: Accept 1–65537; higher values favor faster compression.
+
+### `Lz4HC`
+
+Compress complete records with LZ4 HC; higher levels increase compression effort.
+
+Fields:
+- `algo: Literal['lz4']`: Persist the standard LZ4 block codec discriminator.
+- `mode: Literal['hc']`: Select the high-compression encoder with effort-level control.
+- `level: int`: Accept 1–12; higher values increase HC compression effort.
+
+### `NoCompression`
+
+Write independent uncompressed records using the v4 record layout.
+
+Fields:
+- `algo: Literal['none']`: Persist an explicit uncompressed codec discriminator.
+- `mode: Literal['none']`: Select the uncompressed whole-record variant.
+
+### `RecordCompression`
+
+```python
+RecordCompression = Annotated[
+    NoCompression | Lz4Fast | Lz4HC, Field(discriminator="mode")
+]
+```
+
+Closed whole-record policies with codec-specific settings.
+
 ### `ShardCompression`
 
-Compression policy requested for payload shards.
-
-`ratio` is part of the explicit policy object so callers and manifests use
-the same structured shape. `ratio` is advisory metadata for compressed
-algorithms; Rust validates `algo="none"` with `ratio == 1.0`.
+Deprecated payload-only policy retained for existing writers and saved configs.
 
 Fields:
 - `algo: CompressionAlgo`: Compression algorithm to apply independently to each payload record.
-- `ratio: float`: Expected compression ratio; `algo='none'` requires exactly `1.0`.
+- `ratio: float`: Deprecated legacy metadata; this value never controlled compression.
 
 ### `SizedTorchIterableDataset`
 
@@ -771,7 +803,7 @@ Fields:
 - `process_timeout_seconds: float`: Deadline in seconds for child startup or a dispatched source, including deserialization. Timeout stops the pool without retries; ignored in serial mode.
 - `prefetch_size: int`: Maximum number of writer tasks/results buffered by Rust.
 - `max_shard_bytes: int`: Target shard byte size before Rust rotates to a new shard.
-- `shard_compression: ShardCompression`: Per-record payload compression policy for new shards.
+- `shard_compression: RecordCompression | ShardCompression`: Whole-record compression variants, or the deprecated payload-only policy.
 - `show_progress: bool`: Whether Rust renders cache write progress with samples/s and MB/s.
 - `validate_cache: bool`: Whether reused existing caches are checksum-validated before loading.
 - `profiler: WriterProfilerConfig`: Optional JSON writer-stage profiler configuration.

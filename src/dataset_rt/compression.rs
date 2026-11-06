@@ -4,9 +4,19 @@ use crate::types::{native_result, CacheError, CacheResult, CompressionAlgo, Shar
 
 /// Reject payload lengths that cannot round-trip through the LZ4 u32 size prefix.
 pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheResult<Vec<u8>> {
-    match compression.algo {
-        CompressionAlgo::None => Ok(data),
-        CompressionAlgo::Lz4 => {
+    match compression {
+        ShardCompression::None
+        | ShardCompression::Legacy(crate::types::LegacyCompression {
+            algo: CompressionAlgo::None,
+            ..
+        }) => Ok(data),
+        ShardCompression::Lz4Fast { acceleration } => {
+            compress_record(data, lz4::block::CompressionMode::FAST(*acceleration))
+        }
+        ShardCompression::Lz4HC { level } => {
+            compress_record(data, lz4::block::CompressionMode::HIGHCOMPRESSION(*level))
+        }
+        ShardCompression::Legacy(_) => {
             let len = u32::try_from(data.len()).map_err(|_| {
                 CacheError::InvalidInput("LZ4 payload exceeds u32 size-prefix limit".to_string())
             })?;
@@ -32,6 +42,22 @@ pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheR
     }
 }
 
+/// Encode a complete record with a validated upstream mode into a caller-owned buffer.
+fn compress_record(data: Vec<u8>, mode: lz4::block::CompressionMode) -> CacheResult<Vec<u8>> {
+    let capacity = lz4::block::compress_bound(data.len())
+        .map_err(|error| CacheError::InvalidInput(format!("LZ4 record input rejected: {error}")))?
+        .checked_add(4)
+        .ok_or_else(|| CacheError::InvalidInput("LZ4 record capacity overflow".to_string()))?;
+    let mut output = byte_buffer(capacity)?;
+    let written = native_result("LZ4 record compression", || {
+        lz4::block::compress_to_buffer(&data, Some(mode), true, &mut output).map_err(|error| {
+            CacheError::InvalidInput(format!("failed to compress LZ4 record: {error}"))
+        })
+    })?;
+    output.truncate(written);
+    Ok(output)
+}
+
 /// Allocate through a fallible reservation before initializing payload bytes.
 fn byte_buffer(len: usize) -> CacheResult<Vec<u8>> {
     let mut output = Vec::new();
@@ -50,8 +76,8 @@ pub fn decompress_payload(
     compression: &ShardCompression,
     max_uncompressed_len: u64,
 ) -> CacheResult<Vec<u8>> {
-    match compression.algo {
-        CompressionAlgo::None => {
+    match compression.compressed() {
+        false => {
             let mut output = Vec::new();
             output.try_reserve_exact(data.len()).map_err(|error| {
                 CacheError::NativeFailure(format!("cannot allocate payload buffer: {error}"))
@@ -59,7 +85,7 @@ pub fn decompress_payload(
             output.extend_from_slice(data);
             Ok(output)
         }
-        CompressionAlgo::Lz4 => {
+        true => {
             let (prefix, body) = data.split_at_checked(4).ok_or_else(|| {
                 CacheError::InvalidCache("LZ4 payload is missing its size prefix".to_string())
             })?;
@@ -112,6 +138,37 @@ mod tests {
         }
         assert!(decompress_payload(&[0, 1], &compression, 0).is_err());
         assert!(byte_buffer(usize::MAX).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod record_mode_tests {
+    use super::*;
+
+    /// Independent mode blocks remain decodable after typed manifest round-trips.
+    #[test]
+    fn record_modes_round_trip_through_wire_settings() -> CacheResult<()> {
+        let data = b"{\"image_path\":\"/repeated/path\"}serialized-token-data".repeat(256);
+        for mode in [
+            ShardCompression::None,
+            ShardCompression::fast(1)?,
+            ShardCompression::fast(65_537)?,
+            ShardCompression::hc(1)?,
+            ShardCompression::hc(12)?,
+        ] {
+            let wire = serde_json::to_vec(&mode)?;
+            let decoded_mode: ShardCompression = serde_json::from_slice(&wire)?;
+            let compressed = compress_payload(data.clone(), &decoded_mode)?;
+            assert_eq!(
+                decompress_payload(&compressed, &decoded_mode, data.len() as u64)?,
+                data
+            );
+        }
+        assert!(ShardCompression::fast(0).is_err());
+        assert!(ShardCompression::fast(65_538).is_err());
+        assert!(ShardCompression::hc(0).is_err());
+        assert!(ShardCompression::hc(13).is_err());
         Ok(())
     }
 }

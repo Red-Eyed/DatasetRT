@@ -12,9 +12,13 @@ from dataset_rt.config import (
 from dataset_rt.config import (
     CompressionAlgo as CompressionAlgo,
 )
+from dataset_rt.config import Lz4Fast as Lz4Fast
+from dataset_rt.config import Lz4HC as Lz4HC
+from dataset_rt.config import NoCompression as NoCompression
 from dataset_rt.config import (
     ReaderConfig as ReaderConfig,
 )
+from dataset_rt.config import RecordCompression as RecordCompression
 from dataset_rt.config import (
     ShardCompression as ShardCompression,
 )

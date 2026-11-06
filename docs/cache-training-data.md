@@ -128,3 +128,29 @@ yielding would defeat that memory boundary.
 
 Next: [filter and rebalance samples with Polars](polars-sampling.md) or
 [build a PyTorch DataLoader](pytorch-dataloader.md).
+
+## Control per-sample compression
+
+Use a typed policy to compress the metadata JSON and serialized payload together:
+
+```python
+from dataset_rt import Lz4Fast, Lz4HC, NoCompression, WriterConfig
+
+compact = WriterConfig(shard_compression=Lz4HC(level=9))
+fast = WriterConfig(shard_compression=Lz4Fast(acceleration=1))
+plain = WriterConfig(shard_compression=NoCompression())
+```
+
+Each sample is an independent record. Fast acceleration ranges from 1 to 65537;
+higher values favor faster writes. HC level ranges from 1 to 12; higher values
+increase compression effort. Level 1 still means HC compression, not disabled
+compression. Neither parameter guarantees a target compressed size. Measure
+write throughput and cache size on representative records before rebuilding a
+large cache. Decoding does not require the writer's compression effort setting.
+
+These policies opt new writes into format v4. Existing `ShardCompression` calls
+keep their payload-only v3 layout and warn when explicitly constructed; `ratio`
+is retained for compatibility and never controlled compression. Existing caches
+remain reusable. With `reuse_existing=True`, the writer keeps the existing cache
+and its recorded settings; use a new destination to build a differently
+compressed copy. New v4 caches require an updated reader.

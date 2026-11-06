@@ -1,4 +1,4 @@
-//! Version-specific wire records; every v3 manifest structurally owns a cache ID.
+//! Versioned records retain legacy identities and distinguish whole-record compression.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +29,7 @@ pub struct ManifestV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-/// Current wire shape cannot exist without an unsigned persistent cache ID.
+/// Persistent-identity wire shape shared by v3 and v4 record layouts.
 pub struct ManifestV3 {
     pub cache_id: u64,
     #[serde(flatten)]
@@ -41,6 +41,7 @@ pub struct ManifestV3 {
 pub enum Manifest {
     V2(ManifestV2),
     V3(ManifestV3),
+    V4(ManifestV3),
 }
 
 impl Manifest {
@@ -48,19 +49,24 @@ impl Manifest {
     pub fn fields(&self) -> &ManifestFields {
         match self {
             Self::V2(manifest) => &manifest.fields,
-            Self::V3(manifest) => &manifest.fields,
+            Self::V3(manifest) | Self::V4(manifest) => &manifest.fields,
         }
+    }
+
+    /// Only v4 encloses metadata and payload in the same compression block.
+    pub fn whole_record(&self) -> bool {
+        matches!(self, Self::V4(_))
     }
 
     /// Resolve legacy positions only for v2; persisted identities are authoritative in v3.
     pub fn resolve_cache_id(&self, position: usize) -> CacheResult<CacheId> {
         match self {
             Self::V2(_) => CacheId::from_position(position),
-            Self::V3(manifest) => Ok(CacheId::from_u64(manifest.cache_id)),
+            Self::V3(manifest) | Self::V4(manifest) => Ok(CacheId::from_u64(manifest.cache_id)),
         }
     }
 
-    /// Preserve common data while making the upgraded identity structurally required.
+    /// Upgrade legacy identity without downgrading a newer record layout.
     pub fn into_v3(self, cache_id: u64) -> Self {
         match self {
             Self::V2(mut manifest) => {
@@ -72,6 +78,7 @@ impl Manifest {
                 })
             }
             Self::V3(manifest) => Self::V3(manifest),
+            Self::V4(manifest) => Self::V4(manifest),
         }
     }
 }
@@ -89,6 +96,11 @@ impl Serialize for Manifest {
         match self {
             Self::V2(manifest) => Versioned {
                 format_version: 2,
+                data: manifest,
+            }
+            .serialize(serializer),
+            Self::V4(manifest) => Versioned {
+                format_version: super::FORMAT_VERSION,
                 data: manifest,
             }
             .serialize(serializer),
@@ -111,17 +123,31 @@ impl<'de> Deserialize<'de> for Manifest {
             .and_then(|value| value.as_u64())
             .ok_or_else(|| D::Error::custom("manifest requires integer format_version"))?;
         let body = Value::Object(fields.into_iter().collect());
-        match version {
+        let manifest = match version {
             2 => serde_json::from_value(body)
                 .map(Self::V2)
                 .map_err(D::Error::custom),
             3 => serde_json::from_value(body)
                 .map(Self::V3)
                 .map_err(D::Error::custom),
+            4 => serde_json::from_value(body)
+                .map(Self::V4)
+                .map_err(D::Error::custom),
             _ => Err(D::Error::custom(format!(
                 "unsupported format version {version}"
             ))),
+        }?;
+        if manifest
+            .fields()
+            .shards
+            .iter()
+            .any(|shard| shard.compression.whole_record() != manifest.whole_record())
+        {
+            return Err(D::Error::custom(
+                "compression scope disagrees with manifest format version",
+            ));
         }
+        Ok(manifest)
     }
 }
 

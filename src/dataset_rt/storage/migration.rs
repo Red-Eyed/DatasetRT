@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
-use super::{LoadedCache, Manifest, FORMAT_VERSION};
+use super::{LoadedCache, Manifest};
 use crate::types::{CacheError, CacheResult};
 
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
@@ -49,7 +49,7 @@ fn update_with_hook(
     version: u32,
     mut hook: impl FnMut(Step, &Path) -> CacheResult<()>,
 ) -> Result<Vec<UpdateEntry>, UpdateError> {
-    if version != FORMAT_VERSION {
+    if version != 3 {
         return Err(UpdateError {
             path: None,
             message: format!("unsupported manifest migration target {version}; expected 3"),
@@ -124,17 +124,20 @@ fn inspect_target(
     }
     let bytes = fs::read(&path)?;
     let current: Manifest = serde_json::from_slice(&bytes)?;
-    if matches!(&current, Manifest::V3(manifest) if manifest.cache_id != cache_id) {
+    if matches!(&current, Manifest::V3(manifest) | Manifest::V4(manifest) if manifest.cache_id != cache_id)
+    {
         return Err(CacheError::InvalidCache(
             "manifest cache_id changed since dataset construction".to_string(),
         ));
     }
-    if matches!(cache.manifest, Manifest::V3(_)) && matches!(current, Manifest::V2(_)) {
+    if matches!(cache.manifest, Manifest::V3(_) | Manifest::V4(_))
+        && matches!(current, Manifest::V2(_))
+    {
         return Err(CacheError::InvalidCache(
             "manifest was downgraded since dataset construction".to_string(),
         ));
     }
-    let expected = if matches!(current, Manifest::V3(_)) {
+    let expected = if matches!(current, Manifest::V3(_) | Manifest::V4(_)) {
         cache.manifest.clone().into_v3(cache_id)
     } else {
         cache.manifest.clone()

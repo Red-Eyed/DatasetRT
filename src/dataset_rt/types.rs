@@ -174,13 +174,46 @@ impl CompressionAlgo {
     }
 }
 
+/// Legacy payload-only settings retain their exact manifest representation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ShardCompression {
+#[serde(deny_unknown_fields)]
+pub struct LegacyCompression {
     pub algo: CompressionAlgo,
     pub ratio: f64,
 }
 
+/// Record scope and supported codec parameters are selected structurally.
+#[derive(Clone, Debug)]
+pub enum ShardCompression {
+    Legacy(LegacyCompression),
+    None,
+    Lz4Fast { acceleration: i32 },
+    Lz4HC { level: i32 },
+}
+
+/// Modern wire modes reject parameters belonging to other variants.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum RecordOptions {
+    None,
+    Fast { acceleration: i32 },
+    Hc { level: i32 },
+}
+
+/// Parse historical and modern settings once, without guessing from numeric values.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum CompressionWire {
+    Record {
+        algo: CompressionAlgo,
+        #[serde(flatten)]
+        options: RecordOptions,
+    },
+    Legacy(LegacyCompression),
+}
+
 impl ShardCompression {
+    /// Preserve legacy ratios as metadata while validating their historical contract.
     pub fn new(algo: CompressionAlgo, ratio: f64) -> CacheResult<Self> {
         if !ratio.is_finite() || ratio <= 0.0 {
             return Err(CacheError::InvalidInput(
@@ -192,7 +225,94 @@ impl ShardCompression {
                 "shard_compression.ratio must be 1.0 when algo is 'none'".to_string(),
             ));
         }
-        Ok(Self { algo, ratio })
+        Ok(Self::Legacy(LegacyCompression { algo, ratio }))
+    }
+
+    /// Reject upstream clamping so requested acceleration is never silently changed.
+    pub fn fast(acceleration: i32) -> CacheResult<Self> {
+        if !(1..=65_537).contains(&acceleration) {
+            return Err(CacheError::InvalidInput(
+                "LZ4 acceleration must be between 1 and 65537".to_string(),
+            ));
+        }
+        Ok(Self::Lz4Fast { acceleration })
+    }
+
+    /// Validate HC effort before it reaches the native codec.
+    pub fn hc(level: i32) -> CacheResult<Self> {
+        if !(1..=12).contains(&level) {
+            return Err(CacheError::InvalidInput(
+                "LZ4 HC level must be between 1 and 12".to_string(),
+            ));
+        }
+        Ok(Self::Lz4HC { level })
+    }
+
+    /// Only explicit modern variants change the on-disk record scope.
+    pub fn whole_record(&self) -> bool {
+        !matches!(self, Self::Legacy(_))
+    }
+
+    /// All LZ4 modes share the standard block decoder.
+    pub fn compressed(&self) -> bool {
+        !matches!(
+            self,
+            Self::None
+                | Self::Legacy(LegacyCompression {
+                    algo: CompressionAlgo::None,
+                    ..
+                })
+        )
+    }
+}
+
+impl Serialize for ShardCompression {
+    /// Retain legacy fields and make modern codec/mode discriminators explicit.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            Self::Legacy(settings) => CompressionWire::Legacy(settings.clone()),
+            Self::None => CompressionWire::Record {
+                algo: CompressionAlgo::None,
+                options: RecordOptions::None,
+            },
+            Self::Lz4Fast { acceleration } => CompressionWire::Record {
+                algo: CompressionAlgo::Lz4,
+                options: RecordOptions::Fast {
+                    acceleration: *acceleration,
+                },
+            },
+            Self::Lz4HC { level } => CompressionWire::Record {
+                algo: CompressionAlgo::Lz4,
+                options: RecordOptions::Hc { level: *level },
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ShardCompression {
+    /// Reject invalid codec/mode combinations even for hand-edited manifests.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let result = match CompressionWire::deserialize(deserializer)? {
+            CompressionWire::Legacy(settings) => Self::new(settings.algo, settings.ratio),
+            CompressionWire::Record {
+                algo: CompressionAlgo::None,
+                options: RecordOptions::None,
+            } => Ok(Self::None),
+            CompressionWire::Record {
+                algo: CompressionAlgo::Lz4,
+                options: RecordOptions::Fast { acceleration },
+            } => Self::fast(acceleration),
+            CompressionWire::Record {
+                algo: CompressionAlgo::Lz4,
+                options: RecordOptions::Hc { level },
+            } => Self::hc(level),
+            _ => Err(CacheError::InvalidInput(
+                "compression algorithm and mode disagree".to_string(),
+            )),
+        };
+        result.map_err(D::Error::custom)
     }
 }
 

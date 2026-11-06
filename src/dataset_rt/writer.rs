@@ -518,12 +518,41 @@ fn extract_shard_compression(value: &Bound<'_, PyAny>) -> CacheResult<ShardCompr
         .map_err(py_error)?
         .extract::<String>()
         .map_err(py_error)?;
-    let ratio = value
-        .getattr("ratio")
-        .map_err(py_error)?
-        .extract::<f64>()
-        .map_err(py_error)?;
-    ShardCompression::new(CompressionAlgo::from_name(&algo)?, ratio)
+    let algo = CompressionAlgo::from_name(&algo)?;
+    match value.getattr("mode") {
+        Ok(mode) => {
+            let mode = mode.extract::<String>().map_err(py_error)?;
+            match (algo, mode.as_str()) {
+                (CompressionAlgo::None, "none") => Ok(ShardCompression::None),
+                (CompressionAlgo::Lz4, "fast") => ShardCompression::fast(
+                    value
+                        .getattr("acceleration")
+                        .map_err(py_error)?
+                        .extract::<i32>()
+                        .map_err(py_error)?,
+                ),
+                (CompressionAlgo::Lz4, "hc") => ShardCompression::hc(
+                    value
+                        .getattr("level")
+                        .map_err(py_error)?
+                        .extract::<i32>()
+                        .map_err(py_error)?,
+                ),
+                _ => Err(CacheError::InvalidInput(
+                    "compression algorithm and mode disagree".to_string(),
+                )),
+            }
+        }
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(value.py()) => {
+            let ratio = value
+                .getattr("ratio")
+                .map_err(py_error)?
+                .extract::<f64>()
+                .map_err(py_error)?;
+            ShardCompression::new(algo, ratio)
+        }
+        Err(error) => Err(py_error(error)),
+    }
 }
 
 fn extract_source_name(source: &Bound<'_, PyAny>) -> CacheResult<String> {

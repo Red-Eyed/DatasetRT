@@ -427,9 +427,9 @@ def test_future_manifest_version_is_rejected(
     runtime: DatasetRuntime, legacy_paths: list[Path]
 ) -> None:
     """A future schema never silently falls back to legacy identity rules."""
-    wire = manifest(legacy_paths[0]).model_dump() | {"format_version": 4, "cache_id": 0}
+    wire = manifest(legacy_paths[0]).model_dump() | {"format_version": 5, "cache_id": 0}
     (legacy_paths[0] / "manifest.json").write_text(json.dumps(wire))
-    with pytest.raises(RuntimeError, match="unsupported format version 4"):
+    with pytest.raises(RuntimeError, match="unsupported format version 5"):
         runtime.cached_dataset([legacy_paths[0]], reader_config=ReaderConfig(seed=0))
 
 

@@ -2,6 +2,29 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.0
+
+### Improvements
+
+- Add `NoCompression`, `Lz4Fast(acceleration=...)`, and `Lz4HC(level=...)` typed
+  compression policies with Rust-side validation and statically bundled LZ4.
+- New policies write format v4, compressing each complete metadata/payload record
+  independently while preserving random access and stable sample identities.
+- Readers support mixed v2/v3/v4 caches. Existing writer calls retain their v3
+  layout and historical compression behavior; no cache rebuild is required.
+
+### Fixes
+
+- Preserve macOS release-library alignment by disabling debug-info stripping.
+
+### Deprecations
+
+- Explicit `ShardCompression(...)` construction emits `DeprecationWarning` with
+  replacement examples. Its legacy `ratio` never controlled compression and is
+  not reinterpreted as a level. Implicit writer defaults remain quiet.
+- New format v4 caches require a v4-capable reader; older releases continue to
+  read existing caches but cannot read the new complete-record layout.
+
 ## 0.4.10
 
 ### Fixes

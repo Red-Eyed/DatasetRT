@@ -2,22 +2,30 @@
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ModelWrapValidatorHandler,
+    model_validator,
+)
+
+if TYPE_CHECKING:
+    from typing import Self
+
 
 CompressionAlgo: TypeAlias = Literal["none", "lz4"]
-"""Shard compression algorithms supported by the stable v0.1 writer."""
+"""Codec names retained by the legacy compression facade."""
 
 
 class ShardCompression(BaseModel):
-    """Compression policy requested for payload shards.
-
-    `ratio` is part of the explicit policy object so callers and manifests use
-    the same structured shape. `ratio` is advisory metadata for compressed
-    algorithms; Rust validates `algo="none"` with `ratio == 1.0`.
-    """
+    """Deprecated payload-only policy retained for existing writers and saved configs."""
 
     # Existing pickles resolve public classes through the compatibility facade.
     __module__ = "dataset_rt.api"
@@ -33,12 +41,86 @@ class ShardCompression(BaseModel):
     ratio: float = Field(
         default=1.0,
         gt=0.0,
-        description="Expected compression ratio; `algo='none'` requires exactly `1.0`.",
+        description="Deprecated legacy metadata; this value never controlled compression.",
     )
-    """Expected compression ratio for this policy; `none` requires `1.0`."""
+    """Legacy manifest value, retained without changing compression behavior."""
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _validate_legacy(
+        cls, value: Self | JsonValue, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        """Warn on construction while keeping implicit legacy defaults quiet."""
+        match value:
+            case ShardCompression():
+                return handler(value)
+            case _:
+                if isinstance(value, Mapping) and {"mode", "level", "acceleration"}.intersection(
+                    value
+                ):
+                    raise ValueError(
+                        "compression options belong to NoCompression, Lz4Fast, or Lz4HC"
+                    )
+        result = handler(value)
+        warnings.warn(
+            "ShardCompression is deprecated; use NoCompression(), Lz4Fast(acceleration=1), "
+            "or Lz4HC(level=9). Legacy ratio never controlled compression and remains ignored. "
+            "Legacy calls write payload-only v3 caches; new variants write whole-record v4 caches.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return result
 
 
-DEFAULT_SHARD_COMPRESSION = ShardCompression()
+class NoCompression(BaseModel):
+    """Write independent uncompressed records using the v4 record layout."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algo: Literal["none"] = "none"
+    """Persist an explicit uncompressed codec discriminator."""
+    mode: Literal["none"] = "none"
+    """Select the uncompressed whole-record variant."""
+
+
+class Lz4Fast(BaseModel):
+    """Compress complete records with LZ4; higher acceleration favors write speed."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algo: Literal["lz4"] = "lz4"
+    """Persist the standard LZ4 block codec discriminator."""
+    mode: Literal["fast"] = "fast"
+    """Select the fast encoder with acceleration control."""
+    acceleration: int = Field(default=1, ge=1, le=65_537, strict=True)
+    """Accept 1–65537; higher values favor faster compression."""
+
+
+class Lz4HC(BaseModel):
+    """Compress complete records with LZ4 HC; higher levels increase compression effort."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algo: Literal["lz4"] = "lz4"
+    """Persist the standard LZ4 block codec discriminator."""
+    mode: Literal["hc"] = "hc"
+    """Select the high-compression encoder with effort-level control."""
+    level: int = Field(default=9, ge=1, le=12, strict=True)
+    """Accept 1–12; higher values increase HC compression effort."""
+
+
+# Resolve variant annotations before assigning their stable public pickle paths.
+NoCompression.__module__ = "dataset_rt.api"
+Lz4Fast.__module__ = "dataset_rt.api"
+Lz4HC.__module__ = "dataset_rt.api"
+
+
+RecordCompression: TypeAlias = Annotated[
+    NoCompression | Lz4Fast | Lz4HC, Field(discriminator="mode")
+]
+"""Closed whole-record policies with codec-specific settings."""
+
+# Keep implicit defaults quiet and retain their historical v3 storage behavior.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    DEFAULT_SHARD_COMPRESSION = ShardCompression()
 
 
 class WriterProfilerConfig(BaseModel):
@@ -114,11 +196,11 @@ class WriterConfig(BaseModel):
     )
     """Target maximum shard size before rotating to a new shard."""
 
-    shard_compression: ShardCompression = Field(
+    shard_compression: RecordCompression | ShardCompression = Field(
         default=DEFAULT_SHARD_COMPRESSION,
-        description="Per-record payload compression policy for new shards.",
+        description="Whole-record compression variants, or the deprecated payload-only policy.",
     )
-    """Compression policy for payload shards."""
+    """Typed whole-record policy, or a legacy payload-only policy for compatibility."""
 
     show_progress: bool = Field(
         default=True,
