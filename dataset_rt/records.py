@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Literal, NamedTuple, Protocol, TypeAlias, TypeVar
 
@@ -265,3 +265,27 @@ class CacheSource(Protocol):
         this iterator in a child; payloads stay in that process.
         """
         ...
+
+
+@dataclass
+class CacheSourceFactory:
+    """Create a source or input iterator lazily in its owning writer process.
+
+    Pass an importable, picklable zero-argument callable, optionally a
+    `functools.partial` with small picklable arguments. The callable may return
+    a live generator: it is invoked only when Rust starts consuming this source,
+    including in serial mode, and is skipped when a complete cache is reused.
+    Factory failures become ordinary per-source write errors. Capturing a live
+    generator, open file, or native runtime in the callable still prevents spawn.
+    """
+
+    __module__ = "dataset_rt.api"
+
+    name: str
+    """Destination identity, independent of any iterable returned by the factory."""
+    factory: Callable[[], Iterable[CacheInput]]
+    """Construct input iteration without transferring payloads between processes."""
+
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Construct the iterable only when its owning writer consumes this source."""
+        return iter(self.factory())

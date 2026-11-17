@@ -341,7 +341,12 @@ def _dispatch(
     try:
         encoded = pickle.dumps(job)
     except Exception as error:
-        return CacheWriteError(job.name, f"source serialization failed: {_diagnostic(error)}")
+        return CacheWriteError(
+            job.name,
+            f"source serialization failed: {_diagnostic(error)}. "
+            "Create generators and open resources inside __iter__, or use "
+            "CacheSourceFactory(name, factory) with an importable, picklable factory.",
+        )
     try:
         destination = _destination(path, job.name)
     except OSError as error:

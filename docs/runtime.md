@@ -91,6 +91,36 @@ native memory remains bounded by the existing writer window; aggregate native
 threads and buffers scale with the number of children, in addition to the caller's
 runtime. Payload-size bounds still belong to the application.
 
+If a source holds a live generator, pass a factory that creates it in the child:
+
+```python
+from functools import partial
+from collections.abc import Iterator
+
+from dataset_rt import CacheInput, CacheSourceFactory, DatasetRuntime, WriterConfig
+
+
+def generate_inputs(count: int) -> Iterator[CacheInput]:
+    """Stream records without keeping a live generator in the source descriptor."""
+    for index in range(count):
+        yield CacheInput(str(index).encode(), {"index": index})
+
+
+if __name__ == "__main__":
+    source = CacheSourceFactory("records", partial(generate_inputs, 1000))
+    results = DatasetRuntime(num_workers=1).write_cache(
+        source, "cache", writer_config=WriterConfig(num_processes=2)
+    )
+```
+
+`CacheSourceFactory` accepts a zero-argument callable returning a source or any
+iterable of `CacheInput`. Keep the callable at module scope; `partial` arguments
+must also be picklable. Create generators and open resources inside that callable,
+rather than capturing live instances or using a lambda. Construction and iteration
+both happen in the owning writer process, with no sample transport through the
+parent. Serial writing supports the same wrapper. Reusing a complete cache skips
+the factory entirely; construction failures produce per-source `CacheWriteError`s.
+
 Each source has one owning worker and one destination. Preflight rejects duplicate,
 case-folded, and Unicode-normalized names before any worker starts, including on
 case-sensitive filesystems. No destination locks or lock files are used. Callers

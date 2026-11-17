@@ -271,6 +271,25 @@ Rust pulls from this iterator and owns bounded sample prefetching,
 worker threads, and commits. Optional spawned source writers execute
 this iterator in a child; payloads stay in that process.
 
+### `CacheSourceFactory`
+
+Create a source or input iterator lazily in its owning writer process.
+
+Pass an importable, picklable zero-argument callable, optionally a
+`functools.partial` with small picklable arguments. The callable may return
+a live generator: it is invoked only when Rust starts consuming this source,
+including in serial mode, and is skipped when a complete cache is reused.
+Factory failures become ordinary per-source write errors. Capturing a live
+generator, open file, or native runtime in the callable still prevents spawn.
+
+Fields:
+- `name: str`: Destination identity, independent of any iterable returned by the factory.
+- `factory: Callable[[], Iterable[CacheInput]]`: Construct input iteration without transferring payloads between processes.
+
+#### `CacheSourceFactory.__iter__() -> Iterator[CacheInput]`
+
+Construct the iterable only when its owning writer consumes this source.
+
 ### `CacheSourcesDatasetError`
 
 Dataset creation result when no source produced a cache.
@@ -696,7 +715,9 @@ when Rust can handle them cleanly.
 
 `writer_config.num_processes=0` keeps this native serial path. A positive
 count spawns source-writing processes, each with `self.num_workers`
-native threads. Sources must then be picklable and importable. Jobs
+native threads. Sources must then be picklable and importable. Use
+`CacheSourceFactory(name, factory)` to create generators or open resources
+in the child; the factory itself must be picklable and importable. Jobs
 and outcomes cross processes; sample payloads do not. Worker death or
 `process_timeout_seconds` stops the pool without retrying unfinished
 sources. Profiling keeps serial execution even with a positive count.

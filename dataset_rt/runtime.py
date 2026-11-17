@@ -118,7 +118,9 @@ class DatasetRuntime:
 
         `writer_config.num_processes=0` keeps this native serial path. A positive
         count spawns source-writing processes, each with `self.num_workers`
-        native threads. Sources must then be picklable and importable. Jobs
+        native threads. Sources must then be picklable and importable. Use
+        `CacheSourceFactory(name, factory)` to create generators or open resources
+        in the child; the factory itself must be picklable and importable. Jobs
         and outcomes cross processes; sample payloads do not. Worker death or
         `process_timeout_seconds` stops the pool without retrying unfinished
         sources. Profiling keeps serial execution even with a positive count.

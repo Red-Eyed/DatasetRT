@@ -2,6 +2,16 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.2
+
+### Improvements
+
+- Add `CacheSourceFactory(name, factory)` to construct generator-backed sources
+  inside their owning writer process. Pass an importable, picklable callable
+  instead of a source holding a live generator; cache reuse skips construction.
+- Explain how to construct generators and open resources in the worker when
+  parallel source serialization fails.
+
 ## 0.5.1
 
 ### Improvements

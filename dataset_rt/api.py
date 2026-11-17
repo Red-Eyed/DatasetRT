@@ -45,6 +45,7 @@ from dataset_rt.records import (
 from dataset_rt.records import (
     CacheSource as CacheSource,
 )
+from dataset_rt.records import CacheSourceFactory as CacheSourceFactory
 from dataset_rt.records import (
     CacheSourcesDatasetError as CacheSourcesDatasetError,
 )

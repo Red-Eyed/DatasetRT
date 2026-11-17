@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
@@ -16,6 +17,7 @@ import pytest
 
 from dataset_rt import (
     CacheInput,
+    CacheSourceFactory,
     CacheSourcesDatasetSuccess,
     CacheWriteError,
     CacheWriteSuccess,
@@ -80,6 +82,84 @@ class UnpicklableSource:
     def __iter__(self) -> Iterator[CacheInput]:
         """The serial writer still consumes this source normally."""
         yield CacheInput(b"serial", {"index": 0})
+
+
+def _make_generator(count: int) -> Iterator[CacheInput]:
+    """Capture factory and iteration PIDs separately to prove both stay in the owner."""
+    factory_pid = os.getpid()
+    return (
+        CacheInput(
+            str(index).encode(),
+            {"index": index, "factory_pid": factory_pid, "iterator_pid": os.getpid()},
+        )
+        for index in range(count)
+    )
+
+
+def _failing_factory() -> Iterator[CacheInput]:
+    """Fail during construction rather than iteration to test the lazy boundary."""
+    raise ValueError("factory failed")
+
+
+@pytest.mark.parametrize("processes", [0, 2])
+def test_generator_factory_runs_in_owning_process(
+    runtime: DatasetRuntime, tmp_path: Path, processes: int
+) -> None:
+    """Multiple streaming caches need no generator pickle or parent payload bridge."""
+    sources: list[CacheSource] = [
+        CacheSourceFactory(f"generator-{index}", partial(_make_generator, 1000))
+        for index in range(3)
+    ]
+    result = runtime.from_cache_sources(
+        sources,
+        tmp_path,
+        writer_config=WriterConfig(num_processes=processes, show_progress=False, prefetch_size=2),
+        reader_config=ReaderConfig(seed=0, shuffle=False, validate_cache=True),
+    )
+    assert isinstance(result, CacheSourcesDatasetSuccess)
+    assert all(isinstance(outcome, CacheWriteSuccess) for outcome in result.results)
+    count = 0
+    for sample in result.dataset:
+        assert sample.data == str(sample.sample_id).encode()
+        assert sample.metadata["factory_pid"] == sample.metadata["iterator_pid"]
+        assert (sample.metadata["factory_pid"] == os.getpid()) == (processes == 0)
+        count += 1
+    assert count == 3000
+    assert not multiprocessing.active_children()
+
+
+def test_factory_failure_and_reuse(
+    runtime: DatasetRuntime, tmp_path: Path, parallel_config: WriterConfig
+) -> None:
+    """Construction failures stay source-local; cache reuse never invokes the factory."""
+    sources: list[CacheSource] = [
+        CacheSourceFactory("failed", _failing_factory),
+        CacheSourceFactory("healthy", partial(_make_generator, 3)),
+    ]
+    results = runtime.write_cache(sources, tmp_path, writer_config=parallel_config)
+    assert isinstance(results[0], CacheWriteError)
+    assert "factory failed" in results[0].message
+    assert isinstance(results[1], CacheWriteSuccess)
+    assert not (tmp_path / "tmp" / "failed").exists()
+    reused = runtime.from_cache_sources(
+        CacheSourceFactory("healthy", _failing_factory),
+        tmp_path,
+        writer_config=parallel_config,
+        reader_config=ReaderConfig(seed=0, shuffle=False),
+    )
+    assert isinstance(reused, CacheSourcesDatasetSuccess)
+    assert len(reused.dataset) == 3
+
+
+def test_captured_live_generator_reports_factory_guidance(
+    runtime: DatasetRuntime, tmp_path: Path, parallel_config: WriterConfig
+) -> None:
+    """A factory must create its generator, rather than capture an existing iterator."""
+    source = CacheSourceFactory("captured", partial(iter, _make_generator(3)))
+    results = runtime.write_cache(source, tmp_path, writer_config=parallel_config)
+    assert isinstance(results[0], CacheWriteError)
+    assert "generator" in results[0].message
+    assert "CacheSourceFactory" in results[0].message
 
 
 @pytest.fixture
