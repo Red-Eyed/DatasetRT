@@ -547,11 +547,9 @@ fn load_caches(
 
     let mut results = Vec::with_capacity(total);
     while results.len() < total {
-        results.push(
-            result_receiver
-                .recv()
-                .map_err(|_| CacheError::WorkerFailed)??,
-        );
+        results.push(result_receiver.recv().map_err(|_| {
+            CacheError::WorkerFailed.context("cache-loading result channel disconnected")
+        })??);
         if scheduled < total {
             submit_next_cache_load(&pool, &mut paths, &result_sender, validate_cache)?;
             scheduled += 1;
@@ -595,8 +593,11 @@ fn cache_lookup(caches: &[LoadedCache]) -> CacheResult<HashMap<u64, usize>> {
     let mut lookup = HashMap::with_capacity(caches.len());
     for (position, cache) in caches.iter().enumerate() {
         let id = cache.cache_id.as_u64();
-        if lookup.insert(id, position).is_some() {
-            return Err(CacheError::InvalidCache(format!("duplicate cache_id {id}")));
+        if let Some(previous) = lookup.insert(id, position) {
+            let previous = caches.get(previous).ok_or_else(|| {
+                CacheError::WorkerFailed.context("resolve conflicting cache identity")
+            })?;
+            return Err(CacheError::InvalidCache(format!("duplicate cache_id {id}: '{}' conflicts with '{}'. Supply each cache identity only once", previous.path.display(), cache.path.display())));
         }
     }
     Ok(lookup)
@@ -610,9 +611,11 @@ fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
         if cache.manifest.fields().metadata_schema.len()
             != first.manifest.fields().metadata_schema.len()
         {
-            return Err(CacheError::InvalidCache(
-                "all caches must share the same metadata schema".to_string(),
-            ));
+            return Err(CacheError::InvalidCache(format!(
+                "all caches must share the same metadata schema: '{}' has {} columns; '{}' has {} columns",
+                first.path.display(), first.manifest.fields().metadata_schema.len(),
+                cache.path.display(), cache.manifest.fields().metadata_schema.len()
+            )));
         }
         for (left, right) in cache
             .manifest
@@ -622,9 +625,11 @@ fn common_schema(caches: &[LoadedCache]) -> CacheResult<Vec<MetadataField>> {
             .zip(first.manifest.fields().metadata_schema.iter())
         {
             if left.name != right.name || left.kind != right.kind {
-                return Err(CacheError::InvalidCache(
-                    "all caches must share the same metadata schema".to_string(),
-                ));
+                return Err(CacheError::InvalidCache(format!(
+                    "all caches must share the same metadata schema: '{}' expects column '{}' of type {:?}; '{}' has column '{}' of type {:?}",
+                    first.path.display(), right.name, right.kind,
+                    cache.path.display(), left.name, left.kind
+                )));
             }
         }
     }

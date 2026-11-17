@@ -383,7 +383,8 @@ impl SampleWritePipeline {
             self.complete_one()?;
         }
         if !self.pending.is_empty() {
-            return Err(CacheError::WorkerFailed);
+            return Err(CacheError::WorkerFailed
+                .context("writer finish: ordered results remain after all jobs completed"));
         }
         let (_, stats) = self.builder.finish()?;
         record_finish_stats(&self.profiler, &self.source_name, stats);
@@ -393,7 +394,12 @@ impl SampleWritePipeline {
 
     /// Receive one completed task and advance every now-contiguous sample.
     fn complete_one(&mut self) -> CacheResult<()> {
-        let sample = receive_worker_result(&self.result_receiver)?;
+        let sample = receive_worker_result(&self.result_receiver).map_err(|error| {
+            error.context(format!(
+                "writer source '{}': waiting for sample sequence {}",
+                self.source_name, self.next_sequence
+            ))
+        })?;
         self.in_flight = self
             .in_flight
             .checked_sub(1)
@@ -421,7 +427,8 @@ fn receive_worker_result<T>(receiver: &Receiver<CacheResult<T>>) -> CacheResult<
                 Python::attach(|py| py.check_signals()).map_err(py_error)?;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(CacheError::WorkerFailed);
+                return Err(CacheError::WorkerFailed
+                    .context("writer result channel disconnected while waiting for a worker"));
             }
         }
     }
@@ -437,7 +444,14 @@ fn commit_ready_samples(
 ) -> CacheResult<()> {
     while let Some(sample) = pending.remove(next_sequence) {
         let byte_len = sample.input.data.len();
-        let stats = builder.push_sample(sample.input.data, sample.input.metadata)?;
+        let stats = builder
+            .push_sample(sample.input.data, sample.input.metadata)
+            .map_err(|error| {
+                error.context(format!(
+                    "write source '{source_name}' sample sequence {}",
+                    sample.sequence
+                ))
+            })?;
         record_push_sample_stats(profiler, source_name, &stats);
         progress.record_sample(byte_len);
         *next_sequence = next_sequence.checked_add(1).ok_or_else(|| {

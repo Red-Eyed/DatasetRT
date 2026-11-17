@@ -134,7 +134,7 @@ impl<'de> Deserialize<'de> for Manifest {
                 .map(Self::V4)
                 .map_err(D::Error::custom),
             _ => Err(D::Error::custom(format!(
-                "unsupported format version {version}"
+                "unsupported format version {version}; supported versions: 2, 3, 4. Upgrade DatasetRT to read newer cache formats"
             ))),
         }?;
         if manifest

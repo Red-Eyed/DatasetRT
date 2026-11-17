@@ -212,6 +212,25 @@ Avoid these unless the user explicitly asks for a prototype and the code is clea
 - `validate_cache=True` behavior becoming the default path.
 - Adding framework-specific logic to Rust core.
 
+## Error Reporting
+
+Errors must identify the failed operation, affected file path or cache/sample
+identity, and concrete cause. Include expected and actual values for validation
+failures; identify both caches and the differing fields for conflicts.
+
+- Preserve underlying OS, parser, codec, and worker errors when adding context.
+- Do not use existence checks to classify file-open failures; distinguish missing
+  files from permission, path-type, and other I/O failures using the actual error.
+- Include supported versions and upgrade guidance for unsupported cache formats.
+- Provide recovery guidance only when justified; never suggest editing version
+  markers or bypassing validation to make an incompatible cache readable.
+- Add context at Rust ownership boundaries and retain Python exception categories,
+  cancellation behavior, and KeyboardInterrupt/SystemExit propagation.
+- Build diagnostic strings on failure, without extra dataset scans, payload dumps,
+  or per-sample allocations on successful hot paths.
+- Test that representative errors contain actionable context, not only that an
+  exception occurs. Avoid relying on platform-specific OS wording in assertions.
+
 ## Testing Expectations
 
 For any non-trivial change, run at least:

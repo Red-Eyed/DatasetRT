@@ -375,7 +375,12 @@ impl SourceListWritePipeline {
 
     /// Receive one completed task and commit every now-contiguous event.
     fn complete_one(&mut self) -> CacheResult<()> {
-        let message = receive_worker_result(&self.result_receiver)?;
+        let message = receive_worker_result(&self.result_receiver).map_err(|error| {
+            error.context(format!(
+                "source-list writer: waiting for event sequence {}",
+                self.next_sequence
+            ))
+        })?;
         self.in_flight = self
             .in_flight
             .checked_sub(1)
@@ -631,7 +636,15 @@ impl ActiveSourceWrite {
 
     fn mark_failed(&mut self, error: CacheError) {
         if self.failure.is_none() {
-            self.failure = Some(error.to_string());
+            self.failure = Some(
+                error
+                    .context(format!(
+                        "write source '{}' to '{}'",
+                        self.start.source_name,
+                        self.start.temp_path.display()
+                    ))
+                    .to_string(),
+            );
         }
         self.builder.take();
         self.cleanup_temp_cache();

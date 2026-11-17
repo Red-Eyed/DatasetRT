@@ -69,3 +69,26 @@ fn reordered_results_preserve_order_and_exhaustion() -> CacheResult<()> {
     assert!(iterator.pending.is_empty());
     Ok(())
 }
+
+/// Preserve the actual worker cause while identifying the reader result boundary.
+#[test]
+fn failed_worker_reports_reader_stage() -> CacheResult<()> {
+    let mut iterator = completed_window(3)?;
+    for _ in 0..3 {
+        iterator.output.recv()??;
+    }
+    iterator.output_sender.send(Err(CacheError::NativeFailure(
+        "test worker cause".to_string(),
+    )))?;
+    let error = iterator
+        .next()
+        .ok_or_else(|| CacheError::InvalidInput("missing reader error".to_string()))?;
+    let error = error
+        .err()
+        .ok_or_else(|| CacheError::InvalidInput("reader unexpectedly succeeded".to_string()))?;
+    assert!(error.to_string().contains("receive reader worker result"));
+    assert!(error.to_string().contains("test worker cause"));
+    assert!(iterator.cancelled.load(Ordering::Acquire));
+    assert!(iterator.next().is_none());
+    Ok(())
+}

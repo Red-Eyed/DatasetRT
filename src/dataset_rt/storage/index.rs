@@ -15,11 +15,13 @@ pub struct MappedIndex {
 impl MappedIndex {
     /// Validate fixed-width shape before exposing the published cache's read-only index.
     pub fn open(path: &Path) -> CacheResult<Self> {
-        let file = File::open(path)?;
+        let file = File::open(path).map_err(|error| {
+            CacheError::from(error).context(format!("open index '{}'", path.display()))
+        })?;
         let byte_len = file.metadata()?.len();
         if byte_len % INDEX_ROW_BYTES as u64 != 0 {
             return Err(CacheError::InvalidCache(
-                "index length is not divisible by row size".to_string(),
+                format!("index length is not divisible by row size: file='{}', actual {byte_len} bytes, row size {INDEX_ROW_BYTES} bytes", path.display()),
             ));
         }
         let mapping = match byte_len {

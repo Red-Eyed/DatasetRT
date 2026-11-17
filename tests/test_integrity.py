@@ -375,3 +375,151 @@ def test_invalid_metadata_schema_returns_error(tmp_path: Path, invalid_schema: s
     write_manifest(path, manifest)
     with pytest.raises(ValueError, match="metadata"):
         load_cache(path)
+
+
+@pytest.fixture
+def diagnostic_cache(tmp_path: Path) -> Path:
+    """Publish a tiny isolated cache for diagnostic failure checks."""
+    return write_integrity_cache(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "filename", ["manifest.json", "index.bin", "metadata.arrow", "shards/000000.bin"]
+)
+def test_missing_file_error_identifies_path(diagnostic_cache: Path, filename: str) -> None:
+    """Every missing required file identifies its path and the failed operation."""
+    missing = diagnostic_cache / filename
+    missing.unlink()
+    error_type = ValueError if filename == "manifest.json" else RuntimeError
+    with pytest.raises(error_type) as caught:
+        RUNTIME.cached_dataset([diagnostic_cache], reader_config=ReaderConfig(seed=1))
+    message = str(caught.value)
+    assert str(missing) in message
+    assert "load cache" in message
+    if filename == "manifest.json":
+        assert "Each cache directory must directly contain manifest.json" in message
+
+
+@pytest.mark.parametrize("bad_path", ["file", "directory"])
+def test_manifest_path_type_error_retains_cause(diagnostic_cache: Path, bad_path: str) -> None:
+    """An invalid path type must not be misreported as a missing publication marker."""
+    manifest_path = diagnostic_cache / "manifest.json"
+    if bad_path == "directory":
+        manifest_path.unlink()
+        manifest_path.mkdir()
+        supplied_path = diagnostic_cache
+    else:
+        supplied_path = manifest_path
+    with pytest.raises(RuntimeError) as caught:
+        RUNTIME.cached_dataset([supplied_path], reader_config=ReaderConfig(seed=1))
+    assert str(manifest_path) in str(caught.value)
+    assert "missing manifest" not in str(caught.value)
+
+
+def test_manifest_parse_error_identifies_file(diagnostic_cache: Path) -> None:
+    """Parser details remain attached to the exact broken manifest."""
+    manifest_path = diagnostic_cache / "manifest.json"
+    manifest_path.write_text("{")
+    with pytest.raises(RuntimeError) as caught:
+        load_cache(diagnostic_cache)
+    assert str(manifest_path) in str(caught.value)
+    assert "parse manifest" in str(caught.value)
+    assert "JSON error" in str(caught.value)
+
+
+def test_future_format_error_explains_supported_versions(diagnostic_cache: Path) -> None:
+    """Unsupported formats explain which reader versions are understood and the next step."""
+    manifest_path = diagnostic_cache / "manifest.json"
+    original = manifest_path.read_text()
+    manifest_path.write_text(original.replace('"format_version": 4', '"format_version": 99'))
+    with pytest.raises(RuntimeError) as caught:
+        load_cache(diagnostic_cache)
+    message = str(caught.value)
+    assert str(manifest_path) in message
+    assert "unsupported format version 99" in message
+    assert "supported versions: 2, 3, 4" in message
+    assert "Upgrade DatasetRT" in message
+
+
+def test_duplicate_identity_error_identifies_both_paths(
+    diagnostic_cache: Path, tmp_path: Path
+) -> None:
+    """Copied caches retain identities, so conflicts must name both directories."""
+    import shutil
+
+    copied = tmp_path / "copied"
+    shutil.copytree(diagnostic_cache, copied)
+    with pytest.raises(ValueError) as caught:
+        RUNTIME.cached_dataset([diagnostic_cache, copied], reader_config=ReaderConfig(seed=1))
+    message = str(caught.value)
+    assert "duplicate cache_id" in message
+    assert str(diagnostic_cache) in message
+    assert str(copied) in message
+
+
+def test_schema_error_identifies_differing_column(diagnostic_cache: Path, tmp_path: Path) -> None:
+    """Schema conflicts report the offending column without dumping every column."""
+
+    class OtherSource:
+        """Supply a cache with a distinct primitive metadata type."""
+
+        name = "other"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Keep the name stable while changing its metadata type."""
+            yield CacheInput(b"other", {"index": "text", "split": "train"})
+
+    result = RUNTIME.write_cache(
+        OtherSource(), tmp_path, writer_config=WriterConfig(show_progress=False)
+    )[0]
+    assert isinstance(result, CacheWriteSuccess)
+    with pytest.raises(ValueError) as caught:
+        RUNTIME.cached_dataset([diagnostic_cache, result.path], reader_config=ReaderConfig(seed=1))
+    message = str(caught.value)
+    assert str(diagnostic_cache) in message
+    assert str(result.path) in message
+    assert "index" in message
+    assert "Int" in message
+    assert "String" in message
+
+
+def test_record_read_error_identifies_sample_and_address(diagnostic_cache: Path) -> None:
+    """Random-read failures retain identity and the exact shard byte range."""
+    dataset = RUNTIME.cached_dataset(
+        [diagnostic_cache], reader_config=ReaderConfig(seed=1, shuffle=False)
+    )
+    shard_path = diagnostic_cache / "shards" / "000000.bin"
+    shard_path.write_bytes(b"")
+    with pytest.raises(RuntimeError) as caught:
+        next(iter(dataset))
+    message = str(caught.value)
+    assert "cache_id=" in message
+    assert "sample_id=0" in message
+    assert str(shard_path) in message
+    assert "offset 0" in message
+
+
+def test_checksum_error_reports_expected_and_actual(diagnostic_cache: Path) -> None:
+    """Checksum failures identify the file, both digests, and a valid recovery action."""
+    manifest = read_manifest(diagnostic_cache)
+    actual = manifest.metadata_sha256
+    manifest.metadata_sha256 = "0" * 64
+    write_manifest(diagnostic_cache, manifest)
+    with pytest.raises(ValueError) as caught:
+        load_cache(diagnostic_cache)
+    message = str(caught.value)
+    assert str(diagnostic_cache / "metadata.arrow") in message
+    assert f"expected {'0' * 64}" in message
+    assert f"actual {actual}" in message
+    assert "rebuild the cache" in message
+
+
+def test_index_count_error_reports_expected_and_actual(diagnostic_cache: Path) -> None:
+    """Manifest/index disagreement reports counts with the affected cache path."""
+    index_path = diagnostic_cache / "index.bin"
+    index_path.write_bytes(b"")
+    with pytest.raises(ValueError) as caught:
+        RUNTIME.cached_dataset([diagnostic_cache], reader_config=ReaderConfig(seed=1))
+    message = str(caught.value)
+    assert str(diagnostic_cache) in message
+    assert "expected 2, actual 0" in message

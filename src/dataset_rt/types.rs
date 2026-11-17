@@ -24,11 +24,32 @@ pub enum CacheError {
     SystemExit(String),
     #[error("native operation failed: {0}")]
     NativeFailure(String),
+    #[error("{context}: {source}")]
+    Context {
+        context: String,
+        #[source]
+        source: Box<CacheError>,
+    },
     #[error("runtime worker failed")]
     WorkerFailed,
 }
 
 impl CacheError {
+    /// Attach boundary context while preserving Python exception categories and causes.
+    pub fn context(self, context: impl Into<String>) -> Self {
+        let context = context.into();
+        match self {
+            Self::InvalidInput(message) => Self::InvalidInput(format!("{context}: {message}")),
+            Self::InvalidCache(message) => Self::InvalidCache(format!("{context}: {message}")),
+            Self::KeyboardInterrupt(message) => Self::KeyboardInterrupt(message),
+            Self::SystemExit(message) => Self::SystemExit(message),
+            source => Self::Context {
+                context,
+                source: Box::new(source),
+            },
+        }
+    }
+
     pub fn into_py_err(self) -> PyErr {
         match self {
             Self::InvalidInput(message) | Self::InvalidCache(message) => {
@@ -41,6 +62,7 @@ impl CacheError {
             | Self::Arrow(_)
             | Self::Python(_)
             | Self::NativeFailure(_)
+            | Self::Context { .. }
             | Self::WorkerFailed => PyRuntimeError::new_err(self.to_string()),
         }
     }

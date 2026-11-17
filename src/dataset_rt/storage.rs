@@ -70,10 +70,32 @@ impl LoadedCache {
         &self,
     ) -> CacheResult<crate::arrow_metadata::mapped::MappedMetadataReader> {
         crate::arrow_metadata::mapped::MappedMetadataReader::open(&self.path.join("metadata.arrow"))
+            .map_err(|error| {
+                error.context(format!(
+                    "open metadata batches '{}'",
+                    self.path.join("metadata.arrow").display()
+                ))
+            })
     }
 
     /// Read one sample record using caller-owned shard handles for repeated random access.
     pub fn read_sample_with_cache(
+        &self,
+        sample_index: usize,
+        readers: &mut ShardReaderCache,
+    ) -> CacheResult<CacheSample> {
+        self.read_sample_record(sample_index, readers)
+            .map_err(|error| {
+                error.context(format!(
+                    "read sample cache_id={} sample_id={sample_index} in '{}'",
+                    self.cache_id.as_u64(),
+                    self.path.display()
+                ))
+            })
+    }
+
+    /// Attach shard addressing to failures without changing record validation or allocation.
+    fn read_sample_record(
         &self,
         sample_index: usize,
         readers: &mut ShardReaderCache,
@@ -94,10 +116,12 @@ impl LoadedCache {
         let end = entry.offset.checked_add(entry.byte_len).ok_or_else(|| {
             CacheError::InvalidCache("record offset and length overflowed u64".to_string())
         })?;
-        let reader = readers.reader_for(&shard_path)?;
+        let reader = readers
+            .reader_for(&shard_path)
+            .map_err(|error| error.context(format!("open shard '{}'", shard_path.display())))?;
         if end > shard.byte_len {
             return Err(CacheError::InvalidCache(
-                "record extends beyond shard length".to_string(),
+                format!("record extends beyond shard length: shard='{}', offset={}, length={}, shard length={}", shard_path.display(), entry.offset, entry.byte_len, shard.byte_len),
             ));
         }
         let mut record = Vec::new();
@@ -107,9 +131,22 @@ impl LoadedCache {
             ))
         })?;
         record.resize(byte_len, 0);
-        reader.seek(std::io::SeekFrom::Start(entry.offset))?;
-        reader.read_exact(&mut record)?;
-        let sample = decode_stored_record(record, &self.manifest, shard)?;
+        let address = || {
+            format!(
+                "read shard '{}' at offset {} for {} bytes",
+                shard_path.display(),
+                entry.offset,
+                entry.byte_len
+            )
+        };
+        reader
+            .seek(std::io::SeekFrom::Start(entry.offset))
+            .map_err(|error| CacheError::from(error).context(address()))?;
+        reader
+            .read_exact(&mut record)
+            .map_err(|error| CacheError::from(error).context(address()))?;
+        let sample = decode_stored_record(record, &self.manifest, shard)
+            .map_err(|error| error.context(address()))?;
         if self.validate_embedded_metadata {
             self.with_metadata_rows(|metadata_rows| {
                 let metadata = metadata_rows.get(sample_index).ok_or_else(|| {
@@ -499,6 +536,17 @@ pub fn load_cache(
     validate_cache: bool,
     position: usize,
 ) -> CacheResult<LoadedCache> {
+    let path = std::path::absolute(&path).map_err(CacheError::from)?;
+    load_cache_inner(path.clone(), validate_cache, position)
+        .map_err(|error| error.context(format!("load cache '{}'", path.display())))
+}
+
+/// Validate published cache files without expanding metadata on ordinary restarts.
+fn load_cache_inner(
+    path: PathBuf,
+    validate_cache: bool,
+    position: usize,
+) -> CacheResult<LoadedCache> {
     let manifest = read_manifest(&path)?;
     let cache_id = manifest.resolve_cache_id(position)?;
 
@@ -517,7 +565,12 @@ pub fn load_cache(
             &manifest.fields().metadata_schema,
         )?)
     } else {
-        fs::metadata(&metadata_path)?;
+        fs::metadata(&metadata_path).map_err(|error| {
+            CacheError::from(error).context(format!(
+                "inspect metadata file '{}'",
+                metadata_path.display()
+            ))
+        })?;
         None
     };
     validate_loaded_shapes(&manifest, metadata_rows.as_deref(), &index)?;
@@ -539,16 +592,25 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> CacheResult<()> {
     Ok(())
 }
 
+/// Open the publication marker directly so access failures retain their OS cause.
 fn read_manifest(path: &Path) -> CacheResult<Manifest> {
     let manifest_path = path.join("manifest.json");
-    if !manifest_path.exists() {
-        return Err(CacheError::InvalidCache(format!(
-            "missing manifest: {}",
-            manifest_path.display()
-        )));
-    }
-    let file = File::open(manifest_path)?;
-    Ok(serde_json::from_reader(BufReader::new(file))?)
+    let file = File::open(&manifest_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CacheError::InvalidCache(format!(
+                "missing manifest '{}': {error}. Each cache directory must directly contain manifest.json; check the supplied path and whether cache writing completed",
+                manifest_path.display()
+            ))
+        } else {
+            CacheError::from(error).context(format!(
+                "open manifest '{}'; pass a cache directory containing manifest.json",
+                manifest_path.display()
+            ))
+        }
+    })?;
+    serde_json::from_reader(BufReader::new(file)).map_err(|error| {
+        CacheError::from(error).context(format!("parse manifest '{}'", manifest_path.display()))
+    })
 }
 
 /// Hash exact UTF-8 names with a fixed, portable 63-bit manifest identity rule.
@@ -643,22 +705,22 @@ fn read_metadata_file(
             let batch = batch?;
             if batch.num_columns() != schema.len() {
                 return Err(CacheError::InvalidCache(
-                    "metadata column count does not match manifest schema".to_string(),
+                    format!("metadata column count does not match manifest schema: expected {}, actual {}", schema.len(), batch.num_columns()),
                 ));
             }
             for (actual, expected) in batch.schema().fields().iter().zip(schema) {
                 if actual.name() != &expected.name {
                     return Err(CacheError::InvalidCache(format!(
-                        "metadata column name does not match '{}'",
-                        expected.name
+                        "metadata column name does not match '{}': actual '{}'",
+                        expected.name, actual.name()
                     )));
                 }
             }
             for (column, field) in batch.columns().iter().zip(schema) {
                 if column.data_type() != &arrow_type(&field.kind) || column.null_count() != 0 {
                     return Err(CacheError::InvalidCache(format!(
-                        "metadata '{}' has invalid type or null values",
-                        field.name
+                        "metadata '{}' has invalid type or null values: expected {:?} with no nulls, actual {:?} with {} nulls",
+                        field.name, arrow_type(&field.kind), column.data_type(), column.null_count()
                     )));
                 }
             }
@@ -668,7 +730,7 @@ fn read_metadata_file(
         }
 
         Ok(rows)
-    })
+    }).map_err(|error| error.context(format!("read metadata file '{}'", path.display())))
 }
 
 fn read_metadata_row(
@@ -1030,7 +1092,7 @@ fn verify_file_checksum(path: &Path, expected: &str) -> CacheResult<()> {
     let actual = hash_file(path)?;
     if actual != expected {
         return Err(CacheError::InvalidCache(format!(
-            "checksum mismatch for {}",
+            "checksum mismatch for {}: expected {expected}, actual {actual}. Restore this file from a known-good copy or rebuild the cache",
             path.display()
         )));
     }
@@ -1040,11 +1102,15 @@ fn verify_file_checksum(path: &Path, expected: &str) -> CacheResult<()> {
 fn verify_shards(path: &Path, manifest: &Manifest, validate_cache: bool) -> CacheResult<()> {
     for shard in &manifest.fields().shards {
         let shard_path = path.join("shards").join(&shard.name);
-        let metadata = fs::metadata(&shard_path)?;
+        let metadata = fs::metadata(&shard_path).map_err(|error| {
+            CacheError::from(error).context(format!("inspect shard '{}'", shard_path.display()))
+        })?;
         if metadata.len() != shard.byte_len {
             return Err(CacheError::InvalidCache(format!(
-                "shard length mismatch for {}",
-                shard_path.display()
+                "shard length mismatch for {}: expected {} bytes, actual {} bytes",
+                shard_path.display(),
+                shard.byte_len,
+                metadata.len()
             )));
         }
         if validate_cache {
@@ -1062,15 +1128,17 @@ fn validate_loaded_shapes(
     let sample_count = manifest.fields().sample_count as usize;
     if let Some(rows) = metadata_rows {
         if rows.len() != sample_count {
-            return Err(CacheError::InvalidCache(
-                "metadata row count does not match manifest".to_string(),
-            ));
+            return Err(CacheError::InvalidCache(format!(
+                "metadata row count does not match manifest: expected {sample_count}, actual {}",
+                rows.len()
+            )));
         }
     }
     if index.len() != sample_count {
-        return Err(CacheError::InvalidCache(
-            "index row count does not match manifest".to_string(),
-        ));
+        return Err(CacheError::InvalidCache(format!(
+            "index row count does not match manifest: expected {sample_count}, actual {}",
+            index.len()
+        )));
     }
     for entry in index.iter() {
         let entry = entry?;
@@ -1090,12 +1158,16 @@ fn validate_loaded_shapes(
 }
 
 fn hash_file(path: &Path) -> CacheResult<String> {
-    let mut file = BufReader::new(File::open(path)?);
+    let mut file = BufReader::new(File::open(path).map_err(|error| {
+        CacheError::from(error).context(format!("open file for checksum '{}'", path.display()))
+    })?);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
 
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer).map_err(|error| {
+            CacheError::from(error).context(format!("read file for checksum '{}'", path.display()))
+        })?;
         if read == 0 {
             break;
         }

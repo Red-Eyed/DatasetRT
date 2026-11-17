@@ -2,6 +2,16 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.4
+
+### Improvements
+
+- Include cache paths, sample identities, underlying causes, and expected/actual
+  values in cache-loading, integrity, and sample-read errors. Distinguish missing
+  manifests from other file-open failures and explain unsupported cache formats.
+- Identify conflicting caches in identity/schema errors and reader/writer stages
+  in worker-result failures while preserving Python exception categories.
+
 ## 0.5.3
 
 ### Improvements

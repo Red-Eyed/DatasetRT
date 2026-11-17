@@ -149,10 +149,11 @@ impl RuntimeIterator {
     /// Submit one finite read job while preserving its planned output sequence.
     fn schedule_next(&mut self) -> CacheResult<()> {
         let sequence = self.scheduled;
-        let physical_index = self
-            .plan
-            .next_physical_index(sequence)
-            .ok_or(CacheError::WorkerFailed)?;
+        let physical_index = self.plan.next_physical_index(sequence).ok_or_else(|| {
+            CacheError::WorkerFailed.context(format!(
+                "reader scheduling: missing planned sample at sequence {sequence}"
+            ))
+        })?;
         let caches = self.caches.clone();
         let cache_offsets = self.cache_offsets.clone();
         let output_sender = self.output_sender.clone();
@@ -162,14 +163,16 @@ impl RuntimeIterator {
             if cancelled.load(Ordering::Acquire) {
                 return Err(CacheError::WorkerFailed);
             }
-            let result = SHARD_READERS.with(|readers| {
-                load_planned_sample(
-                    caches.as_ref(),
-                    cache_offsets.as_ref(),
-                    physical_index,
-                    &mut readers.borrow_mut(),
-                )
-            })?;
+            let result = SHARD_READERS
+                .with(|readers| {
+                    load_planned_sample(
+                        caches.as_ref(),
+                        cache_offsets.as_ref(),
+                        physical_index,
+                        &mut readers.borrow_mut(),
+                    )
+                })
+                .map_err(|error| error.context(format!("reader worker sequence {sequence}")))?;
             if cancelled.load(Ordering::Acquire) {
                 return Err(CacheError::WorkerFailed);
             }
@@ -205,12 +208,14 @@ impl Iterator for RuntimeIterator {
                 Ok(Err(error)) => {
                     self.emitted = self.total;
                     self.cancelled.store(true, Ordering::Release);
-                    return Some(Err(error));
+                    return Some(Err(error.context("receive reader worker result")));
                 }
                 Err(_) => {
                     self.emitted = self.total;
                     self.cancelled.store(true, Ordering::Release);
-                    return Some(Err(CacheError::WorkerFailed));
+                    return Some(Err(CacheError::WorkerFailed.context(
+                        "reader result channel disconnected before iteration completed",
+                    )));
                 }
             };
             // Read workers may finish out of order; Python observes the planned
@@ -227,7 +232,10 @@ impl Iterator for RuntimeIterator {
             {
                 self.emitted = self.total;
                 self.cancelled.store(true, Ordering::Release);
-                return Some(Err(CacheError::WorkerFailed));
+                return Some(Err(CacheError::WorkerFailed.context(format!(
+                    "reader received duplicate result sequence {}",
+                    loaded.sequence
+                ))));
             }
         }
     }

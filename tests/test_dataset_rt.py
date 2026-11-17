@@ -511,7 +511,9 @@ def test_multi_source_write_reports_failure_and_keeps_successes(tmp_path: Path) 
 
     assert results == [
         CacheWriteSuccess("tiny", root / "tiny"),
-        CacheWriteError("bad", "data must be bytes-like"),
+        CacheWriteError(
+            "bad", f"write source 'bad' to '{root / 'tmp' / 'bad'}': data must be bytes-like"
+        ),
         CacheWriteSuccess("later", root / "later"),
     ]
     assert not (root / "bad").exists()
@@ -533,7 +535,10 @@ def test_empty_source_is_reported_as_write_error(tmp_path: Path) -> None:
 
     assert results == [
         CacheWriteSuccess("tiny", root / "tiny"),
-        CacheWriteError("empty", "cache source yielded no samples"),
+        CacheWriteError(
+            "empty",
+            f"write source 'empty' to '{root / 'tmp' / 'empty'}': cache source yielded no samples",
+        ),
     ]
     assert not (root / "empty").exists()
     assert not (root / "tmp" / "empty").exists()
@@ -1080,7 +1085,10 @@ def test_from_cache_sources_returns_dataset_with_write_errors(tmp_path: Path) ->
             assert len(dataset) == 3
             assert results == [
                 CacheWriteSuccess("tiny", tmp_path / "cache" / "tiny"),
-                CacheWriteError("empty", "cache source yielded no samples"),
+                CacheWriteError(
+                    "empty",
+                    f"write source 'empty' to '{tmp_path / 'cache' / 'tmp' / 'empty'}': cache source yielded no samples",
+                ),
             ]
         case result:
             raise AssertionError(result)
