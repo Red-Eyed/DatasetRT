@@ -161,6 +161,7 @@ pub enum CompressionAlgo {
     None,
     Lz4,
     Brotli,
+    Zstd,
 }
 
 impl CompressionAlgo {
@@ -169,6 +170,7 @@ impl CompressionAlgo {
             "none" => Ok(Self::None),
             "lz4" => Ok(Self::Lz4),
             "brotli" => Ok(Self::Brotli),
+            "zstd" => Ok(Self::Zstd),
             _ => Err(CacheError::InvalidInput(format!(
                 "unsupported shard compression algorithm '{value}'"
             ))),
@@ -192,6 +194,7 @@ pub enum ShardCompression {
     Lz4Fast { acceleration: i32 },
     Lz4HC { level: i32 },
     Brotli { level: i32 },
+    Zstd { level: i32 },
 }
 
 /// Modern wire modes reject parameters belonging to other variants.
@@ -202,6 +205,7 @@ enum RecordOptions {
     Fast { acceleration: i32 },
     Hc { level: i32 },
     Brotli { level: i32 },
+    Zstd { level: i32 },
 }
 
 /// Parse historical and modern settings once, without guessing from numeric values.
@@ -219,9 +223,9 @@ enum CompressionWire {
 impl ShardCompression {
     /// Preserve legacy ratios as metadata while validating their historical contract.
     pub fn new(algo: CompressionAlgo, ratio: f64) -> CacheResult<Self> {
-        if algo == CompressionAlgo::Brotli {
+        if matches!(algo, CompressionAlgo::Brotli | CompressionAlgo::Zstd) {
             return Err(CacheError::InvalidInput(
-                "Brotli requires the typed whole-record policy".to_string(),
+                "Brotli and Zstd require a typed whole-record policy".to_string(),
             ));
         }
         if !ratio.is_finite() || ratio <= 0.0 {
@@ -267,6 +271,16 @@ impl ShardCompression {
         Ok(Self::Brotli { level })
     }
 
+    /// Reject alias and out-of-range levels before native encoding or manifest acceptance.
+    pub fn zstd(level: i32) -> CacheResult<Self> {
+        if !(1..=22).contains(&level) {
+            return Err(CacheError::InvalidInput(
+                "Zstd level must be between 1 and 22".to_string(),
+            ));
+        }
+        Ok(Self::Zstd { level })
+    }
+
     /// Only explicit modern variants change the on-disk record scope.
     pub fn whole_record(&self) -> bool {
         !matches!(self, Self::Legacy(_))
@@ -304,6 +318,10 @@ impl Serialize for ShardCompression {
                 algo: CompressionAlgo::Brotli,
                 options: RecordOptions::Brotli { level: *level },
             },
+            Self::Zstd { level } => CompressionWire::Record {
+                algo: CompressionAlgo::Zstd,
+                options: RecordOptions::Zstd { level: *level },
+            },
             Self::Lz4HC { level } => CompressionWire::Record {
                 algo: CompressionAlgo::Lz4,
                 options: RecordOptions::Hc { level: *level },
@@ -335,6 +353,10 @@ impl<'de> Deserialize<'de> for ShardCompression {
                 algo: CompressionAlgo::Brotli,
                 options: RecordOptions::Brotli { level },
             } => Self::brotli(level),
+            CompressionWire::Record {
+                algo: CompressionAlgo::Zstd,
+                options: RecordOptions::Zstd { level },
+            } => Self::zstd(level),
             _ => Err(CacheError::InvalidInput(
                 "compression algorithm and mode disagree".to_string(),
             )),

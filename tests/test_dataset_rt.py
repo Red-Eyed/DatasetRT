@@ -461,7 +461,7 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
         )
 
     class UnsupportedCompression:
-        algo = "zstd"
+        algo = "unsupported-codec"
         ratio = 2.0
 
     class UnsupportedWriterConfig:
@@ -474,7 +474,7 @@ def test_writer_config_validation_happens_in_rust(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unsupported shard compression"):
         RUNTIME.write_cache(
             TinySource(),
-            tmp_path / "zstd",
+            tmp_path / "unsupported-codec",
             writer_config=cast("WriterConfig", UnsupportedWriterConfig()),
         )
 

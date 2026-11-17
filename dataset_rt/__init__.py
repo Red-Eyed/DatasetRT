@@ -28,6 +28,7 @@ from dataset_rt.api import (
     SizedTorchIterableDataset,
     WriterConfig,
     WriterProfilerConfig,
+    Zstd,
 )
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "SizedTorchIterableDataset",
     "WriterConfig",
     "WriterProfilerConfig",
+    "Zstd",
     "AbsentManifestTarget",
     "Err",
     "ManifestUpdateEntry",

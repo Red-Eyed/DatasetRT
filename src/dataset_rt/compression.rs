@@ -1,4 +1,5 @@
 mod brotli;
+mod zstd;
 
 use lz4_flex::block::{compress_into, decompress_into, get_maximum_output_size};
 
@@ -13,6 +14,7 @@ pub fn compress_payload(data: Vec<u8>, compression: &ShardCompression) -> CacheR
             ..
         }) => Ok(data),
         ShardCompression::Brotli { level } => brotli::compress(data, *level),
+        ShardCompression::Zstd { level } => zstd::compress(data, *level),
         ShardCompression::Lz4Fast { acceleration } => {
             compress_record(data, lz4::block::CompressionMode::FAST(*acceleration))
         }
@@ -81,6 +83,7 @@ pub fn decompress_payload(
 ) -> CacheResult<Vec<u8>> {
     match compression {
         ShardCompression::Brotli { .. } => brotli::decompress(data, max_uncompressed_len),
+        ShardCompression::Zstd { .. } => zstd::decompress(data, max_uncompressed_len),
         ShardCompression::Legacy(_)
         | ShardCompression::None
         | ShardCompression::Lz4Fast { .. }
@@ -90,7 +93,7 @@ pub fn decompress_payload(
     }
 }
 
-/// Keep legacy LZ4 framing separate from the Brotli stream decoder.
+/// Keep legacy LZ4 framing separate from the other record decoders.
 fn decompress_lz4_or_plain(
     data: &[u8],
     compression: &ShardCompression,
@@ -176,6 +179,8 @@ mod record_mode_tests {
             ShardCompression::fast(65_537)?,
             ShardCompression::hc(1)?,
             ShardCompression::hc(12)?,
+            ShardCompression::zstd(1)?,
+            ShardCompression::zstd(3)?,
         ] {
             let wire = serde_json::to_vec(&mode)?;
             let decoded_mode: ShardCompression = serde_json::from_slice(&wire)?;
@@ -189,6 +194,9 @@ mod record_mode_tests {
         assert!(ShardCompression::fast(65_538).is_err());
         assert!(ShardCompression::hc(0).is_err());
         assert!(ShardCompression::hc(13).is_err());
+        assert!(ShardCompression::zstd(0).is_err());
+        assert!(ShardCompression::zstd(23).is_err());
+        assert!(ShardCompression::new(CompressionAlgo::Zstd, 1.0).is_err());
         Ok(())
     }
 }

@@ -131,14 +131,14 @@ Next: [filter and rebalance samples with Polars](polars-sampling.md) or
 
 ## Control per-sample compression
 
-`WriterConfig()` defaults to `Lz4Fast(acceleration=1)`: a balanced policy that
+`WriterConfig()` defaults to `Zstd(level=3)`, which
 compresses each complete record, including metadata and runs of zero bytes.
-Choose HC explicitly when more write effort is acceptable, or disable
-compression explicitly when needed:
+Select another codec or disable compression explicitly when needed:
 
 ```python
-from dataset_rt import Brotli, Lz4Fast, Lz4HC, NoCompression, WriterConfig
+from dataset_rt import Brotli, Lz4Fast, Lz4HC, NoCompression, WriterConfig, Zstd
 
+standard = WriterConfig(shard_compression=Zstd(level=3))
 text = WriterConfig(shard_compression=Brotli(level=5))
 compact = WriterConfig(shard_compression=Lz4HC(level=9))
 fast = WriterConfig(shard_compression=Lz4Fast(acceleration=1))
@@ -151,6 +151,16 @@ increase compression effort. Level 1 still means HC compression, not disabled
 compression. Neither parameter guarantees a target compressed size. Measure
 write throughput, read throughput, and cache size on representative records
 before rebuilding a large cache. Whole-record decoding can affect read throughput. Decoding does not require the writer's compression effort setting.
+
+Zstd accepts positive standard levels 1–22, with increasing compression effort
+and codec workspace at higher levels. Each record is one standard Zstandard
+frame with its decoded size and a content checksum. Rust checks that size against
+the shard's declared uncompressed length before allocating an exact output buffer,
+then rejects truncated frames, trailing data, and checksum or length mismatches.
+The native library is statically bundled in wheels; no system Zstd installation
+is needed, and the codec adds no worker threads. New Zstd caches require
+DatasetRT 0.5.3 or newer. Use `Lz4Fast()` explicitly when sharing new caches with
+0.5.0–0.5.2 readers.
 
 Default writes and these typed policies use format v4. Existing
 `ShardCompression` calls
@@ -169,7 +179,7 @@ payload compressed together. The separate Arrow metadata table remains unchanged
 A four-byte decoded-size prefix bounds record output before decoding; malformed
 streams and inconsistent lengths return errors.
 
-Brotli is optional and does not replace the fast-LZ4 default. Smaller text records
+Brotli is optional; Zstd remains the default. Smaller text records
 do not imply equal read throughput: benchmark your actual data before selecting
 it for training. Its encoder uses portable floating-point calculations for
 reproducible output across supported targets. No system Brotli library is needed.

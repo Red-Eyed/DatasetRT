@@ -15,6 +15,7 @@ from dataset_rt import (
     NoCompression,
     ReaderConfig,
     WriterConfig,
+    Zstd,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +84,66 @@ def read_manifest(cache_path: Path) -> Manifest:
 def write_manifest(cache_path: Path, manifest: Manifest) -> None:
     """Retain native fields while publishing deliberate corruption-test edits."""
     (cache_path / "manifest.json").write_text(manifest.model_dump_json())
+
+
+@pytest.fixture
+def zstd_cache(tmp_path: Path) -> Path:
+    """Publish independent sized frames for native corruption and shape validation."""
+    result = RUNTIME.write_cache(
+        IntegritySource(),
+        tmp_path,
+        writer_config=WriterConfig(shard_compression=Zstd(), show_progress=False),
+    )[0]
+    match result:
+        case CacheWriteSuccess(path=path):
+            return path
+        case error:
+            raise AssertionError(error)
+
+
+@pytest.mark.parametrize(
+    ("corruption", "diagnostic"),
+    [("magic", "frame magic"), ("size", "content size exceeds"), ("checksum", "decompress Zstd")],
+)
+def test_zstd_frame_corruption_is_rejected_without_shard_hashing(
+    zstd_cache: Path, corruption: str, diagnostic: str
+) -> None:
+    """Default reads validate frame sizes and checksums even with full hashing disabled."""
+    index = (zstd_cache / "index.bin").read_bytes()
+    first_length = int.from_bytes(index[16:24], "little")
+    shard_path = zstd_cache / "shards" / "000000.bin"
+    data = bytearray(shard_path.read_bytes())
+    match corruption:
+        case "magic":
+            data[0] ^= 1
+        case "size":
+            # Small single-segment frames store their decoded size in one byte.
+            assert data[4] & 0x20 and data[4] >> 6 == 0
+            data[5] = 255
+        case "checksum":
+            data[first_length - 1] ^= 1
+    shard_path.write_bytes(data)
+    dataset = RUNTIME.cached_dataset(
+        [zstd_cache], reader_config=ReaderConfig(seed=0, shuffle=False)
+    )
+    with pytest.raises(ValueError, match=diagnostic):
+        next(iter(dataset))
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        load_cache(zstd_cache)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ['"level": 0', '"level": 23', '"level": 3, "acceleration": 1', '"level": true'],
+)
+def test_zstd_manifest_parameters_are_validated_in_rust(zstd_cache: Path, replacement: str) -> None:
+    """Hand-edited manifests cannot bypass the codec's typed parameter contract."""
+    path = zstd_cache / "manifest.json"
+    original = path.read_text()
+    assert '"level": 3' in original
+    path.write_text(original.replace('"level": 3', replacement))
+    with pytest.raises(RuntimeError):
+        load_cache(zstd_cache)
 
 
 def read_u64(bytes_: bytes) -> int:

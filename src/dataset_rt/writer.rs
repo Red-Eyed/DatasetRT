@@ -531,6 +531,13 @@ fn extract_shard_compression(value: &Bound<'_, PyAny>) -> CacheResult<ShardCompr
                         .extract::<i32>()
                         .map_err(py_error)?,
                 ),
+                (CompressionAlgo::Zstd, "zstd") => ShardCompression::zstd(
+                    value
+                        .getattr("level")
+                        .map_err(py_error)?
+                        .extract::<i32>()
+                        .map_err(py_error)?,
+                ),
                 (CompressionAlgo::Lz4, "fast") => ShardCompression::fast(
                     value
                         .getattr("acceleration")

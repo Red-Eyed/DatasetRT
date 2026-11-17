@@ -23,6 +23,7 @@ from dataset_rt import (
     RecordCompression,
     ShardCompression,
     WriterConfig,
+    Zstd,
 )
 
 if TYPE_CHECKING:
@@ -89,6 +90,9 @@ def runtime() -> DatasetRuntime:
         Brotli(level=0),
         Brotli(level=5),
         Brotli(level=11),
+        Zstd(level=1),
+        Zstd(level=3),
+        Zstd(level=9),
     ],
 )
 @pytest.mark.parametrize("processes", [0, 2])
@@ -118,7 +122,7 @@ def test_whole_record_round_trip(
         assert dataset.get_item(manifest.cache_id, index).data.startswith(
             index.to_bytes(4, "little")
         )
-    if policy.algo in ("lz4", "brotli"):
+    if policy.algo in ("lz4", "brotli", "zstd"):
         assert sum(shard.byte_len for shard in manifest.shards) < sum(
             shard.uncompressed_byte_len for shard in manifest.shards
         )
@@ -143,6 +147,12 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
         tmp_path,
         writer_config=WriterConfig(shard_compression=Brotli(), show_progress=False),
     )[0]
+    zstd_cache = runtime.write_cache(
+        CompressionSource(name="zstd"),
+        tmp_path,
+        writer_config=WriterConfig(show_progress=False),
+    )[0]
+    assert isinstance(zstd_cache, CacheWriteSuccess)
     assert isinstance(brotli_cache, CacheWriteSuccess)
     assert isinstance(legacy, CacheWriteSuccess)
     assert isinstance(modern, CacheWriteSuccess)
@@ -152,10 +162,10 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         dataset = runtime.cached_dataset(
-            [legacy.path, modern.path, brotli_cache.path],
+            [legacy.path, modern.path, brotli_cache.path, zstd_cache.path],
             reader_config=ReaderConfig(seed=7, shuffle=False, validate_cache=True),
         )
-        assert len(list(dataset)) == 384
+        assert len(list(dataset)) == 512
     assert not captured
     report = dataset.update_manifests(version=3)
     match report:
@@ -185,6 +195,14 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
         '{"algo":"brotli","mode":"brotli","level":true}',
         '{"algo":"brotli","mode":"brotli","level":5,"acceleration":1}',
         '{"algo":"lz4","mode":"brotli","level":5}',
+        '{"algo":"zstd","mode":"zstd","level":0}',
+        '{"algo":"zstd","mode":"zstd","level":23}',
+        '{"algo":"zstd","mode":"zstd","level":true}',
+        '{"algo":"zstd","mode":"zstd","level":3.0}',
+        '{"algo":"zstd","mode":"zstd","level":3,"acceleration":1}',
+        '{"algo":"lz4","mode":"zstd","level":3}',
+        '{"algo":"zstd","mode":"fast","acceleration":1}',
+        '{"algo":"zstd","ratio":1.0}',
     ],
 )
 def test_invalid_variants_cannot_fall_back_to_legacy(wire: str) -> None:
@@ -193,13 +211,27 @@ def test_invalid_variants_cannot_fall_back_to_legacy(wire: str) -> None:
         WriterConfig.model_validate_json('{"shard_compression":' + wire + "}")
 
 
-def test_implicit_default_uses_fast_lz4_without_warnings() -> None:
+def test_implicit_default_uses_zstd_without_warnings() -> None:
     """Omitted compression selects the balanced whole-record policy without warnings."""
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         config = WriterConfig()
     assert not captured
-    assert config.shard_compression == Lz4Fast(acceleration=1)
+    assert config.shard_compression == Zstd(level=3)
+
+
+@pytest.mark.parametrize("level", [0, 23])
+def test_native_writer_validates_zstd_levels(
+    tmp_path: Path, runtime: DatasetRuntime, level: int
+) -> None:
+    """Rust rejects invalid settings even if the Python model was built without validation."""
+    policy = Zstd.model_construct(level=level)
+    with pytest.raises(ValueError, match="Zstd level must be between 1 and 22"):
+        runtime.write_cache(
+            CompressionSource(),
+            tmp_path,
+            writer_config=WriterConfig(shard_compression=policy, show_progress=False),
+        )
 
 
 @pytest.mark.parametrize("replacement", ['"level": 13', '"level": 9, "acceleration": 1'])
@@ -273,7 +305,7 @@ def test_default_compression_shrinks_zeroes(tmp_path: Path, runtime: DatasetRunt
     assert isinstance(result, CacheWriteSuccess)
     manifest = Manifest.model_validate_json((result.path / "manifest.json").read_text())
     assert manifest.format_version == 4
-    assert manifest.shards[0].compression == Lz4Fast(acceleration=1)
+    assert manifest.shards[0].compression == Zstd(level=3)
     assert manifest.shards[0].byte_len < 8192 // 10
     dataset = runtime.cached_dataset(
         [result.path], reader_config=ReaderConfig(seed=7, shuffle=False, validate_cache=True)

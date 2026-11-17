@@ -2,6 +2,23 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.3
+
+### Improvements
+
+- Add `Zstd(level=...)` whole-record compression with validated positive standard
+  levels 1–22 and make `Zstd(level=3)` the default for new caches. Frames carry
+  decoded sizes and content checksums; Rust bounds allocation and rejects
+  truncated, corrupt, concatenated, or trailing frame data. The codec library
+  is statically bundled and adds no internal worker threads.
+
+### Compatibility
+
+- Existing caches retain their codecs and remain readable. New Zstd caches
+  require DatasetRT 0.5.3 or newer; select `Lz4Fast()` explicitly to share new
+  caches with 0.5.0–0.5.2 readers. Cache reuse preserves existing compression;
+  use a new destination to rebuild with Zstd.
+
 ## 0.5.2
 
 ### Improvements

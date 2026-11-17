@@ -59,12 +59,12 @@ class ShardCompression(BaseModel):
                     value
                 ):
                     raise ValueError(
-                        "compression options belong to NoCompression, Lz4Fast, Lz4HC, or Brotli"
+                        "compression options belong to NoCompression, Lz4Fast, Lz4HC, Brotli, or Zstd"
                     )
         result = handler(value)
         warnings.warn(
             "ShardCompression is deprecated; use NoCompression(), Lz4Fast(acceleration=1), "
-            "Lz4HC(level=9), or Brotli(level=5). "
+            "Lz4HC(level=9), Brotli(level=5), or Zstd(level=3). "
             "Legacy ratio never controlled compression and remains ignored. "
             "Legacy calls write payload-only v3 caches; new variants write whole-record v4 caches.",
             DeprecationWarning,
@@ -119,19 +119,37 @@ class Brotli(BaseModel):
     """Accept 0–11; higher values spend more write effort seeking smaller output."""
 
 
+class Zstd(BaseModel):
+    """Compress independent complete records with statically bundled Zstandard.
+
+    Levels 1–22 select increasing compression effort; level 3 is the writer
+    default. Each record is one standard frame with a declared decoded size.
+    Rust validates settings and bounds decoded output before allocation.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    algo: Literal["zstd"] = "zstd"
+    """Persist the Zstandard frame codec discriminator."""
+    mode: Literal["zstd"] = "zstd"
+    """Select whole-record Zstandard independently of other codec settings."""
+    level: int = Field(default=3, ge=1, le=22, strict=True)
+    """Accept positive standard levels 1–22; higher levels require more write effort."""
+
+
 # Resolve variant annotations before assigning their stable public pickle paths.
 NoCompression.__module__ = "dataset_rt.api"
 Lz4Fast.__module__ = "dataset_rt.api"
 Lz4HC.__module__ = "dataset_rt.api"
 Brotli.__module__ = "dataset_rt.api"
+Zstd.__module__ = "dataset_rt.api"
 
 
 RecordCompression: TypeAlias = Annotated[
-    NoCompression | Lz4Fast | Lz4HC | Brotli, Field(discriminator="mode")
+    NoCompression | Lz4Fast | Lz4HC | Brotli | Zstd, Field(discriminator="mode")
 ]
 """Closed whole-record policies with codec-specific settings."""
 
-DEFAULT_SHARD_COMPRESSION = Lz4Fast()
+DEFAULT_SHARD_COMPRESSION = Zstd()
 
 
 class WriterProfilerConfig(BaseModel):

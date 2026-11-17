@@ -29,6 +29,7 @@ from dataset_rt.config import (
 from dataset_rt.config import (
     WriterProfilerConfig as WriterProfilerConfig,
 )
+from dataset_rt.config import Zstd as Zstd
 from dataset_rt.dataset import CachedDataset as CachedDataset
 from dataset_rt.records import (
     AbsentManifestTarget as AbsentManifestTarget,

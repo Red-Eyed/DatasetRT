@@ -137,7 +137,7 @@ For v2/v3, compression is applied per indexed payload, after the redundant metad
 
 ### Format v4: complete-record compression
 
-Typed `NoCompression`, `Lz4Fast`, `Lz4HC`, and `Brotli` policies write format v4.
+Typed `NoCompression`, `Lz4Fast`, `Lz4HC`, `Brotli`, and `Zstd` policies write format v4.
 The logical record remains an eight-byte metadata length, metadata JSON, then
 payload bytes. LZ4 compresses that entire record as one independent block, with
 a four-byte little-endian decoded-length prefix. `NoCompression` writes the
@@ -151,12 +151,20 @@ V4 compression settings are typed variants:
 - `{ "algo": "lz4", "mode": "fast", "acceleration": 1 }`
 - `{ "algo": "lz4", "mode": "hc", "level": 9 }`
 - `{ "algo": "brotli", "mode": "brotli", "level": 5 }`
+- `{ "algo": "zstd", "mode": "zstd", "level": 3 }`
 
 Fast acceleration accepts integers 1–65537; HC levels accept integers 1–12.
 Brotli accepts levels 0–11. Brotli records contain a four-byte little-endian
 decoded-length prefix followed by a standard Brotli stream of the complete
 logical record. The decoder writes into an exactly bounded output buffer and
 requires the actual decoded length to match the prefix.
+Zstd accepts positive standard levels 1–22. Each record is a single standard
+Zstandard frame, including frame magic, content size, and a content checksum.
+There is no additional DatasetRT size prefix. The content size must be present
+and no larger than the shard's declared `uncompressed_byte_len`; output is
+allocated fallibly to exactly that size. Decoding must produce that exact length.
+Skippable frames, unknown content sizes, concatenated frames, trailing bytes,
+truncation, and checksum failures are rejected.
 Higher acceleration favors write speed; higher HC levels increase compression
 effort. No setting promises a particular size ratio. The reader uses the same
 standard LZ4 block decoder for both compressed modes. Compression mode, record
@@ -170,10 +178,12 @@ block-size limit; unsupported sizes return errors before compression.
 Existing `ShardCompression(...)` configurations retain their v3 payload-only
 behavior and emit a Python deprecation warning when constructed explicitly.
 Their historical `ratio` remains manifest metadata and is never used as a level.
-The default for new writes is `Lz4Fast(acceleration=1)`, using v4 without a
+The default for new writes is `Zstd(level=3)`, using v4 without a
 deprecation warning. Old caches stay readable without
-rewriting, and a dataset can combine v2, v3, and v4 caches. Older DatasetRT
-releases reject v4. Manifest-only identity migration still targets v3 and leaves
+rewriting, and a dataset can combine v2, v3, and v4 caches. Releases before
+0.5.0 reject v4; releases before 0.5.3 reject the Zstd codec discriminator even
+when they support other v4 codecs. Explicit `Lz4Fast()` preserves interoperability
+with 0.5.0–0.5.2 readers. Manifest-only identity migration still targets v3 and leaves
 v4 caches unchanged; it cannot convert record layouts.
 
 ## Integrity

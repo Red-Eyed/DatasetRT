@@ -17,6 +17,9 @@ Each dataset has two connected parts:
 
 The Python API exposes the metadata table as a **Polars DataFrame**. The payloads
 remain in indexed disk shards, linked to metadata by `(cache_id, sample_id)`.
+New caches use `Zstd(level=3)` compression for independent records; existing
+caches keep their recorded codec. See the [compression guide](https://red-eyed.github.io/DatasetRT/cache-training-data/#control-per-sample-compression)
+for other codecs and reader compatibility.
 
 Install **`dataset-rt`**, import **`dataset_rt`**, and use **DatasetRT** with your
 existing training framework.

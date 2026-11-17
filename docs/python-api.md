@@ -47,7 +47,7 @@ results = runtime.write_cache(
     writer_config=WriterConfig(
         prefetch_size=64,
         max_shard_bytes=...,
-        shard_compression=ShardCompression(algo="none", ratio=1.0),
+        shard_compression=Zstd(level=3),
         show_progress=True,
         validate_cache=False,
     ),
@@ -100,7 +100,7 @@ class WriterConfig(BaseModel):
     process_timeout_seconds: float = 3600.0
     prefetch_size: int = 64
     max_shard_bytes: int = 64 * 1024 * 1024
-    shard_compression: ShardCompression = ShardCompression()
+    shard_compression: RecordCompression | ShardCompression = Zstd()
     show_progress: bool = True
     validate_cache: bool = False
     profiler: WriterProfilerConfig = WriterProfilerConfig()
@@ -110,9 +110,19 @@ class WriterProfilerConfig(BaseModel):
     path: Path = Path("dataset_rt_profile.json")
 ```
 
-Python validates the config shape with pydantic, then Rust validates it again before writing. DatasetRT v0.1 supports `algo="none"` with `ratio=1.0` and `algo="lz4"` with a positive finite ratio value.
+Python validates the config shape with pydantic, then Rust validates it again before writing.
+New writes default to `Zstd(level=3)`. `NoCompression`, `Lz4Fast`, `Lz4HC`, and
+`Brotli` remain explicit alternatives. Legacy `ShardCompression` accepts
+`algo="none"` with `ratio=1.0` and `algo="lz4"` with a positive finite ratio;
+it retains its payload-only layout and warns on explicit construction.
 
-LZ4 compression is applied per payload record, not to the whole shard as one stream. This keeps random sample access direct: the index locates one compressed record, and Rust decompresses that record before returning the original bytes. The commonly named Rust `zstd` crate is a binding to the C zstd library, so it is not used for v0.1. A pure-Rust zstd implementation may be considered later once its compression path is accepted as stable enough for DatasetRT.
+Typed policies compress each complete metadata/payload record independently.
+The index locates one record, preserving direct random access. Zstd uses the
+statically bundled native library with no system library dependency or internal
+worker threads. Its frame content size bounds output before decoding, and its
+content checksum detects corruption even when full shard hashing is disabled.
+See [compression settings](cache-training-data.md#control-per-sample-compression)
+for codec ranges and cache compatibility.
 
 Set `profiler=WriterProfilerConfig(enabled=True, path=Path("profile.json"))` to write a structured timing summary after the write returns, including handled failures such as Ctrl-C. The summary separates Python iterator time (`python_next`), Python-to-Rust extraction (`python_extract`), queue backpressure (`ingress_wait`), Rust metadata/record work, compression, disk writes, finish steps, and publish time.
 
@@ -798,7 +808,7 @@ Fields:
 
 ```python
 RecordCompression = Annotated[
-    NoCompression | Lz4Fast | Lz4HC | Brotli, Field(discriminator="mode")
+    NoCompression | Lz4Fast | Lz4HC | Brotli | Zstd, Field(discriminator="mode")
 ]
 ```
 
@@ -849,6 +859,19 @@ Ctrl-C.
 Fields:
 - `enabled: bool`: Whether Rust collects and writes writer-stage timing statistics.
 - `path: Path`: JSON summary path used when profiling is enabled.
+
+### `Zstd`
+
+Compress independent complete records with statically bundled Zstandard.
+
+Levels 1–22 select increasing compression effort; level 3 is the writer
+default. Each record is one standard frame with a declared decoded size.
+Rust validates settings and bounds decoded output before allocation.
+
+Fields:
+- `algo: Literal['zstd']`: Persist the Zstandard frame codec discriminator.
+- `mode: Literal['zstd']`: Select whole-record Zstandard independently of other codec settings.
+- `level: int`: Accept positive standard levels 1–22; higher levels require more write effort.
 
 ### `AbsentManifestTarget`
 
