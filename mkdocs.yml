@@ -21,7 +21,9 @@ exclude_docs: |
 theme:
   name: readthedocs
   custom_dir: docs_overrides
-  highlightjs: false
+  highlightjs: true
+  hljs_languages:
+    - python
   collapse_navigation: false
   navigation_depth: 2
   titles_only: true

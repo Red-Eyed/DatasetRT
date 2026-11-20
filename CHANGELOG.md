@@ -2,6 +2,12 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.6
+
+### Documentation
+
+- Restore Python syntax highlighting in the documentation site.
+
 ## 0.5.5
 
 ### Documentation
