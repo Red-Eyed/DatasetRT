@@ -2,6 +2,15 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.5
+
+### Documentation
+
+- Lead onboarding with installation and a complete cache/reuse example, clarify
+  the metadata-driven workflow, and document available wheel platforms.
+- Add software citation metadata, contribution guidance, issue and pull-request
+  templates, and repository social-preview artwork.
+
 ## 0.5.4
 
 ### Improvements

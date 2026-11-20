@@ -16,6 +16,7 @@ exclude_docs: |
   /development.md
   /build.md
   /discoverability.md
+  /assets/social-preview.md
 
 theme:
   name: readthedocs

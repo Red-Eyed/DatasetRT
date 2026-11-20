@@ -1,118 +1,32 @@
-# DatasetRT — Dataset Caching for Machine Learning
+# DatasetRT
 
-[Documentation](https://red-eyed.github.io/DatasetRT/) ·
-[PyPI](https://pypi.org/project/dataset-rt/) ·
-[Issues](https://github.com/Red-Eyed/DatasetRT/issues)
+[![CI](https://github.com/Red-Eyed/DatasetRT/actions/workflows/ci.yml/badge.svg)](https://github.com/Red-Eyed/DatasetRT/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dataset-rt.svg)](https://pypi.org/project/dataset-rt/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Cache preprocessing once. Change subsets and sampling weights without rewriting payloads.**
 
 DatasetRT is a Rust-powered dataset cache for Python machine learning pipelines.
-It combines fast native sample reads with a separate metadata table for analyzing,
-filtering, and weighting training data without unpacking or rewriting its payloads.
+Store serialized training records in immutable disk shards, then use a separate
+**Polars DataFrame** to analyze, filter, and rebalance the training population.
 
-Each dataset has two connected parts:
+- **Reuse preprocessing:** reopen existing caches without rebuilding records.
+- **Change experiments:** edit subsets, class balance, or hard-example weights
+  through metadata while cached payloads stay unchanged.
+- **Control reads:** Rust owns indexed reads, deterministic sampling, native
+  workers, and bounded prefetching. Your code owns decoding and transforms.
 
-| Part | Contains | Used for |
-| --- | --- | --- |
-| Payload store | Serialized bytes, typically dictionaries or large Python structures packed with pickle or dill | Read and unpack the samples needed for training |
-| Metadata table | Sample identities, primitive attributes such as labels and splits, and sampling weights | Analyze the population, filter samples, and control how often each sample is drawn |
-
-The Python API exposes the metadata table as a **Polars DataFrame**. The payloads
-remain in indexed disk shards, linked to metadata by `(cache_id, sample_id)`.
-New caches use `Zstd(level=3)` compression for independent records; existing
-caches keep their recorded codec. See the [compression guide](https://red-eyed.github.io/DatasetRT/cache-training-data/#control-per-sample-compression)
-for other codecs and reader compatibility.
-
-Install **`dataset-rt`**, import **`dataset_rt`**, and use **DatasetRT** with your
-existing training framework.
-
-For example, create a development subset by editing only the metadata:
-
-```python
-metadata = dataset.get_metadata()
-
-dev_run = metadata.head(100)
-dataset.update_metadata(dev_run)
-```
-
-Future reads draw from that subset, and your read transform unpacks `sample.data`.
-
-Rows in the active metadata table are the rows DatasetRT samples from. Remove
-rows for a fast development run, duplicate rows or update `weight` for class
-balancing and OHEM, add extra columns for training annotations, and let Rust
-validate that every row still maps to an immutable cache sample.
-
-## Why It Exists
-
-Training experiments often reuse the same expensive preprocessed records while
-changing which samples they use. Keeping metadata separate from large serialized
-payloads makes those changes possible without reading every payload:
-
-- **Analyze:** inspect class counts, splits, or stored quality scores using the
-  metadata table.
-- **Filter:** select development subsets or exclude records without making new
-  copies of the cache.
-- **Weight:** rebalance classes or prioritize hard examples by changing sampling
-  weights while payload bytes remain immutable.
-- **Read quickly:** Rust performs indexed payload reads with native workers and
-  bounded prefetching; Python unpacks and transforms the delivered records.
-- **Save RAM across loading processes:** workers map a shared immutable metadata
-  snapshot and cache indexes read-only with `mmap`. The OS can share their backing
-  pages on the same host, avoiding a full private copy of those buffers per worker.
-- **Reproduce:** repeat sampling from identical cache contents, active metadata,
-  seed, and stream history.
-
-See the [reader measurements](https://red-eyed.github.io/DatasetRT/benchmarks/)
-for startup, throughput, and memory results. End-to-end speed also depends on
-storage, payload size, unpacking, transforms, and worker configuration.
-Weights, sampling state, decoded records, and prefetched batches still consume
-memory per worker; see the [multiprocessing memory guide](https://red-eyed.github.io/DatasetRT/runtime-guide/#share-metadata-and-indexes-with-mmap).
-
-## The Core Idea
-
-DatasetRT exposes the active **metadata**, including sampling weights, as a
-Polars table:
-
-```text
-cache_id | sample_id | <stored metadata columns...> | weight | <extra columns...>
-```
-
-Each row points to a stored payload; the payload itself is not a DataFrame cell.
-Analyze or edit this table without unpickling the sample records. For example,
-assign inverse-frequency class weights:
-
-```python
-import polars as pl
-
-metadata = dataset.get_metadata()
-
-balanced = (
-    metadata.join(
-        metadata.group_by("label").agg(pl.len().alias("class_count")),
-        on="label",
-    )
-    .with_columns((1.0 / pl.col("class_count")).alias("weight"))
-    .drop("class_count")
-)
-
-dataset.update_metadata(balanced)
-```
-
-`update_metadata()` is runtime-only. It does not rewrite `metadata.arrow`,
-`index.bin`, shards, or manifests. Future iterators use the updated active table;
-already-created iterators keep their snapshot.
-
-With `drt.ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
-multinomial sampling with replacement over the active table. With
-`shuffle=False`, it emits active rows in cyclic table order, including
-duplicates.
-Use `dataset.set_epoch_len(n)` to make future iterators emit a finite window of
-`n` samples. Ordered reads continue through the active table cyclically across
-iterator boundaries, while shuffled reads continue a deterministic multinomial
-draw stream. Updating metadata resets the stream and sets the epoch
-length to the new table row count. Call `set_epoch_len` afterward to override it.
+[Documentation](https://red-eyed.github.io/DatasetRT/) ·
+[PyTorch tutorial](https://red-eyed.github.io/DatasetRT/pytorch-dataloader/) ·
+[Benchmarks](https://red-eyed.github.io/DatasetRT/benchmarks/) ·
+[Compare tools](https://red-eyed.github.io/DatasetRT/comparisons/)
 
 ## Installation
 
-DatasetRT supports Python 3.10 through 3.13.
+DatasetRT supports Python 3.10 through 3.13. Prebuilt wheels are available for
+Linux (x86-64 and ARM64) and macOS (Intel and Apple Silicon). PyTorch is optional.
+
+Install **`dataset-rt`**, import **`dataset_rt`**.
 
 ```bash
 uv add dataset-rt
@@ -202,6 +116,107 @@ instead after installing `dill` when your record types require it. The source
 packs the record, DatasetRT stores its bytes, and your read transform unpacks it.
 See the [serialization guide](https://red-eyed.github.io/DatasetRT/serialization/).
 
+## Payloads and Metadata
+
+Each dataset has two connected parts:
+
+| Part | Contains | Used for |
+| --- | --- | --- |
+| Payload store | Serialized bytes, typically dictionaries or large Python structures packed with pickle or dill | Read and unpack the samples needed for training |
+| Metadata table | Sample identities, primitive attributes such as labels and splits, and sampling weights | Analyze the population, filter samples, and control how often each sample is drawn |
+
+The Python API exposes the metadata table as a **Polars DataFrame**. The payloads
+remain in indexed disk shards, linked to metadata by `(cache_id, sample_id)`.
+New caches use `Zstd(level=3)` compression for independent records; existing
+caches keep their recorded codec. See the [compression guide](https://red-eyed.github.io/DatasetRT/cache-training-data/#control-per-sample-compression)
+for other codecs and reader compatibility.
+
+For example, create a development subset by editing only the metadata:
+
+```python
+metadata = dataset.get_metadata()
+
+dev_run = metadata.head(100)
+dataset.update_metadata(dev_run)
+```
+
+Future reads draw from that subset, and your read transform unpacks `sample.data`.
+
+Rows in the active metadata table are the rows DatasetRT samples from. Remove
+rows for a fast development run, duplicate rows or update `weight` for class
+balancing and OHEM, add extra columns for training annotations, and let Rust
+validate that every row still maps to an immutable cache sample.
+
+## Why It Exists
+
+Training experiments often reuse the same expensive preprocessed records while
+changing which samples they use. Keeping metadata separate from large serialized
+payloads makes those changes possible without reading every payload:
+
+- **Analyze:** inspect class counts, splits, or stored quality scores using the
+  metadata table.
+- **Filter:** select development subsets or exclude records without making new
+  copies of the cache.
+- **Weight:** rebalance classes or prioritize hard examples by changing sampling
+  weights while payload bytes remain immutable.
+- **Read quickly:** Rust performs indexed payload reads with native workers and
+  bounded prefetching; Python unpacks and transforms the delivered records.
+- **Save RAM across loading processes:** workers map a shared immutable metadata
+  snapshot and cache indexes read-only with `mmap`. The OS can share their backing
+  pages on the same host, avoiding a full private copy of those buffers per worker.
+- **Reproduce:** repeat sampling from identical cache contents, active metadata,
+  seed, and stream history.
+
+See the [reader measurements](https://red-eyed.github.io/DatasetRT/benchmarks/)
+for startup, throughput, and memory results. End-to-end speed also depends on
+storage, payload size, unpacking, transforms, and worker configuration.
+Weights, sampling state, decoded records, and prefetched batches still consume
+memory per worker; see the [multiprocessing memory guide](https://red-eyed.github.io/DatasetRT/runtime-guide/#share-metadata-and-indexes-with-mmap).
+
+## The Core Idea
+
+DatasetRT exposes the active **metadata**, including sampling weights, as a
+Polars table:
+
+```text
+cache_id | sample_id | <stored metadata columns...> | weight | <extra columns...>
+```
+
+Each row points to a stored payload; the payload itself is not a DataFrame cell.
+Analyze or edit this table without unpickling the sample records. For example,
+assign inverse-frequency class weights:
+
+```python
+import polars as pl
+
+metadata = dataset.get_metadata()
+
+balanced = (
+    metadata.join(
+        metadata.group_by("label").agg(pl.len().alias("class_count")),
+        on="label",
+    )
+    .with_columns((1.0 / pl.col("class_count")).alias("weight"))
+    .drop("class_count")
+)
+
+dataset.update_metadata(balanced)
+```
+
+`update_metadata()` is runtime-only. It does not rewrite `metadata.arrow`,
+`index.bin`, shards, or manifests. Future iterators use the updated active table;
+already-created iterators keep their snapshot.
+
+With `drt.ReaderConfig(shuffle=True)`, DatasetRT performs deterministic weighted
+multinomial sampling with replacement over the active table. With
+`shuffle=False`, it emits active rows in cyclic table order, including
+duplicates.
+Use `dataset.set_epoch_len(n)` to make future iterators emit a finite window of
+`n` samples. Ordered reads continue through the active table cyclically across
+iterator boundaries, while shuffled reads continue a deterministic multinomial
+draw stream. Updating metadata resets the stream and sets the epoch
+length to the new table row count. Call `set_epoch_len` afterward to override it.
+
 ## When To Use It
 
 Use DatasetRT when you care about:
@@ -237,12 +252,16 @@ DatasetRT is production infrastructure for immutable dataset caching. The core c
 immutable storage format, runtime metadata table, deterministic weighted
 sampling, and Rust-owned reader/writer prefetching are in place.
 
-## Citation
+## Contributing and Citation
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, validation, and reporting issues.
+If DatasetRT contributes to your research, use [CITATION.cff](CITATION.cff) and
+report the exact version or commit used. Released under the [MIT license](LICENSE).
 
 ```bibtex
 @software{stupakov_datasetrt_2026,
   author = {Stupakov, Vadym},
-  title = {DatasetRT: A Correctness-First Dataset Cache Runtime},
+  title = {DatasetRT: Dataset Caching for Machine Learning},
   year = {2026},
   url = {https://github.com/Red-Eyed/DatasetRT}
 }

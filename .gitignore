@@ -12,10 +12,12 @@
 !*.yaml
 !py.typed
 !/LICENSE
+!/CITATION.cff
 !/justfile
 !/.vscode/settings.json
 !/docs_overrides/main.html
 !/docs/benchmark-results.json
+!/docs/assets/social-preview.jpg
 !/tests/fixtures/manifest-v2/**
 
 /.venv/

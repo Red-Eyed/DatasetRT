@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use DatasetRT in research, cite this software and report the exact version or commit used."
+type: software
+title: "DatasetRT: Dataset Caching for Machine Learning"
+authors:
+  - family-names: Stupakov
+    given-names: Vadym
+repository-code: "https://github.com/Red-Eyed/DatasetRT"
+url: "https://red-eyed.github.io/DatasetRT/"
+license: MIT
+abstract: "Rust-powered dataset caching for Python with separate Polars metadata for analysis, filtering, and weighted sampling."

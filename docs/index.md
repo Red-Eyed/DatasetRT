@@ -5,9 +5,11 @@ description: Read cached training samples with a fast Rust runtime, and analyze,
 
 # DatasetRT — Dataset Caching for Machine Learning
 
+**Cache preprocessing once. Change subsets and sampling weights without rewriting payloads.**
+
 DatasetRT is a Rust-powered dataset cache for Python machine learning pipelines.
-Cache serialized records once, then analyze, filter, or rebalance their separate
-metadata without unpacking or rewriting the payloads.
+Store serialized training records in immutable disk shards, then use a separate
+Polars DataFrame to analyze, filter, and rebalance the training population.
 
 ## Start here
 

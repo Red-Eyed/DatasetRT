@@ -69,10 +69,76 @@ location, and time; publishing a sitemap does not guarantee indexing or ranking.
 Use **DatasetRT** as the display name and the same short description in the
 README, documentation, GitHub About, and package summaries:
 
-> Python dataset caching for machine learning, powered by Rust.
+> Rust-powered dataset cache for Python with separate Polars metadata for analysis,
+> filtering, and weighted sampling.
+
+Lead introductions with the outcome:
+
+> Cache preprocessing once. Change subsets and sampling weights without rewriting payloads.
 
 Explain once that users install `dataset-rt` and import `dataset_rt`. Link GitHub,
 PyPI, and documentation to each other. Share complete technical guides and
 reproducible results where they answer a real question. Follow
 [Google's SEO starter guide](https://developers.google.com/search/docs/fundamentals/seo-starter-guide)
 for useful content, descriptive titles, and natural links.
+
+## Repository presentation
+
+The README links installation, a complete example, tutorials, and the existing
+benchmark evidence. `CITATION.cff` provides software citation metadata;
+`CONTRIBUTING.md` and the GitHub templates explain how to report and validate
+changes. The [social-preview instructions](assets/social-preview.md) include the
+upload-ready artwork and generation prompt.
+
+Prepared GitHub About settings (apply separately from repository commits):
+
+- Description: `Rust-powered dataset cache for Python. Separate Polars metadata for analysis, filtering, and weighted sampling.`
+- Website: `https://red-eyed.github.io/DatasetRT/`
+- Topics: retain `data-loading`, `dataset`, `dataset-cache`, `machine-learning`,
+  `polars`, `python`, `reproducibility`, and `rust`; add `pytorch` for the documented
+  optional integration.
+
+## Announcement drafts
+
+These are drafts for maintainer review. Nothing here posts to an external
+community. Choose a venue where the workflow is relevant and check its current
+posting rules before sharing.
+
+### Short introduction
+
+I built DatasetRT for ML experiments that reuse preprocessed training records
+but change subsets or sampling weights. It keeps serialized payloads in immutable
+disk shards and exposes separate metadata through Polars, so you can filter a
+development subset or rebalance classes without rewriting cached records.
+Rust owns indexed reads, deterministic sampling, and bounded prefetching;
+Python owns serialization and transforms. PyTorch integration is optional.
+
+Try it: `pip install dataset-rt` or `uv add dataset-rt`.
+[Runnable quickstart](https://red-eyed.github.io/DatasetRT/cache-training-data/) ·
+[Repository](https://github.com/Red-Eyed/DatasetRT)
+
+### Technical introduction
+
+DatasetRT: cache preprocessing once, then change how you sample with Polars.
+
+For workflows that repeatedly train from the same preprocessed records,
+DatasetRT separates immutable payload storage from the active metadata table.
+Filter rows, duplicate entries, or adjust weights without decoding the payloads
+or rebuilding the cache. Rust validates sample identities and owns the read/write
+pipelines; Python supplies serialized records and training transforms.
+
+Shuffled reads use weighted sampling with replacement. Source names control
+cache reuse, so preprocessing changes need a new source name or cache root.
+Files must be available through the filesystem; this is not a remote streaming
+service.
+
+The docs include [Polars sampling examples](https://red-eyed.github.io/DatasetRT/polars-sampling/),
+a [PyTorch tutorial](https://red-eyed.github.io/DatasetRT/pytorch-dataloader/),
+and [reproducible reader measurements](https://red-eyed.github.io/DatasetRT/benchmarks/).
+Those measurements compare DatasetRT reader configurations on a synthetic local
+workload; they do not establish a speed ranking against other libraries.
+
+I'd welcome feedback from people who change training populations frequently:
+what would you need to evaluate this in your pipeline?
+
+[Source and installation](https://github.com/Red-Eyed/DatasetRT)

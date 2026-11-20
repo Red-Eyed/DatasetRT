@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible cache, sampling, or integration problem.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Include the full error traceback when available.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproducer
+      description: Include runnable code or commands, preferably using synthetic records.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and configuration
+      description: DatasetRT version/commit, Python, OS/architecture, local/network storage, worker counts, prefetch, compression, and framework version if relevant.
+    validations:
+      required: true
