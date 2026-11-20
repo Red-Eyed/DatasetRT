@@ -485,8 +485,9 @@ def test_schema_error_identifies_differing_column(diagnostic_cache: Path, tmp_pa
 
 def test_record_read_error_identifies_sample_and_address(diagnostic_cache: Path) -> None:
     """Random-read failures retain identity and the exact shard byte range."""
+    # Only one read may fail at a time so the reported identity is deterministic.
     dataset = RUNTIME.cached_dataset(
-        [diagnostic_cache], reader_config=ReaderConfig(seed=1, shuffle=False)
+        [diagnostic_cache], reader_config=ReaderConfig(seed=1, shuffle=False, prefetch_size=1)
     )
     shard_path = diagnostic_cache / "shards" / "000000.bin"
     shard_path.write_bytes(b"")
