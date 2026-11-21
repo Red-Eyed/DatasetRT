@@ -18,6 +18,9 @@ mod types;
 mod worker_pool;
 mod writer;
 
+#[cfg(test)]
+mod test_support;
+
 use dataset::PyCachedDataset;
 use dataset_runtime::PyDatasetRuntime;
 use pyo3::prelude::*;

@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyDict, PyIterator, PyList, PyString, PyTuple};
 
 use crate::channel::{bounded, Receiver, RecvTimeoutError, Sender};
-use crate::storage::{load_cache, CacheBuilder, FinishStats, PushSampleStats};
+use crate::storage::{load_cache, sync_directory, CacheBuilder, FinishStats, PushSampleStats};
 use crate::types::{
     CacheError, CacheResult, CompressionAlgo, MaxShardBytes, MetadataValue, NumWorkers,
     PrefetchSize, ShardCompression,
@@ -25,6 +25,9 @@ mod pipeline;
 
 #[path = "writer/profiler.rs"]
 mod profiler;
+
+#[cfg(test)]
+mod tests;
 
 use pipeline::write_source_list;
 use profiler::{ProfileStage, WriterProfiler, WriterProfilerConfig};
@@ -363,9 +366,7 @@ impl SampleWritePipeline {
 
     /// Submit one finite serialization job after freeing an operation-local credit.
     fn submit(&mut self, queued: QueuedSample) -> CacheResult<()> {
-        if self.in_flight == self.parallelism {
-            self.complete_one()?;
-        }
+        self.wait_for_credit(receive_worker_result)?;
         let result_sender = self.result_sender.clone();
         self.pool.submit(result_sender, move || {
             Ok(SerializedSample {
@@ -374,6 +375,25 @@ impl SampleWritePipeline {
             })
         })?;
         self.in_flight += 1;
+        Ok(())
+    }
+
+    /// Retain credits for reordered samples; signal polling belongs to the caller's receiver.
+    fn wait_for_credit(
+        &mut self,
+        mut receive: impl FnMut(
+            &Receiver<CacheResult<SerializedSample>>,
+        ) -> CacheResult<SerializedSample>,
+    ) -> CacheResult<()> {
+        while self.in_flight + self.pending.len() >= self.parallelism {
+            let sample = receive(&self.result_receiver).map_err(|error| {
+                error.context(format!(
+                    "writer source '{}': waiting for sample sequence {}",
+                    self.source_name, self.next_sequence
+                ))
+            })?;
+            self.commit_completed(sample)?;
+        }
         Ok(())
     }
 
@@ -400,6 +420,11 @@ impl SampleWritePipeline {
                 self.source_name, self.next_sequence
             ))
         })?;
+        self.commit_completed(sample)
+    }
+
+    /// Move one finished job into ordered commit without releasing its outstanding credit early.
+    fn commit_completed(&mut self, sample: SerializedSample) -> CacheResult<()> {
         self.in_flight = self
             .in_flight
             .checked_sub(1)
@@ -648,8 +673,46 @@ fn cleanup_temp_cache(temp_path: &Path) -> CacheResult<()> {
     Ok(())
 }
 
+/// Acknowledge publication only after the renamed directory entry reaches stable storage.
 fn publish_cache(temp_path: &Path, cache_path: &Path) -> CacheResult<()> {
-    fs::rename(temp_path, cache_path)?;
+    publish_cache_with_sync(temp_path, cache_path, sync_directory)
+}
+
+/// Keep post-rename sync failures observable without deleting the published cache.
+fn publish_cache_with_sync(
+    temp_path: &Path,
+    cache_path: &Path,
+    mut sync: impl FnMut(&Path) -> CacheResult<()>,
+) -> CacheResult<()> {
+    fs::rename(temp_path, cache_path).map_err(|error| {
+        CacheError::from(error).context(format!(
+            "publish cache '{}' from '{}'",
+            cache_path.display(),
+            temp_path.display()
+        ))
+    })?;
+    let absolute_path = std::path::absolute(cache_path).map_err(CacheError::from)?;
+    let parent = absolute_path.parent().ok_or_else(|| {
+        CacheError::InvalidInput(format!(
+            "cache path '{}' has no parent",
+            cache_path.display()
+        ))
+    })?;
+    let source_parent = temp_path.parent().ok_or_else(|| {
+        CacheError::InvalidInput(format!(
+            "temporary cache path '{}' has no parent",
+            temp_path.display()
+        ))
+    })?;
+    // Ancestors may have been created with the cache tree; sync each child before its parent.
+    for directory in std::iter::once(source_parent).chain(parent.ancestors()) {
+        sync(directory).map_err(|error| {
+            error.context(format!(
+                "cache '{}' was renamed, but publication durability is unconfirmed",
+                cache_path.display()
+            ))
+        })?;
+    }
     Ok(())
 }
 

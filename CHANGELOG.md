@@ -2,6 +2,19 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.7
+
+### Bug Fixes
+
+- Stream cache metadata batches and index entries during ingestion instead of
+  retaining every row until completion. Count reordered writer results against
+  the scheduling window so delayed jobs cannot bypass backpressure.
+- Flush and sync cache files before manifest publication, propagate final
+  manifest flush failures, and sync directory entries after publication. Report
+  unconfirmed durability if syncing fails after the cache directory is renamed.
+- Write empty metadata mappings with explicit Arrow row counts and reject schema
+  changes after an empty first sample.
+
 ## 0.5.6
 
 ### Documentation

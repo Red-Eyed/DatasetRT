@@ -332,9 +332,7 @@ impl SourceListWritePipeline {
 
     /// Submit one finite pipeline event after freeing an operation-local credit.
     fn submit(&mut self, queued: QueuedPipelineMessage) -> CacheResult<()> {
-        if self.in_flight == self.parallelism {
-            self.complete_one()?;
-        }
+        self.wait_for_credit(receive_worker_result)?;
         let result_sender = self.result_sender.clone();
         self.pool.submit(result_sender, move || {
             Ok(SerializedPipelineMessage {
@@ -343,6 +341,25 @@ impl SourceListWritePipeline {
             })
         })?;
         self.in_flight += 1;
+        Ok(())
+    }
+
+    /// Count reordered events against the window independently of Python signal polling.
+    fn wait_for_credit(
+        &mut self,
+        mut receive: impl FnMut(
+            &Receiver<CacheResult<SerializedPipelineMessage>>,
+        ) -> CacheResult<SerializedPipelineMessage>,
+    ) -> CacheResult<()> {
+        while self.in_flight + self.pending.len() >= self.parallelism {
+            let message = receive(&self.result_receiver).map_err(|error| {
+                error.context(format!(
+                    "source-list writer: waiting for event sequence {}",
+                    self.next_sequence
+                ))
+            })?;
+            self.commit_completed(message)?;
+        }
         Ok(())
     }
 
@@ -381,6 +398,11 @@ impl SourceListWritePipeline {
                 self.next_sequence
             ))
         })?;
+        self.commit_completed(message)
+    }
+
+    /// Preserve credits until completed events have advanced the ordered source cursor.
+    fn commit_completed(&mut self, message: SerializedPipelineMessage) -> CacheResult<()> {
         self.in_flight = self
             .in_flight
             .checked_sub(1)
@@ -669,4 +691,49 @@ fn complete_write_results(
 
 fn require_write_result(result: Option<CacheWriteRecord>) -> CacheResult<CacheWriteRecord> {
     result.ok_or(CacheError::WorkerFailed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::NumWorkers;
+
+    /// Source events awaiting ordered commit cannot release ingestion credits.
+    #[test]
+    fn reordered_event_holds_its_scheduling_credit() -> CacheResult<()> {
+        let config = crate::writer::tests::writer_config(WorkerPool::new(NumWorkers::new(2)?)?)?;
+        let profiler = WriterProfiler::new(&config.profiler);
+        let committer = PipelineCommitter::new(
+            config.clone(),
+            SourceListProgress::new(false, 2),
+            2,
+            profiler,
+        );
+        let mut pipeline = SourceListWritePipeline::new(
+            config.pool.clone(),
+            committer,
+            config.prefetch_size,
+            config.num_workers,
+        )?;
+        for sequence in [1, 0] {
+            pipeline.result_sender.send(Ok(SerializedPipelineMessage {
+                sequence,
+                event: PipelineEvent::SourceResult(
+                    sequence as usize,
+                    error_write_message(sequence.to_string(), "fixture".to_string()),
+                ),
+            }))?;
+        }
+        pipeline.in_flight = 2;
+        pipeline.commit_completed(pipeline.result_receiver.recv()??)?;
+        assert_eq!(pipeline.pending.len(), 1);
+        assert_eq!(pipeline.next_sequence, 0);
+        pipeline.wait_for_credit(|receiver| receiver.recv()?)?;
+        assert_eq!(pipeline.next_sequence, 2);
+        assert!(pipeline.pending.is_empty());
+        assert_eq!(pipeline.in_flight, 0);
+        let committer = pipeline.committer.take().ok_or(CacheError::WorkerFailed)?;
+        assert_eq!(complete_write_results(committer.results)?.len(), 2);
+        Ok(())
+    }
 }

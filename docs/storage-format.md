@@ -72,12 +72,22 @@ Older DatasetRT releases that only accept v2 cannot read upgraded v3 caches.
 
 ## Metadata
 
-`metadata.arrow` stores one row per physical sample. Writers split rows into Arrow
-record batches bounded by row count and total string bytes, keeping each UTF-8
+`metadata.arrow` stores one row per physical sample. Writers stream rows into Arrow
+record batches bounded by row count and owned metadata bytes, keeping each UTF-8
 column within its signed 32-bit offset limit. A single row may exceed the batch
 byte target, but individual strings exceeding the Arrow limit are rejected with
 a typed input error before array construction. Batch boundaries do not change
-sample order or the cache format. Metadata is separate from payload bytes so sampling and filtering can inspect metadata without opening payload shards.
+sample order or the cache format. Empty metadata mappings produce zero-column
+batches with explicit row counts; the first sample fixes the schema even when it
+has no columns. Metadata is separate from payload bytes so sampling and filtering
+can inspect metadata without opening payload shards.
+
+Writers retain at most one metadata batch plus the current sample. Index entries
+are appended directly to `index.bin`; neither all metadata rows nor all index
+entries accumulate in memory. Arrow retains one small footer descriptor per
+record batch, and the manifest retains one descriptor per shard. Completed
+samples awaiting an earlier sample's ordered commit still count against the
+writer's scheduling window.
 
 The same metadata is also embedded redundantly in each shard record. That copy is for debugging, visualization, and sample-level inspection when iterating through raw shard records. Readers compare the embedded metadata with `metadata.arrow` when materializing a sample and reject mismatches.
 
@@ -187,6 +197,15 @@ with 0.5.0–0.5.2 readers. Manifest-only identity migration still targets v3 an
 v4 caches unchanged; it cannot convert record layouts.
 
 ## Integrity
+
+Writers flush and sync every shard, `metadata.arrow`, and `index.bin` before
+writing the manifest. The manifest is explicitly flushed and synced, then its
+cache directory is synced. Publication renames the completed cache directory and
+syncs the source parent, destination parent, and destination ancestors to persist
+the rename and newly created paths.
+Write, flush, and sync errors are returned to the caller. If a sync fails after
+rename, the error states that the cache exists but publication durability is
+unconfirmed; the published directory is retained for inspection.
 
 Writers calculate SHA-256 checksums while committing files. Readers verify:
 

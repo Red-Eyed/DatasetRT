@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from dataset_rt import (
     CachedDataset,
     CacheInput,
+    CacheWriteError,
     CacheWriteSuccess,
     DatasetRuntime,
     NoCompression,
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from dataset_rt.records import Metadata
+    from dataset_rt.records import CacheSource, Metadata
 
 RUNTIME = DatasetRuntime(num_workers=4)
 
@@ -524,3 +526,100 @@ def test_index_count_error_reports_expected_and_actual(diagnostic_cache: Path) -
     message = str(caught.value)
     assert str(diagnostic_cache) in message
     assert "expected 2, actual 0" in message
+
+
+@dataclass
+class StreamingSource:
+    """Generate more than one metadata batch without storing source rows."""
+
+    name: str
+    sample_count: int
+    empty_metadata: bool
+
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Keep physical order observable in both metadata and payloads."""
+        for index in range(self.sample_count):
+            metadata: Metadata = {} if self.empty_metadata else {"index": index, "text": "batch"}
+            yield CacheInput(index.to_bytes(8, "little"), metadata)
+
+
+@pytest.fixture
+def streamed_cache_paths(tmp_path: Path, empty_metadata: bool) -> list[Path]:
+    """Publish two independent multi-batch caches through the source-list pipeline."""
+    sources: list[CacheSource] = [
+        StreamingSource(name, 65_537, empty_metadata) for name in ("first", "second")
+    ]
+    results = RUNTIME.write_cache(
+        sources,
+        tmp_path / "new" / "parents" / "caches",
+        writer_config=WriterConfig(show_progress=False),
+    )
+    paths: list[Path] = []
+    for result in results:
+        match result:
+            case CacheWriteSuccess(path=path):
+                paths.append(path)
+            case error:
+                raise AssertionError(error)
+    return paths
+
+
+@pytest.mark.parametrize("empty_metadata", [False, True], ids=["primitive-columns", "empty-schema"])
+def test_streamed_multi_cache_tables_preserve_physical_rows(
+    streamed_cache_paths: list[Path], empty_metadata: bool
+) -> None:
+    """Batch boundaries preserve identities, checksums, and columnar row counts across caches."""
+    dataset = RUNTIME.cached_dataset(
+        streamed_cache_paths,
+        reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=True),
+    )
+    assert len(dataset) == 2 * 65_537
+    table = dataset.get_metadata()
+    assert table.height == len(dataset)
+    for position in (0, 65_536, 65_537, len(dataset) - 1):
+        cache_id = table.item(position, "cache_id")
+        sample_id = table.item(position, "sample_id")
+        sample = dataset.get_item(cache_id, sample_id)
+        assert sample.data == sample_id.to_bytes(8, "little")
+        assert sample.metadata == ({} if empty_metadata else {"index": sample_id, "text": "batch"})
+    for path in streamed_cache_paths:
+        manifest = read_manifest(path)
+        assert manifest.sample_count == 65_537
+        assert (
+            hashlib.sha256((path / "index.bin").read_bytes()).hexdigest() == manifest.index_sha256
+        )
+        assert (
+            hashlib.sha256((path / "metadata.arrow").read_bytes()).hexdigest()
+            == manifest.metadata_sha256
+        )
+
+
+@pytest.mark.parametrize("source_list", [False, True], ids=["single-source", "source-list"])
+def test_empty_metadata_schema_cannot_change_after_first_sample(
+    tmp_path: Path, source_list: bool
+) -> None:
+    """Reject a late first column and clean every unpublished artifact."""
+
+    class DriftingSource:
+        """Exercise the empty-schema sentinel independently of Arrow finalization."""
+
+        name = "drifting"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Freeze the first empty mapping before attempting to add a column."""
+            yield CacheInput(b"first", {})
+            yield CacheInput(b"second", {"late": 1})
+
+    source = DriftingSource()
+    results = RUNTIME.write_cache(
+        [source] if source_list else source,
+        tmp_path,
+        writer_config=WriterConfig(show_progress=False),
+    )
+    match results[0]:
+        case CacheWriteError(message=message):
+            assert "metadata keys must be identical" in message
+        case result:
+            raise AssertionError(result)
+    assert not (tmp_path / "drifting").exists()
+    assert list((tmp_path / "tmp").iterdir()) == []

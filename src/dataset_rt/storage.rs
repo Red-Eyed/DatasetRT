@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_ipc::reader::FileReader;
-use arrow_ipc::writer::FileWriter;
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::DataType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -21,7 +20,12 @@ use crate::types::{
 pub const FORMAT_VERSION: u32 = 4;
 mod index;
 mod manifest;
+mod write_tables;
+use write_tables::CacheTablesWriter;
+
 pub mod migration;
+#[cfg(test)]
+mod tests;
 use index::MappedIndex;
 pub use manifest::{Manifest, ManifestFields, ManifestV3};
 const INDEX_ROW_BYTES: usize = 24;
@@ -246,9 +250,7 @@ pub struct CacheBuilder {
     path: PathBuf,
     source_name: String,
     max_shard_bytes: u64,
-    schema: Vec<MetadataField>,
-    metadata_rows: Vec<Vec<MetadataValue>>,
-    index: Vec<IndexEntry>,
+    tables: Option<CacheTablesWriter>,
     shards: Vec<ShardManifest>,
     shard_compression: ShardCompression,
     current_shard: OpenShard,
@@ -283,6 +285,7 @@ pub struct FinishStats {
 struct OpenShard {
     id: u64,
     name: String,
+    path: PathBuf,
     writer: BufWriter<File>,
     byte_len: u64,
     uncompressed_byte_len: u64,
@@ -290,6 +293,7 @@ struct OpenShard {
 }
 
 impl CacheBuilder {
+    /// Create unpublished cache artifacts owned exclusively by this write operation.
     pub fn create(
         path: PathBuf,
         source_name: String,
@@ -310,29 +314,32 @@ impl CacheBuilder {
             path,
             source_name,
             max_shard_bytes,
-            schema: Vec::new(),
-            metadata_rows: Vec::new(),
-            index: Vec::new(),
+            tables: None,
             shards: Vec::new(),
             shard_compression,
             current_shard,
         })
     }
 
+    /// Commit one validated sample in physical order without retaining dataset-wide rows.
     pub fn push_sample(
         &mut self,
         data: Vec<u8>,
         metadata: BTreeMap<String, MetadataValue>,
     ) -> CacheResult<PushSampleStats> {
         let metadata_started_at = Instant::now();
-        let metadata_row = self.validate_metadata(metadata)?;
+        if self.tables.is_none() {
+            self.tables = Some(CacheTablesWriter::create(&self.path, &metadata)?);
+        }
+        let tables = self.tables.as_mut().ok_or(CacheError::WorkerFailed)?;
+        let metadata_row = tables.metadata_row(metadata)?;
         let metadata_validate = metadata_started_at.elapsed();
         let EncodedRecord {
             bytes: record,
             uncompressed_byte_len,
             compression,
             record_encode,
-        } = encode_stored_record(data, &self.schema, &metadata_row, &self.shard_compression)?;
+        } = encode_stored_record(data, &tables.schema, &metadata_row, &self.shard_compression)?;
         let stored_byte_len = u64::try_from(record.len()).map_err(|_| {
             CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
         })?;
@@ -342,9 +349,11 @@ impl CacheBuilder {
         let entry = self
             .current_shard
             .write_payload(&record, uncompressed_byte_len)?;
+        self.tables
+            .as_mut()
+            .ok_or(CacheError::WorkerFailed)?
+            .push(entry, metadata_row)?;
         let disk_write = disk_started_at.elapsed();
-        self.index.push(entry);
-        self.metadata_rows.push(metadata_row);
         Ok(PushSampleStats {
             metadata_validate,
             compression,
@@ -355,32 +364,28 @@ impl CacheBuilder {
         })
     }
 
+    /// Publish the manifest only after every referenced file and directory entry is synced.
     pub fn finish(mut self) -> CacheResult<(Manifest, FinishStats)> {
-        if self.index.is_empty() {
-            return Err(CacheError::InvalidInput(
-                "cache source yielded no samples".to_string(),
-            ));
-        }
+        let tables = self.tables.take().ok_or_else(|| {
+            CacheError::InvalidInput("cache source yielded no samples".to_string())
+        })?;
 
         let shard_started_at = Instant::now();
         let final_shard = self.current_shard.finish(&self.shard_compression)?;
         let shard_flush = shard_started_at.elapsed();
         self.shards.push(final_shard);
 
-        let metadata_started_at = Instant::now();
-        let metadata_sha256 = write_metadata_file(&self.path, &self.schema, &self.metadata_rows)?;
-        let metadata = metadata_started_at.elapsed();
-        let index_started_at = Instant::now();
-        let index_sha256 = write_index_file(&self.path, &self.index)?;
-        let index = index_started_at.elapsed();
+        let tables = tables.finish()?;
+        sync_directory(&self.path.join("shards"))?;
+        sync_directory(&self.path)?;
         let manifest_data = ManifestV3 {
             cache_id: cache_id_from_name(&self.source_name),
             fields: ManifestFields {
                 source_name: self.source_name,
-                sample_count: self.index.len() as u64,
-                metadata_schema: self.schema,
-                metadata_sha256,
-                index_sha256,
+                sample_count: tables.sample_count,
+                metadata_schema: tables.schema,
+                metadata_sha256: tables.metadata_sha256,
+                index_sha256: tables.index_sha256,
                 shards: self.shards,
                 extra: BTreeMap::new(),
             },
@@ -393,13 +398,14 @@ impl CacheBuilder {
         // The manifest is the publication marker: readers reject caches until it exists.
         let manifest_started_at = Instant::now();
         write_manifest(&self.path, &manifest)?;
+        sync_directory(&self.path)?;
         let manifest_time = manifest_started_at.elapsed();
         Ok((
             manifest,
             FinishStats {
                 shard_flush,
-                metadata,
-                index,
+                metadata: tables.metadata_time,
+                index: tables.index_time,
                 manifest: manifest_time,
             },
         ))
@@ -429,53 +435,19 @@ impl CacheBuilder {
         self.shards.push(closed.finish(&self.shard_compression)?);
         Ok(())
     }
-
-    fn validate_metadata(
-        &mut self,
-        metadata: BTreeMap<String, MetadataValue>,
-    ) -> CacheResult<Vec<MetadataValue>> {
-        if self.schema.is_empty() {
-            self.schema = metadata
-                .iter()
-                .map(|(name, value)| MetadataField {
-                    name: name.clone(),
-                    kind: value.kind(),
-                })
-                .collect();
-        }
-
-        if metadata.len() != self.schema.len() {
-            return Err(CacheError::InvalidInput(
-                "metadata keys must be identical for every sample".to_string(),
-            ));
-        }
-
-        self.schema
-            .iter()
-            .map(|field| match metadata.get(&field.name) {
-                Some(value) if value.kind() == field.kind => Ok(value.clone()),
-                Some(value) => Err(CacheError::InvalidInput(format!(
-                    "metadata field '{}' expected {}, got {}",
-                    field.name,
-                    field.kind,
-                    value.kind()
-                ))),
-                None => Err(CacheError::InvalidInput(format!(
-                    "metadata field '{}' is missing",
-                    field.name
-                ))),
-            })
-            .collect()
-    }
 }
 
 impl OpenShard {
     fn create(cache_path: &Path, id: u64) -> CacheResult<Self> {
         let name = format!("{id:06}.bin");
-        let file = File::create(cache_path.join("shards").join(&name))?;
+        let path = cache_path.join("shards").join(&name);
+        let file = File::create(&path).map_err(|error| {
+            CacheError::from(error).context(format!("create shard '{}'", path.display()))
+        })?;
         Ok(Self {
             id,
             name,
+            path,
             writer: BufWriter::new(file),
             byte_len: 0,
             uncompressed_byte_len: 0,
@@ -519,7 +491,12 @@ impl OpenShard {
     }
 
     fn finish(mut self, compression: &ShardCompression) -> CacheResult<ShardManifest> {
-        self.writer.flush()?;
+        self.writer
+            .flush()
+            .and_then(|()| self.writer.get_ref().sync_all())
+            .map_err(|error| {
+                CacheError::from(error).context(format!("finish shard '{}'", self.path.display()))
+            })?;
         Ok(ShardManifest {
             name: self.name,
             uncompressed_byte_len: self.uncompressed_byte_len,
@@ -585,11 +562,32 @@ fn load_cache_inner(
     })
 }
 
+/// Propagate serialization, final flush, and durability failures for the publication marker.
 fn write_manifest(path: &Path, manifest: &Manifest) -> CacheResult<()> {
     let manifest_path = path.join("manifest.json");
-    let file = File::create(manifest_path)?;
-    serde_json::to_writer_pretty(BufWriter::new(file), manifest)?;
+    let write = || -> CacheResult<()> {
+        let mut writer = BufWriter::new(File::create(&manifest_path)?);
+        write_manifest_contents(&mut writer, manifest)?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    };
+    write().map_err(|error| error.context(format!("write manifest '{}'", manifest_path.display())))
+}
+
+/// Finish buffered output explicitly so drop cannot hide a failed final write.
+fn write_manifest_contents(writer: &mut impl Write, manifest: &Manifest) -> CacheResult<()> {
+    serde_json::to_writer_pretty(&mut *writer, manifest)?;
+    writer.flush()?;
     Ok(())
+}
+
+/// Persist directory entries before acknowledging cache creation or publication.
+pub(crate) fn sync_directory(path: &Path) -> CacheResult<()> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| {
+            CacheError::from(error).context(format!("sync directory '{}'", path.display()))
+        })
 }
 
 /// Open the publication marker directly so access failures retain their OS cause.
@@ -621,75 +619,6 @@ pub fn cache_id_from_name(name: &str) -> u64 {
         *target = *byte;
     }
     u64::from_be_bytes(prefix) & i64::MAX as u64
-}
-
-fn write_metadata_file(
-    path: &Path,
-    schema: &[MetadataField],
-    rows: &[Vec<MetadataValue>],
-) -> CacheResult<String> {
-    native_result("metadata Arrow write", || {
-        let arrow_schema = Arc::new(Schema::new(
-            schema
-                .iter()
-                .map(|field| Field::new(&field.name, arrow_type(&field.kind), false))
-                .collect::<Vec<_>>(),
-        ));
-        let metadata_path = path.join("metadata.arrow");
-        let file = File::create(&metadata_path)?;
-        let mut writer = FileWriter::try_new(BufWriter::new(file), &arrow_schema)?;
-        let mut remaining = rows;
-        while !remaining.is_empty() {
-            let len = metadata_batch_len(remaining, 65_536, 8 * 1024 * 1024)?;
-            let (batch_rows, rest) = remaining.split_at_checked(len).ok_or_else(|| {
-                CacheError::InvalidInput("metadata batch range is invalid".to_string())
-            })?;
-            let columns = schema
-                .iter()
-                .enumerate()
-                .map(|(column, field)| build_array(column, &field.kind, batch_rows))
-                .collect::<CacheResult<Vec<_>>>()?;
-            writer.write(&RecordBatch::try_new(arrow_schema.clone(), columns)?)?;
-            remaining = rest;
-        }
-        writer.finish()?;
-        hash_file(&metadata_path)
-    })
-}
-
-/// Bound Arrow conversion by rows and total string bytes before building i32 offsets.
-fn metadata_batch_len(
-    rows: &[Vec<MetadataValue>],
-    max_rows: usize,
-    max_string_bytes: usize,
-) -> CacheResult<usize> {
-    let mut bytes = 0_usize;
-    let mut count = 0;
-    for row in rows.iter().take(max_rows) {
-        let mut row_bytes = 0_usize;
-        for cell in row {
-            if let MetadataValue::String(value) = cell {
-                if value.len() > i32::MAX as usize {
-                    return Err(CacheError::InvalidInput(
-                        "metadata string exceeds Arrow UTF-8 offset limit".to_string(),
-                    ));
-                }
-                row_bytes = row_bytes.checked_add(value.len()).ok_or_else(|| {
-                    CacheError::InvalidInput(
-                        "metadata row byte length overflowed usize".to_string(),
-                    )
-                })?;
-            }
-        }
-        if count > 0 && row_bytes > max_string_bytes.saturating_sub(bytes) {
-            break;
-        }
-        bytes = bytes.checked_add(row_bytes).ok_or_else(|| {
-            CacheError::InvalidInput("metadata batch byte length overflowed usize".to_string())
-        })?;
-        count += 1;
-    }
-    Ok(count)
 }
 
 fn read_metadata_file(
@@ -1048,18 +977,6 @@ fn validate_redundant_metadata(
     Ok(())
 }
 
-fn write_index_file(path: &Path, index: &[IndexEntry]) -> CacheResult<String> {
-    let index_path = path.join("index.bin");
-    let mut file = BufWriter::new(File::create(&index_path)?);
-    for entry in index {
-        file.write_all(&entry.shard_id.to_le_bytes())?;
-        file.write_all(&entry.offset.to_le_bytes())?;
-        file.write_all(&entry.byte_len.to_le_bytes())?;
-    }
-    file.flush()?;
-    hash_file(&index_path)
-}
-
 fn read_index_entry(bytes: &[u8]) -> CacheResult<IndexEntry> {
     let shard_id = read_u64(index_field(bytes, 0, 8)?)?;
     let offset = read_u64(index_field(bytes, 8, 16)?)?;
@@ -1178,21 +1095,4 @@ fn hash_file(path: &Path) -> CacheResult<String> {
     }
 
     Ok(hex::encode(hasher.finalize()))
-}
-
-#[cfg(test)]
-mod metadata_batch_tests {
-    use super::*;
-
-    /// Exercise byte and row limits without allocating multi-gigabyte strings.
-    #[test]
-    fn batches_bound_offsets_and_always_make_progress() -> CacheResult<()> {
-        let rows = vec![vec![MetadataValue::String("abcd".to_string())]; 5];
-        assert_eq!(metadata_batch_len(&rows, 10, 8)?, 2);
-        assert_eq!(metadata_batch_len(&rows, 1, 100)?, 1);
-        assert_eq!(metadata_batch_len(&rows, 10, 3)?, 1);
-        assert_eq!(metadata_batch_len(&rows, 10, 12)?, 3);
-        assert_eq!(metadata_batch_len(&[], 10, 8)?, 0);
-        Ok(())
-    }
 }
