@@ -95,7 +95,7 @@ class Case:
     shuffle: bool
     rows: int = 24
     fail_rank: int = -1
-    persistent: bool = False
+    persistent: bool = True
     drop_last: bool = False
     random_seed: bool = False
     split: bool = False
@@ -246,7 +246,7 @@ def make_loader(
             sample_transform_fn=fail_transform if failing else observe,
             collate_fn=collate,
             prefetch_factor=1 if case.workers else "auto",
-            persistent_workers=case.persistent,
+            persistent_workers=case.persistent and case.workers > 0,
         ),
     )
 
@@ -518,6 +518,13 @@ def test_global_remainder_policy(
     """Padding/discarding gives every real rank identical sample and optimizer counts."""
     case = Case(4, 2, "spawn", False, rows, drop_last=drop_last)
     reports = launch(case, recipe, tmp_path)
+    if drop_last and rows < 16:
+        assert reports
+        for report in reports:
+            assert isinstance(report, RankFailure), report
+            assert "zero batches" in report.message
+            assert "require at least 16 samples" in report.message
+        return
     expected = rows // 16 * 4 if drop_last else (rows + 3) // 4
     assert len(reports) == 4
     for report in reports:

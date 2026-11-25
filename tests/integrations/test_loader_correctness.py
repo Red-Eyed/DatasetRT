@@ -5,7 +5,8 @@ from __future__ import annotations
 import gc
 import os
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
+from unittest.mock import patch
 
 import polars as pl
 import pytest
@@ -130,7 +131,6 @@ def test_default_workers_continue_exact_weighted_stream(
         (7, 3, False, [3, 3, 1]),
         (7, 3, True, [3, 3]),
         (1, 3, False, [1]),
-        (1, 3, True, []),
     ],
 )
 def test_finite_epoch_accounting(
@@ -153,7 +153,147 @@ def test_finite_epoch_accounting(
     assert dataset.get_metadata().height == 32
 
 
-def test_quiet_nonpersistent_workers_warn(dataset: CachedDataset) -> None:
-    """A replay-producing configuration cannot silently pass even with diagnostics disabled."""
-    with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
-        dataset.to_torch_dataloader(num_workers=1, persistent_workers=False, verbose=False)
+@pytest.mark.parametrize("workers", [1, "auto"])
+@pytest.mark.parametrize("partition", [None, "split", "replicate"])
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("seed", [7, "random"])
+def test_nonpersistent_workers_rejected_before_export(
+    dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int | Literal["auto"],
+    partition: Literal["split", "replicate"] | None,
+    shuffle: bool,
+    seed: int | Literal["random"],
+) -> None:
+    """Reject resolved replay settings before snapshots, RNG selection, or worker startup."""
+    monkeypatch.setattr(loading, "available_cpu_count", lambda: 3)
+
+    def unexpected_metadata_access(self: CachedDataset) -> None:
+        """Catch dataset preparation before rejecting invalid worker settings."""
+        raise AssertionError("replay settings reached metadata preparation")
+
+    monkeypatch.setattr(CachedDataset, "_reader_recipe", unexpected_metadata_access)
+    with pytest.raises(ValueError) as caught:
+        dataset.to_torch_dataloader(
+            num_workers=workers,
+            worker_partition=partition,
+            shuffle=shuffle,
+            seed=seed if shuffle else "random",
+            persistent_workers=False,
+            verbose=False,
+        )
+    message = str(caught.value)
+    for detail in (
+        "persistent_workers=False",
+        "replays",
+        "seed='random'",
+        "persistent_workers=True",
+        "num_workers=0",
+    ):
+        assert detail in message
+
+
+@pytest.mark.parametrize("cpus", [1, 3])
+@pytest.mark.parametrize("workers", [0, "auto"])
+def test_nonpersistent_workers_allow_only_main_process(
+    dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    cpus: int,
+    workers: int | Literal["auto"],
+) -> None:
+    """Automatic counts reject actual processes and allow a retained main-process reader."""
+    monkeypatch.setattr(loading, "available_cpu_count", lambda: cpus)
+    if workers == "auto" and cpus > 1:
+        with pytest.raises(ValueError, match="persistent_workers=False"):
+            dataset.to_torch_dataloader(num_workers=workers, persistent_workers=False)
+        return
+    loader = dataset.to_torch_dataloader(
+        num_workers=workers,
+        seed=7,
+        samples_per_epoch=8,
+        persistent_workers=False,
+        sample_transform_fn=observe,
+        collate_fn=collate,
+        verbose=False,
+    )
+    assert loader.num_workers == 0
+    assert not loader.persistent_workers
+    first = [draw for batch in loader for draw in batch]
+    second = [draw for batch in loader for draw in batch]
+    assert len(first) == len(second) == 8
+    assert [(draw.cache, draw.sample) for draw in first] != [
+        (draw.cache, draw.sample) for draw in second
+    ]
+
+
+@pytest.mark.parametrize(("samples", "batch_size", "world_size"), [(1, 3, 1), (7, 2, 4)])
+def test_zero_batch_epoch_rejected_before_export(
+    dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    samples: int,
+    batch_size: int,
+    world_size: int,
+) -> None:
+    """Impossible batch budgets fail before metadata export and random-seed collectives."""
+
+    def unexpected_export(self: CachedDataset, path: Path | None = None) -> None:
+        """Detect expensive artifact preparation on an invalid epoch budget."""
+        raise AssertionError("invalid epoch reached metadata export")
+
+    monkeypatch.setattr(CachedDataset, "dump_config", unexpected_export)
+    replica = loading.ReplicaIdentity(world_size=world_size)
+    with patch("dataset_rt.integrations.loader.capture_replica", return_value=replica):
+        with pytest.raises(ValueError, match="zero batches") as caught:
+            dataset.to_torch_dataloader(
+                num_workers=0,
+                samples_per_epoch=samples,
+                batch_size=batch_size,
+                drop_last=True,
+                verbose=False,
+            )
+    assert f"require at least {batch_size * world_size} samples" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("workers", "samples", "batch_size", "world_size", "reject"),
+    [
+        (0, 8, 1, 1, False),
+        (4, 1, 1, 1, False),
+        (4, 3, 2, 1, False),
+        (4, 4, 2, 1, True),
+        (0, 8, 1, 2, True),
+    ],
+)
+def test_sequential_replication_counts_active_consumers(
+    dataset: CachedDataset,
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+    samples: int,
+    batch_size: int,
+    world_size: int,
+    reject: bool,
+) -> None:
+    """Only multiple active replicated cursors duplicate sequential prefixes."""
+
+    def unexpected_export(self: CachedDataset, path: Path) -> None:
+        """Detect metadata export even if the loader would clean up afterward."""
+        raise AssertionError(f"invalid replication reached metadata export at {path}")
+
+    if reject:
+        monkeypatch.setattr(CachedDataset, "dump_config", unexpected_export)
+    replica = loading.ReplicaIdentity(world_size=world_size)
+    with patch("dataset_rt.integrations.loader.capture_replica", return_value=replica):
+        with (
+            pytest.raises(ValueError, match="duplicates sequential samples")
+            if reject
+            else nullcontext()
+        ):
+            loader = dataset.to_torch_dataloader(
+                shuffle=False,
+                worker_partition="replicate",
+                num_workers=workers,
+                samples_per_epoch=samples,
+                verbose=False,
+                batch_size=batch_size,
+            )
+            assert len(loader) == (samples + batch_size - 1) // batch_size

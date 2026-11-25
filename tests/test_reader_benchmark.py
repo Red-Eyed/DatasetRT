@@ -27,6 +27,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_reader_benchmark_requires_persistence() -> None:
+    """Reject worker restarts before starting the benchmark matrix."""
+    with pytest.raises(ValidationError, match="persistent_workers"):
+        Benchmark(persistent_workers=False)
+
+
 @pytest.fixture
 def config(tmp_path: Path) -> Benchmark:
     """Use two streamed caches and tiny batches, without timing-based assertions."""

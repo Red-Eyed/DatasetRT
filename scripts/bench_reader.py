@@ -225,6 +225,10 @@ class Benchmark(BaseSettings):
     @model_validator(mode="after")
     def _validate_work(self) -> Benchmark:
         """Prevent partial shuffled batches from disguising discarded work as speedup."""
+        if not self.persistent_workers:
+            raise ValueError(
+                "persistent_workers must be enabled for the reader benchmark worker trials"
+            )
         total = self.samples_per_cache * self.caches
         if total <= self.batch_size or total % self.batch_size:
             raise ValueError("total fixture samples must exceed and be divisible by batch_size")

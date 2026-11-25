@@ -2,6 +2,22 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.8
+
+### Backwards Incompatible Changes
+
+- Require persistent workers for every multiprocessing DataLoader, including
+  split populations. Explicit `persistent_workers=False` now raises `ValueError`
+  before metadata export, even with automatic worker counts and `seed="random"`.
+  Keep `persistent_workers="auto"`, select `True`, or use `num_workers=0` to
+  retain sampling progress instead of replaying the same stream each epoch.
+- Reject sequential replicated reading across multiple active consumers with
+  `ValueError`; use split populations for disjoint sequential reading.
+- Reject `drop_last=True` epochs that cannot provide a full batch per rank with
+  `ValueError`. Increase the budget, reduce batch size/ranks, or disable dropping.
+- Raise `RuntimeError` when `WORLD_SIZE>1` advertises a distributed launcher but
+  no process group is initialized. Initialize the group before loader construction.
+
 ## 0.5.7
 
 ### Bug Fixes

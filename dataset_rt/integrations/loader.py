@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import pickle
-import warnings
 from dataclasses import dataclass
 from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar
@@ -245,13 +244,12 @@ def prepare_partitions(
     num_workers: int,
     batch_size: int,
     samples_per_epoch: int,
+    rank_samples: int,
     worker_partition: Literal["split", "replicate"],
     shuffle: bool,
     seed: int | None,
-    drop_last: bool,
 ) -> tuple[WorkerPlan, ...]:
     """Plan global/rank/worker quotas in O(workers), without materializing metadata."""
-    count = rank_budget(samples_per_epoch, replica, batch_size, drop_last)
     workers = max(1, num_workers)
     population = config.row_count
     if worker_partition == "replicate":
@@ -259,14 +257,16 @@ def prepare_partitions(
         populations = workers
     else:
         if samples_per_epoch == population:
-            population = count * replica.world_size
+            population = rank_samples * replica.world_size
         elif population < replica.world_size:
             population = (
                 (population + replica.world_size - 1) // replica.world_size * replica.world_size
             )
         rank_span = partition_rows(population, parts=replica.world_size, part_id=replica.rank)
         populations = rank_span.length
-    budgets = worker_budgets(count, workers=workers, populations=populations, batch_size=batch_size)
+    budgets = worker_budgets(
+        rank_samples, workers=workers, populations=populations, batch_size=batch_size
+    )
     active = sum(budget > 0 for budget in budgets)
     full_pass = sum(budgets) == rank_span.length
     plans = []
@@ -315,21 +315,6 @@ def _validate_transform(transform: Callable[[CachedSample], T] | None, num_worke
         raise TypeError("sample_transform_fn must be picklable for multiprocess loading") from error
 
 
-def _warn_restarting_workers(workers: ResolvedWorkers) -> None:
-    """Expose replay risk only when loading processes actually discard their readers."""
-    if workers.counts.processes == 0 or workers.persistent:
-        return
-    warnings.warn(
-        "persistent_workers=False restarts DatasetRT readers on every DataLoader pass "
-        "with the same sampling seed and reset draw offset or sequential cursor. "
-        "With unchanged metadata, each epoch repeats the same sample sequence, "
-        "including when seed='random'. Short epochs can repeatedly omit the rest of "
-        "the population. Set persistent_workers=True to continue sampling across epochs.",
-        UserWarning,
-        stacklevel=4,
-    )
-
-
 def _prepare_adapter(
     dataset: CachedDataset,
     options: LoaderOptions,
@@ -337,6 +322,7 @@ def _prepare_adapter(
     replica: ReplicaIdentity,
     seed: int | None,
     sample_count: int,
+    rank_samples: int,
     transform: Callable[[CachedSample], T] | None,
     artifacts: ConstructionArtifacts,
 ) -> ReaderAdapter[T]:
@@ -350,10 +336,10 @@ def _prepare_adapter(
         num_workers=workers.counts.processes,
         batch_size=options.batch_size,
         samples_per_epoch=sample_count,
+        rank_samples=rank_samples,
         worker_partition=partition,
         shuffle=options.shuffle,
         seed=seed,
-        drop_last=options.drop_last,
     )
     if options.shuffle and partition == "split":
         if seed is None:
@@ -450,13 +436,24 @@ def make_dataloader(
     replica = capture_replica()
     workers = options.resolve_workers(replica.world_size)
     _validate_transform(sample_transform_fn, workers.counts.processes)
-    _warn_restarting_workers(workers)
     recipe = dataset._reader_recipe()
     sample_count = options.samples_per_epoch
     if sample_count is None:
         sample_count = recipe.sample_count
     if not 1 <= sample_count <= MAX_SAMPLE_BUDGET:
         raise ValueError(f"inherited samples_per_epoch must be between 1 and {MAX_SAMPLE_BUDGET}")
+    rank_samples = rank_budget(sample_count, replica, options.batch_size, options.drop_last)
+    if not options.shuffle and options.resolved_partition() == "replicate":
+        # Each rank has a positive quota. Within one rank, a partial batch
+        # cannot activate an extra worker.
+        if replica.world_size > 1 or (
+            workers.counts.processes > 1 and rank_samples >= 2 * options.batch_size
+        ):
+            raise ValueError(
+                "shuffle=False with worker_partition='replicate' duplicates sequential samples "
+                "across multiple active consumers. Use worker_partition='split', "
+                "shuffle=True, or one active consumer."
+            )
     resolved_seed = common_seed(replica, options.shuffle, options.resolved_seed())
     artifacts = ConstructionArtifacts.create(work_dir)
     try:
@@ -467,6 +464,7 @@ def make_dataloader(
             replica,
             resolved_seed,
             sample_count,
+            rank_samples,
             sample_transform_fn,
             artifacts,
         )

@@ -86,9 +86,24 @@ weights alone occupy 80 MB per consumer. Split mode partitions active rows and
 assigns consumer quotas; weighted frequencies can differ from global sampling
 because quotas follow batches rather than partition weight sums.
 
+All populations require persistent loading workers when `num_workers>0`.
+Setting `persistent_workers=False` raises `ValueError` before metadata export or
+worker startup. Recreated readers would reset their draw streams every epoch,
+reusing the same draws rather than continuing sampling. `seed="random"` is
+resolved once per loader and cannot prevent this reset. Keep the default
+`persistent_workers="auto"`, select `True`, or use `num_workers=0` to retain the
+main-process reader. This guard applies to split and replicated populations.
+
 Sequential loaders default to split populations. Torch interleaves worker
 batches, so multiple workers need not emit the original table's global order.
-Use one consumer when that order matters.
+Use one consumer when that order matters. Explicit sequential replication raises
+`ValueError` when more than one consumer has a positive quota, because each would
+read the same prefix. `drop_last=True` raises `ValueError` if the global budget is
+less than `world_size * batch_size`, which would produce zero batches.
+
+Under a multi-rank launcher (`WORLD_SIZE>1`), initialize the distributed process
+group before constructing the loader. Otherwise construction raises `RuntimeError`
+instead of silently treating each rank as a standalone reader.
 
 Native task/result windows and loader batch prefetch remain bounded, but their
 memory budgets multiply across consumers. Include maximum payload size,

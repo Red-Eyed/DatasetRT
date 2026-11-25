@@ -338,3 +338,47 @@ def test_checker_rejects_unknown_recipe_fields(tmp_path: Path, invalid: bool) ->
         assert result.returncode != 0 and "missing-attribute" in output, output
     else:
         assert result.returncode == 0, output
+
+
+@pytest.mark.parametrize("available", [False, True])
+@pytest.mark.parametrize("world_size", ["2", "8"])
+def test_uninitialized_distributed_launcher_rejected(
+    monkeypatch: pytest.MonkeyPatch, available: bool, world_size: str
+) -> None:
+    """A multi-rank launcher cannot silently give each rank the full dataset."""
+    import torch.distributed as distributed
+
+    monkeypatch.setenv("WORLD_SIZE", world_size)
+    monkeypatch.setattr(distributed, "is_available", lambda: available)
+    monkeypatch.setattr(distributed, "is_initialized", lambda: False)
+    with pytest.raises(RuntimeError, match="init_process_group") as caught:
+        capture_replica()
+    assert f"WORLD_SIZE={world_size}" in str(caught.value)
+
+
+@pytest.mark.parametrize("world_size", ["0", "-2", "many"])
+def test_invalid_launcher_world_size_rejected(
+    monkeypatch: pytest.MonkeyPatch, world_size: str
+) -> None:
+    """Reject malformed launcher state instead of silently choosing single-rank sampling."""
+    import torch.distributed as distributed
+
+    monkeypatch.setenv("WORLD_SIZE", world_size)
+    monkeypatch.setattr(distributed, "is_initialized", lambda: False)
+    with pytest.raises(ValueError, match="WORLD_SIZE"):
+        capture_replica()
+
+
+@pytest.mark.parametrize("world_size", [None, "1"])
+def test_standalone_launcher_fallback(
+    monkeypatch: pytest.MonkeyPatch, world_size: str | None
+) -> None:
+    """Standalone applications need no process group to construct a loader."""
+    import torch.distributed as distributed
+
+    if world_size is None:
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("WORLD_SIZE", world_size)
+    monkeypatch.setattr(distributed, "is_initialized", lambda: False)
+    assert capture_replica() == ReplicaIdentity()

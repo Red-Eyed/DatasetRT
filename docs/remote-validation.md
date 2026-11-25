@@ -70,8 +70,8 @@ interface selection fails. The module does not force a network interface.
   training compute. The model is two linear layers with a ReLU and SGD.
 - `--samples-per-epoch` is global across ranks. By default it is the physical
   population size. Padding/discarding and warnings follow the loader contract.
-- `--worker-partition split|replicate`, `--no-shuffle`, `--drop-last`, and
-  `--no-persistent-workers` exercise the corresponding loader behavior.
+- `--worker-partition split|replicate`, `--no-shuffle`, and `--drop-last` exercise
+  the corresponding loader behavior. Positive `--num-workers` requires persistence.
 - `--timeout-seconds` bounds the complete automatic local launch and distributed
   collectives. Increase it for long benchmarks. `--worker-timeout` bounds worker
   batch waits. `--quiet` suppresses harness progress, while errors remain visible.

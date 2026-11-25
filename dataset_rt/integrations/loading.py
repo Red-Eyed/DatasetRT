@@ -100,13 +100,20 @@ class WorkerPlan(BaseModel):
 
 
 def rank_budget(samples: int, replica: ReplicaIdentity, batch_size: int, drop_last: bool) -> int:
-    """Adjust one global budget to equal rank-local counts and warn only in rank zero."""
+    """Reject empty epochs and adjust the global budget to equal rank-local counts."""
     ranks = replica.world_size
     local = (
         samples // (ranks * batch_size) * batch_size
         if drop_last
         else (samples + ranks - 1) // ranks
     )
+    if drop_last and local == 0:
+        raise ValueError(
+            f"drop_last=True produces zero batches: samples_per_epoch={samples}, "
+            f"batch_size={batch_size}, world_size={ranks}; require at least "
+            f"{ranks * batch_size} samples. Increase samples_per_epoch, reduce "
+            "batch_size or world_size, or use drop_last=False."
+        )
     effective = local * ranks
     if effective != samples and replica.rank == 0:
         action = "padded" if effective > samples else "discarded"
@@ -234,8 +241,9 @@ def capture_replica() -> ReplicaIdentity:
     """Capture initialized-group rank/size in the training process before workers.
 
     Torch remains optional until this helper is invoked. With no initialized
-    distributed group, use a single replica. Hybrid subgroup selection requires
-    separate explicit support; the default group is appropriate for plain DDP.
+    distributed group, use a single replica only outside a multi-rank launcher.
+    Hybrid subgroup selection requires separate explicit support; the default
+    group is appropriate for plain DDP.
     """
     import torch.distributed as distributed
     from torch.utils.data import get_worker_info
@@ -243,5 +251,21 @@ def capture_replica() -> ReplicaIdentity:
     if get_worker_info() is not None:
         raise RuntimeError("capture_replica must run before DataLoader workers start")
     if not distributed.is_available() or not distributed.is_initialized():
+        configured = os.environ.get("WORLD_SIZE")
+        if configured is not None:
+            try:
+                world_size = int(configured)
+            except ValueError as error:
+                raise ValueError(
+                    f"WORLD_SIZE must be a positive integer; got {configured!r}"
+                ) from error
+            if world_size < 1:
+                raise ValueError(f"WORLD_SIZE must be positive; got {world_size}")
+            if world_size > 1:
+                raise RuntimeError(
+                    f"WORLD_SIZE={world_size} indicates a distributed launcher, but the "
+                    "process group is not initialized. Call torch.distributed.init_process_group "
+                    "before constructing the DatasetRT DataLoader."
+                )
         return ReplicaIdentity()
     return ReplicaIdentity(rank=distributed.get_rank(), world_size=distributed.get_world_size())

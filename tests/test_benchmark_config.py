@@ -21,6 +21,13 @@ def test_invalid_process_counts(ranks: int, workers: int) -> None:
         BenchmarkConfig(ranks=ranks, num_workers=workers)
 
 
+def test_distributed_benchmark_requires_persistence_only_for_workers() -> None:
+    """Reject worker restarts while allowing a main-process baseline."""
+    with pytest.raises(ValidationError, match="persistent_workers"):
+        BenchmarkConfig(num_workers=1, persistent_workers=False)
+    assert BenchmarkConfig(num_workers=0, persistent_workers=False).num_workers == 0
+
+
 def test_cuda_rejects_fork_workers() -> None:
     """Avoid poison-fork failures before a CUDA process or worker is created."""
     with pytest.raises(ValidationError, match="spawn or forkserver"):

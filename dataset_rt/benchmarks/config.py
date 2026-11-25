@@ -52,6 +52,8 @@ class BenchmarkConfig(BaseSettings):
     @model_validator(mode="after")
     def _validate_workload(self) -> BenchmarkConfig:
         """Reject unsupported contexts and unusable tensor shapes before launch."""
+        if self.num_workers > 0 and not self.persistent_workers:
+            raise ValueError("persistent_workers must be enabled when num_workers > 0")
         if self.worker_context not in get_all_start_methods():
             raise ValueError("worker_context is unavailable on this platform")
         if self.device == "cuda" and self.num_workers and self.worker_context == "fork":

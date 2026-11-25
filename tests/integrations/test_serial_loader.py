@@ -373,6 +373,16 @@ def test_explicit_finite_budget_wraps_sequentially(
     dataset: CachedDataset, samples: int, drop_last: bool
 ) -> None:
     """Sample budgets remain finite, preserve order, and report actual batch counts."""
+    if drop_last and samples < 3:
+        with pytest.raises(ValueError, match="zero batches"):
+            dataset.to_torch_dataloader(
+                num_workers=0,
+                shuffle=False,
+                samples_per_epoch=samples,
+                batch_size=3,
+                drop_last=True,
+            )
+        return
     loader = dataset.to_torch_dataloader(
         num_workers=0,
         shuffle=False,
@@ -576,6 +586,10 @@ def test_prepared_worker_populations(
     dataset: CachedDataset, shuffle: bool, partition: Literal["split", "replicate"]
 ) -> None:
     """Compact plans reproduce complete records and shuffle only split populations."""
+    if partition == "replicate" and not shuffle:
+        with pytest.raises(ValueError, match="duplicates sequential samples"):
+            dataset.to_torch_dataloader(shuffle=False, worker_partition=partition, num_workers=2)
+        return
     frame = dataset.get_metadata().with_columns(pl.col("sample_id").alias("extra"))
     dataset.update_metadata(frame)
     loader = dataset.to_torch_dataloader(

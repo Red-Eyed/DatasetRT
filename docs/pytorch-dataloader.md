@@ -107,8 +107,18 @@ CPU in loading workers, then transfer batches to the training device as needed.
 - Shuffled loading samples by weight with replacement. For reproducibility,
   keep the seed, worker topology, active metadata, and stream history fixed.
 - Persistent loading workers are automatic when `num_workers > 0`, allowing
-  sampling streams to continue between epochs. Explicitly disabling persistence
-  reconstructs readers and repeats their initial stream.
+  sampling streams to continue between epochs. All positive
+  worker counts reject `persistent_workers=False` at construction: restarting
+  readers would replay their initial stream, including with `seed="random"`.
+  Keep persistence enabled, or use `num_workers=0` to retain the main-process
+  reader. Split mode also requires persistent workers.
+- Sequential replication rejects multiple active consumers because their cursors
+  would read the same prefix. Use `worker_partition="split"` for sequential reads.
+- `drop_last=True` rejects a budget below `world_size * batch_size` rather than
+  returning an empty epoch. Increase the budget, reduce the batch size/rank count,
+  or disable `drop_last`.
+- A launcher advertising `WORLD_SIZE>1` requires an initialized distributed process
+  group before loader construction; otherwise construction raises `RuntimeError`.
 - The default shuffled partition mode replicates the population for global
   weighted frequencies. Each consumer retains private sampling state; memory
   grows with worker count. Explicit split mode changes the weighting tradeoff.

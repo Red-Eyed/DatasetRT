@@ -19,11 +19,12 @@ if TYPE_CHECKING:
     import pytest
 
 
-class ReplayReport(BaseModel):
-    """Validate bounded subprocess results before checking sampled sequence replay."""
+class ContinuationReport(BaseModel):
+    """Validate bounded subprocess results before checking sampled stream continuation."""
 
     first: list[int]
     second: list[int]
+    expected: list[int]
 
 
 def test_configured_logging_receives_one_event(caplog: pytest.LogCaptureFixture) -> None:
@@ -54,8 +55,8 @@ def test_unconfigured_process_uses_stderr_fallback() -> None:
     assert result.stderr.count("event=probe seed=17") == 1
 
 
-def test_nonpersistent_spawn_logs_every_sampling_reset(tmp_path: Path) -> None:
-    """Two real worker lifetimes report new PIDs with the same seed and reset draw stream."""
+def test_persistent_spawn_logs_stream_continuation(tmp_path: Path) -> None:
+    """Two real passes retain one worker and exactly continue its native sampling stream."""
     result = subprocess.run(
         [sys.executable, "tests/fixtures/loader_logging_process.py"],
         env={**os.environ, "DATASETRT_LOG_TEST_CACHE_ROOT": str(tmp_path)},
@@ -64,12 +65,10 @@ def test_nonpersistent_spawn_logs_every_sampling_reset(tmp_path: Path) -> None:
         check=True,
         timeout=60,
     )
-    report = ReplayReport.model_validate_json(result.stdout)
+    report = ContinuationReport.model_validate_json(result.stdout)
     assert len(report.first) == len(report.second) == 4
-    assert report.first == report.second
+    assert report.first + report.second == report.expected
     starts = re.findall(r"event=reader_started pid=(\d+) rank=0 worker=0 seed=(\d+)", result.stderr)
-    assert len(starts) == 2
-    assert starts[0][0] != starts[1][0]
-    assert starts[0][1] == starts[1][1]
-    assert result.stderr.count("sampling_reset=True") == 2
-    assert "persistent=False" in result.stderr
+    assert len(starts) == 1
+    assert result.stderr.count("sampling_reset=True") == 1
+    assert "persistent=True" in result.stderr

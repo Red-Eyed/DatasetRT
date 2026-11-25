@@ -148,12 +148,20 @@ class LoaderOptions:
                 return get_context(method)
 
     def _resolve_persistence(self, processes: int) -> bool:
-        """Auto follows worker availability; explicit persistence requires loading processes."""
+        """Loading workers must retain sampling progress across loader passes."""
         match self.persistent_workers:
             case "auto":
                 return processes > 0
             case True if processes == 0:
                 raise ValueError("persistent_workers=True requires num_workers > 0")
+            case False if processes > 0:
+                raise ValueError(
+                    "num_workers>0 rejects "
+                    "persistent_workers=False: restarting workers resets sampling state "
+                    "and replays the same per-worker sequence each epoch, including with "
+                    "seed='random'. Use persistent_workers=True or 'auto' to retain "
+                    "sampling state, or num_workers=0 to read in the main process."
+                )
             case bool() as persistent:
                 return persistent
         raise ValueError("persistent_workers must be a boolean or 'auto'")

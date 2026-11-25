@@ -613,7 +613,7 @@ correctness before checking reconstruction and native draw-offset initialization
 The user reports training impact; its duration and model-quality impact have not
 been measured here.
 
-The mitigation defaults to persistent workers and warns at loader construction
+The initial mitigation defaults to persistent workers and warns at loader construction
 whenever positive loading workers
 use nonpersistent readers, documents seed reuse and cursor reset, and tests both
 explicit and omitted seeds. Persistent workers retain native progress; zero-worker
@@ -621,26 +621,41 @@ loading retains its reader in the main process. The warning does not repair old
 training runs or advance an epoch counter for reconstructed workers. Parent-owned
 epoch or draw-offset propagation remains a separate correctness improvement.
 
+The 0.5.8 guard rejects `persistent_workers=False` for all positive loading worker
+counts, including split populations. Validation
+runs before metadata export or worker startup, even with `verbose=False` and
+`seed="random"`. Persistence or main-process loading retains sampling progress;
+split populations require persistence too. This prevents new worker-restart
+replay configurations; it cannot repair results from earlier training runs.
+
+Additional 0.5.8 guards reject sequential replication across multiple active
+consumers, zero-batch `drop_last=True` epochs, and `WORLD_SIZE>1` launchers without
+an initialized process group. These checks use O(1) configuration and budget
+validation before exporting metadata or starting workers. Recreating a loader with a
+fixed seed still intentionally replays its stream; persistence protects repeated
+passes of the same loader, not independent loader construction.
+
 ### Loader default review
 
 | Default | Consequence and guidance |
 | --- | --- |
-| `num_workers="auto"`, `persistent_workers="auto"` | Select up to four loading processes from the per-rank CPU budget minus one. A one-CPU budget selects zero and keeps the main-process reader. Auto persistence follows process availability; explicitly disabling it warns about replay. |
+| `num_workers="auto"`, `persistent_workers="auto"` | Select up to four loading processes from the per-rank CPU budget minus one. A one-CPU budget selects zero and keeps the main-process reader. Auto persistence follows process availability; explicitly disabling it rejects all positive worker counts. |
 | `shuffle=True`, `seed="random"` | Weighted sampling with replacement; randomness is selected once per loader, not once per epoch. Persistence advances draw offsets while retaining the seed. Explicit integers and fixed topology give reproducible fresh loaders. |
 | `samples_per_epoch=None` | Inherits the dataset's configured epoch length at construction, which may be shorter than the population. A short epoch neither reduces the population nor guarantees coverage. |
 | `worker_partition=None` | Shuffled loading defaults to replicate for global weighted sampling; sequential loading defaults to split to avoid duplicate starts. Replicate retains full private sampling state. Explicit split can distort weighted frequencies. |
 | `batch_size=1`, `drop_last=False` | Keeps incomplete batches; distributed budgets may pad counts. Set batching and tail policy explicitly for training. |
 | `native_num_workers="auto"`, `prefetch_factor="auto"` | Select 1–4 native threads using the same CPU-budget observation as automatic process selection. Auto prefetch resolves to two batches per loading worker or disabled with zero workers. Private buffers multiply across ranks and workers. |
-| `verbose=True` | Log resolved seeds, counts, prefetch, and reader starts/passes; restarted readers report sampling resets. Quiet mode suppresses these events but retains replay warnings. |
+| `verbose=True` | Log resolved seeds, counts, prefetch, and reader starts/passes; restarted readers report sampling resets. Quiet mode suppresses these events but retains validation errors. |
 | `multiprocessing_context="spawn"` | Start fresh loading processes by default. `"inherit"` selects Python's platform default; zero-worker loading omits the context. Spawn requires a guarded entry point and picklable callbacks. |
 | `pin_memory=False`, `timeout=0` | No pinned-memory transfer optimization and no positive loader timeout. Choose these according to accelerator and failure-detection needs. |
 
 - [ ] A new worker-lifecycle implementation must prove continuing draw/cursor
   progress across reconstructed readers, with both explicit and omitted seeds.
-- [x] Real fork/spawn/forkserver tests draw eight samples from a 20-row weighted
-  population across two passes, with explicit and omitted seeds. Restarted worker
-  PIDs differ while their draw sequences repeat. Checking saved weights alone
-  would not detect this failure.
+- [x] Earlier fork/spawn/forkserver tests demonstrated that restarted workers
+  replay short weighted epochs with different PIDs and unchanged draw sequences.
+  Current tests reject worker-restart configurations before workers start, with
+  fixed and random seeds, and verify persistent workers continue their exact
+  weighted streams. Checking saved weights alone would not detect this failure.
 
 ## Writer memory failure analysis — 2026-11-05
 

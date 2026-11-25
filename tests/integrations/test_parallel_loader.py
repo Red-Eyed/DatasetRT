@@ -130,14 +130,14 @@ def accepted_dataset(recipe: ReaderRecipe) -> CachedDataset:
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("seed", [None, 7])
 @pytest.mark.parametrize("partition", ["split", "replicate"])
-def test_nonpersistent_workers_warn_about_repeated_epochs(
+def test_nonpersistent_workers_rejected_for_all_partitions(
     accepted_dataset: CachedDataset,
     shuffle: bool,
     seed: int | None,
     partition: Literal["split", "replicate"],
 ) -> None:
-    """Expose replay risk at construction for both default and explicit seeds."""
-    with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
+    """Reject restarting workers for either partition and seed mode."""
+    with pytest.raises(ValueError, match="persistent_workers=False"):
         accepted_dataset.to_torch_dataloader(
             shuffle=shuffle,
             seed=seed if shuffle and seed is not None else "random",
@@ -298,12 +298,12 @@ def test_loader_logs_resolved_settings_and_reader_continuation(
     assert any("sampling_reset=True" in message for message in messages)
 
 
-def test_quiet_loader_preserves_replay_warning(
+def test_quiet_loader_preserves_persistence_rejection(
     accepted_dataset: CachedDataset, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Verbosity cannot conceal the nonpersistent sampling-reset warning."""
+    """Quiet mode cannot bypass rejection of worker sampling resets."""
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
-        with pytest.warns(UserWarning, match="each epoch repeats"):
+        with pytest.raises(ValueError, match="persistent_workers=False"):
             accepted_dataset.to_torch_dataloader(
                 num_workers=2, persistent_workers=False, verbose=False
             )
@@ -450,12 +450,23 @@ def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> No
     dataset._restore_metadata(recipe.metadata)
     if case == "tiny-replicate":
         dataset.update_metadata(dataset.get_metadata().head(1))
-    shuffled = case == "split-shuffle"
+    shuffled = case in ("split-shuffle", "tiny-replicate")
     mode: Literal["split", "replicate"] = (
         "replicate" if case in ("replicate-sequential", "tiny-replicate") else "split"
     )
     samples = 1 if case == "quota-short" else (600 if shuffled else 17)
     batch_size = 1 if case in ("quota-short", "tiny-replicate") else 3
+    if case == "replicate-sequential":
+        with pytest.raises(ValueError, match="duplicates sequential samples"):
+            dataset.to_torch_dataloader(
+                shuffle=False,
+                worker_partition=mode,
+                num_workers=4,
+                samples_per_epoch=samples,
+                batch_size=batch_size,
+                multiprocessing_context=context,
+            )
+        return
     loader = dataset.to_torch_dataloader(
         shuffle=shuffled,
         seed=7 if shuffled else "random",
@@ -504,16 +515,16 @@ def run_partition_case(recipe: ReaderRecipe, context: Context, case: Case) -> No
     gc.collect()
 
 
-def run_short_epoch_replay(recipe: ReaderRecipe, context: Context, seed: int | None) -> None:
-    """Prove that restarted readers repeat a short weighted epoch over a larger population."""
+def run_short_epoch_rejection(recipe: ReaderRecipe, context: Context, seed: int | None) -> None:
+    """Reject worker restarts that would replay a short weighted epoch over a larger population."""
     runtime = DatasetRuntime(num_workers=1)
     dataset = runtime.cached_dataset(recipe.cache_paths, reader_config=recipe.reader_config)
     dataset.update_metadata(
         dataset.get_metadata().with_columns((pl.col("index").cast(pl.Float64) + 1).alias("weight"))
     )
     assert len(dataset) == 20
-    with pytest.warns(UserWarning, match="each epoch repeats the same sample sequence"):
-        loader = dataset.to_torch_dataloader(
+    with pytest.raises(ValueError, match="persistent_workers=False"):
+        dataset.to_torch_dataloader(
             seed=("random" if seed is None else seed),
             samples_per_epoch=8,
             worker_partition="replicate",
@@ -523,19 +534,15 @@ def run_short_epoch_replay(recipe: ReaderRecipe, context: Context, seed: int | N
             sample_transform_fn=observe,
             collate_fn=identity,
         )
-    first = list(loader)
-    second = list(loader)
-    assert len(first) == len(second) == 8
-    assert [(row.worker, row.cache, row.sample, row.seed) for row in first] == [
-        (row.worker, row.cache, row.sample, row.seed) for row in second
-    ]
-    assert {row.pid for row in first}.isdisjoint(row.pid for row in second)
+    assert not mp.active_children()
 
 
 def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
     """Warm the real parent before launching each isolated DataLoader scenario."""
-    if case in ("short-replay", "random-short-replay"):
-        run_short_epoch_replay(recipe, context, 7 if case == "short-replay" else None)
+    if case in ("short-replay", "random-short-replay", "replay", "random-replay"):
+        run_short_epoch_rejection(
+            recipe, context, 7 if case in ("short-replay", "replay") else None
+        )
         return
     if case in ("batch-tail", "batch-drop"):
         run_batch_case(recipe, context, case == "batch-drop")
@@ -583,7 +590,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         return
     workers = 4 if case == "empty" else 2
     shuffle = case not in ("validation", "persistent-validation", "empty")
-    persistent = case in ("persistent-validation", "persistent-shuffle", "random-persistent")
+    persistent = True
     seed = None if case in ("random-persistent", "random-replay") or not shuffle else 7
     transform = observe
     match case:
@@ -640,7 +647,7 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
             # Release while Torch is still alive, before multiprocessing's exit
             # finalizer terminates daemon workers. Torch's reraised exception can
             # retain the iterator in a traceback cycle until cyclic collection.
-            del iterator
+            del iterator, loader
             gc.collect()
             for child in mp.active_children():
                 child.join(5)
@@ -667,12 +674,6 @@ def run_case(recipe: ReaderRecipe, context: Context, case: Case) -> None:
         verify_validation(first, empty=case == "empty")
     else:
         verify_shuffled(first, workers, seed, weighted=case == "weighted")
-    if case in ("replay", "random-replay"):
-        second = list(islice(loader, 40))
-        assert [(r.worker, r.cache, r.sample, r.seed) for r in first] == [
-            (r.worker, r.cache, r.sample, r.seed) for r in second
-        ]
-        assert {row.pid for row in first}.isdisjoint({row.pid for row in second})
     if persistent:
         second = list(loader) if not shuffle else list(islice(loader, 40))
         assert {(r.pid, r.native_id, r.seed) for r in first} == {
@@ -826,7 +827,7 @@ def run_interrupt_case(
     recipe: ReaderRecipe,
     context: Context,
     initializing: bool,
-    persistent: bool,
+    split: bool,
     connection: Connection,
 ) -> None:
     """Receive real terminal-style group SIGINT and release a complete worker tree."""
@@ -841,8 +842,9 @@ def run_interrupt_case(
         seed=7,
         batch_size=1,
         num_workers=2,
+        worker_partition="split" if split else "replicate",
         multiprocessing_context=context,
-        persistent_workers=persistent,
+        persistent_workers=True,
         prefetch_factor=1,
         worker_init_fn=BlockingInitialization(connection) if initializing else initialize_worker,
         sample_transform_fn=observe if initializing else BlockingTransform(connection),
@@ -867,18 +869,18 @@ def run_interrupt_case(
 
 @pytest.mark.parametrize("context", ["fork", "spawn", "forkserver"])
 @pytest.mark.parametrize("initializing", [False, True])
-@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("split", [False, True])
 def test_real_ctrl_c_reaps_workers(
     recipe: ReaderRecipe,
     context: Context,
     initializing: bool,
-    persistent: bool,
+    split: bool,
 ) -> None:
     """Signal an isolated process group only after both real workers reach the target stage."""
     launch = mp.get_context("spawn")
     receive, send = launch.Pipe(duplex=False)
     process = launch.Process(
-        target=run_interrupt_case, args=(recipe, context, initializing, persistent, send)
+        target=run_interrupt_case, args=(recipe, context, initializing, split, send)
     )
     process.start()
     send.close()

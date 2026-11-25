@@ -378,6 +378,29 @@ class CachedDataset:
     ) -> DataLoader[CachedSample | T]:
         """Build a finite PyTorch DataLoader for training or evaluation.
 
+        Construction-time safety contract:
+
+        - Resolved num_workers>0 requires persistent workers. Keep
+          persistent_workers="auto" or True; False raises ValueError. With
+          num_workers=0, "auto" resolves to False and True raises ValueError.
+        - shuffle=False with worker_partition="replicate" raises ValueError
+          when multiple consumers have positive sample quotas. Consumers span
+          distributed ranks and their loading workers, or the rank's main
+          process when num_workers=0. Use "split" for sequential partitioning.
+        - drop_last=True requires samples_per_epoch >= world_size * batch_size;
+          otherwise ValueError prevents a zero-batch epoch. For example, seven
+          global samples, four ranks, and batch size two require at least eight
+          samples. Increase the budget, reduce batch size/ranks, or disable dropping.
+        - WORLD_SIZE>1 requires an initialized default torch.distributed process
+          group before this call; otherwise RuntimeError prevents each rank
+          silently planning as a standalone reader.
+
+        Reuse the same loader across epochs to retain sampling progress. Creating
+        a new loader with the same explicit seed and topology restarts its stream.
+        seed="random" chooses randomness once per loader, not once per epoch.
+        verbose=False does not disable safety checks. Errors never silently change
+        persistence, partitioning, shuffle, or the dropping policy.
+
         ``samples_per_epoch`` counts global samples before batching,
         not batches or optimizer steps. None inherits ``len(self)`` at loader
         construction, including any ``set_epoch_len`` override. A positive integer
@@ -403,7 +426,8 @@ class CachedDataset:
         A remainder pads the global count or discards samples respectively;
         process zero warns with requested and effective counts. For N=1000,
         R=3, B=32, each gets 334 samples and 11 batches, or 320 samples and
-        10 batches when dropping tails. A zero effective count yields no batches.
+        10 batches when dropping tails. If dropping would leave zero batches,
+        construction raises ValueError instead of returning an empty loader.
 
         ``worker_partition=None`` (the default) selects replicate for shuffled
         training and split for sequential reading. Replicate preserves global
@@ -421,8 +445,9 @@ class CachedDataset:
 
         ``worker_partition="replicate"`` gives every worker the full population
         while sharing the same total sample budget. With shuffle=True,
-        each worker samples by weight with replacement; with shuffle=False, each
-        starts at the beginning, so different workers can emit duplicate samples.
+        each worker samples by weight with replacement. With shuffle=False,
+        multiple active consumers are rejected because each would start at the
+        beginning and duplicate sequential samples.
         With one training process and one consumer, both modes use the full population.
         Torch interleaves worker batches; multiworker output need not match global
         metadata order. Weights do not affect sequential reads.
@@ -433,19 +458,19 @@ class CachedDataset:
         randomness once during construction and is unused for sequential reading.
         None is not accepted as a seed or worker-count mode.
         Repeated passes reuse native state in the main process or persistent
-        workers and continue their draw streams/cursors. Nonpersistent workers
+        workers and continue their draw streams/cursors. Restarting workers would
         reconstruct fresh readers with the same saved seed and reset draw offset
         or sequential cursor each pass, repeating the same sample sequence when
-        metadata is unchanged. This also happens with seed="random", because its
-        randomness is chosen once per loader. A short epoch can therefore keep
+        metadata is unchanged. seed="random" would not prevent this, because its
+        randomness is chosen once per loader. Short epochs would therefore keep
         omitting the same population rows. With num_workers>0, use
         persistent_workers="auto" (the default) to continue across epochs; explicit
-        False emits a warning.
+        False raises ValueError for all positive worker counts, including split
+        populations.
         With num_workers=0 the reader stays in the main process and continues
         without persistent workers; auto disables the worker-only flag in that mode.
         Explicit persistent_workers=True requires positive loading workers.
-        Split populations are fixed for the
-        loader's lifetime, including when persistent workers are used.
+        Split populations are fixed for the loader's lifetime.
 
         Construction saves a config and active metadata Arrow without loading
         payloads or creating a consuming native reader. Parent edits do not change
@@ -492,10 +517,12 @@ class CachedDataset:
 
         verbose=True reports resolved sampling seeds, process/native thread
         counts, partition, persistence, prefetching, and reader starts/passes.
-        Nonpersistent reader starts report sampling_reset=True and new PIDs.
+        Initial reader starts report sampling_reset=True; repeated passes retain
+        the reader PID and report continued sampling.
         Events use INFO on the standard logger "dataset_rt.loader", respecting
         application handlers and filters; unconfigured processes use stderr.
-        verbose=False suppresses lifecycle diagnostics but never the replay warning.
+        verbose=False suppresses lifecycle diagnostics but never configuration
+        errors.
         Logs describe configured budgets, not measured thread activity or exact
         native draw offsets. Sampling seeds do not seed random user transforms.
 

@@ -256,21 +256,22 @@ the resolved sampling seed, derived worker seeds, process count, native threads
 per consumer, partition mode, persistence, Torch/native prefetch, and sample
 budgets. Reader starts and passes report PID, rank, worker identity, sampling
 seed, quota/population size, and whether sampling started from zero.
-Nonpersistent passes reconstruct readers and therefore log new PIDs and
-`sampling_reset=True`; persistent readers log continuing passes without a reset.
+Initial reader starts log `sampling_reset=True`. Repeated passes retain the reader
+PID and log continued sampling.
 These events describe configured settings, not exact native draw offsets or
 measured CPU activity. Sampling seeds do not seed random user transforms.
 
 Application logging handlers and filters are respected. With no configured
 handlers, processes print events to stderr without changing global logging
-configuration. `verbose=False` suppresses lifecycle events while leaving replay
+configuration. `verbose=False` suppresses lifecycle events while leaving configuration errors
 and resource-detection warnings visible. Events are O(consumers) per pass;
 there is no per-sample logging or hidden logging queue. Spawned/forked workers
 retain the verbosity setting in their compact reconstruction inputs.
 
 `persistent_workers="auto"` enables persistence with loading processes and
 disables it for main-process loading. Explicit True requires positive workers;
-explicit False with loading workers warns about repeated sampling.
+explicit False with loading workers raises `ValueError` because restarting readers
+would replay the same sampling stream.
 `prefetch_factor="auto"` selects two batches per loading worker or disables
 prefetch with zero workers. Explicit positive integers require loading workers;
 None is rejected at the API boundary. Torch still receives None internally when
@@ -334,7 +335,7 @@ by the number of workers.
 | Worker partition | `shuffle=False` | `shuffle=True` |
 | --- | --- | --- |
 | `"split"` (default) | Preserve metadata order, split into disjoint worker populations, read each sequentially | Reproduce a common seeded metadata order, split it, then sample each worker population by weight with replacement |
-| `"replicate"` | Give every worker the full population; workers start at its beginning, so outputs can overlap | Give every worker the full population and independently sample by weight with replacement |
+| `"replicate"` | Allowed with only one active consumer, which reads the full population | Give every worker the full population and independently sample by weight with replacement |
 
 Weights do not affect sequential reads. Randomizing split populations improves
 the weight mix but only approximates the global weighted distribution: quotas
@@ -347,8 +348,7 @@ workers need not emit samples in global metadata order.
 `ValueError`. An explicit seed reproduces fresh loaders with the same topology.
 An omitted seed selects randomness once during construction. Split populations
 are fixed for the loader's lifetime. Repeated passes continue reader streams and
-cursors with zero workers or persistent workers. Nonpersistent workers rebuild
-fresh readers each pass and replay explicit seeds. Reconstruct the loader to
+cursors with zero workers or persistent workers. Reconstruct the loader to
 change metadata, populations, or seeds.
 
 Construction exports active metadata once per loader, in O(rows × columns)
@@ -428,7 +428,8 @@ native reader/writer pipelines, storage, sampling, and shared runtime primitives
 
 Initialize the application's default distributed group **before** calling
 `to_torch_dataloader()` in each rank. The helper captures that group's rank and
-size once. Loading workers receive the captured identity, never query the group,
+size once. Under a launcher with `WORLD_SIZE>1`, construction raises
+`RuntimeError` if the process group is uninitialized. Loading workers receive the captured identity, never query the group,
 and create their own native reader during worker setup. Rank launch and loader
 worker launch are separate choices: the acceptance tests spawn ranks, then use
 the caller-selected fork, spawn, or forkserver context for loading workers.
@@ -438,7 +439,7 @@ Without `drop_last`, each rank gets `ceil(N/R)` samples; with `drop_last`, each 
 `B*floor(N/(R*B))`. All ranks report identical lengths and emit identical batch
 counts. N=1000, R=3, B=32 gives 334 samples/11 batches per rank, or 320 samples/10
 batches with `drop_last=True`. Rank zero warns when padding or discarding changes
-the effective global count. Zero effective budgets create no native readers.
+the effective global count. If `drop_last=True` leaves zero batches, construction raises `ValueError`.
 Padded split reads repeat active positions; account for them when reducing metrics.
 
 Both partition policies apply across ranks and workers. Split divides active
@@ -508,8 +509,8 @@ uv run --python 3.11 --extra dev scripts/bench_reader.py --contexts '["spawn","f
 Both shuffle modes run five paired rounds by default, with case order rotated
 each round. Each trial runs in a fresh process, constructs its own native source
 dataset, warms a native read before worker launch, and consumes a complete first
-pass followed by a repeated pass. Persistent workers are enabled in this
-benchmark by default; `--no-persistent-workers` measures reconstruction instead.
+pass followed by a repeated pass. Worker trials require persistence, so the benchmark rejects
+`--no-persistent-workers` before launch.
 The first pass supplies warmup and cold-start evidence. Timing gates use the
 repeated pass and normalize by actually consumed samples after its first batch.
 Construction, iterator creation, first-batch latency, and final cleanup remain
@@ -575,7 +576,7 @@ startup; timing varies across machines.
 
 The suite checks default persistence and spawn, exact weighted-stream continuation
 across short epochs, reproducibility across independent loaders, full weighted
-population access, exact finite batch counts, and the nonpersistent replay warning
+population access, exact finite batch counts, and rejection of nonpersistent workers
 even with diagnostics disabled. A 32-sample population and eight-sample epochs
 exercise the same population/epoch distinction as a 10M-sample dataset with 1M
 samples per epoch, without production-size allocations. Only CPU availability is

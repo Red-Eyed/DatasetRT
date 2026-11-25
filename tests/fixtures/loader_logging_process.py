@@ -1,4 +1,4 @@
-"""Run real nonpersistent spawned readers with unconfigured application logging."""
+"""Run real persistent spawned readers with unconfigured application logging."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pydantic import BaseModel, DirectoryPath
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig, WriterConfig
+from dataset_rt.integrations.loading import derive_seed
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -24,10 +25,11 @@ class Settings(BaseSettings):
 
 
 class Report(BaseModel):
-    """Return bounded draw sequences for replay checks without sending native state."""
+    """Return bounded draw sequences for continuation checks without native state."""
 
     first: list[int]
     second: list[int]
+    expected: list[int]
 
 
 class Source:
@@ -47,7 +49,7 @@ def payload_index(sample: CachedSample) -> int:
 
 
 def main() -> None:
-    """Exercise two complete passes so new worker PIDs and reset events are observable."""
+    """Exercise two complete passes so retained worker PIDs and continuation events are observable."""
     settings = Settings()
     runtime = DatasetRuntime(num_workers=1)
     results = runtime.write_cache(
@@ -66,14 +68,21 @@ def main() -> None:
         native_num_workers=1,
         seed=7,
         samples_per_epoch=4,
+        worker_partition="replicate",
         multiprocessing_context="spawn",
-        persistent_workers=False,
+        persistent_workers=True,
         sample_transform_fn=payload_index,
         verbose=True,
     )
     first = [int(batch.item()) for batch in loader]
     second = [int(batch.item()) for batch in loader]
-    print(Report(first=first, second=second).model_dump_json())
+    reference = runtime.cached_dataset(
+        [path], reader_config=ReaderConfig(seed=derive_seed(7, 0, 0))
+    )
+    reference.update_metadata(dataset.get_metadata())
+    reference.set_epoch_len(8)
+    expected = [int(sample.data) for sample in reference]
+    print(Report(first=first, second=second, expected=expected).model_dump_json())
 
 
 if __name__ == "__main__":
