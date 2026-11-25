@@ -327,6 +327,8 @@ def _recording_worker(
     config: WriterConfig,
     native_workers: int,
     reuse: bool,
+    worker_id: int,
+    worker_init_fn: Callable[[int], None] | None,
 ) -> None:
     """Instrument the native constructor inside an actual spawned child."""
     from dataset_rt.writer import _worker
@@ -338,7 +340,7 @@ def _recording_worker(
         return NativeRuntime(count)
 
     with patch("dataset_rt.writer.NativeRuntime", side_effect=create_runtime):
-        _worker(jobs, results, path, config, native_workers, reuse)
+        _worker(jobs, results, path, config, native_workers, reuse, worker_id, worker_init_fn)
 
 
 def test_runtime_is_constructed_once_per_child(
@@ -700,3 +702,81 @@ def test_profiling_keeps_serial_execution(
     assert isinstance(results[0], CacheWriteSuccess)
     assert (observations / "profiled").read_text() == str(os.getpid())
     assert (tmp_path / "profile.json").is_file()
+
+
+def _record_initializer(directory: Path, worker_id: int) -> None:
+    """Record one invocation per PID before native runtime construction."""
+    assert not (directory / f"runtime-{os.getpid()}").exists()
+    with (directory / f"init-{os.getpid()}").open("a") as log:
+        log.write(f"{worker_id}\n")
+
+
+def _initialized_factory(directory: Path) -> Iterator[CacheInput]:
+    """Require the initializer in the process that constructs the source."""
+    worker_id = int((directory / f"init-{os.getpid()}").read_text())
+    yield CacheInput(b"initialized", {"worker_id": worker_id})
+
+
+def test_worker_initializer_runs_once_before_runtime_and_sources(
+    runtime: DatasetRuntime, tmp_path: Path, parallel_config: WriterConfig
+) -> None:
+    """Each child initializes once even when the pool writes more sources than workers."""
+    sources: list[CacheSource] = [
+        CacheSourceFactory(f"initialized-{i}", partial(_initialized_factory, tmp_path))
+        for i in range(5)
+    ]
+    with patch("dataset_rt.writer._worker", _recording_worker):
+        result = runtime.from_cache_sources(
+            sources,
+            tmp_path,
+            writer_config=parallel_config,
+            reader_config=ReaderConfig(seed=0, shuffle=False),
+            worker_init_fn=partial(_record_initializer, tmp_path),
+        )
+    assert isinstance(result, CacheSourcesDatasetSuccess)
+    assert all(isinstance(outcome, CacheWriteSuccess) for outcome in result.results)
+    assert sorted(log.read_text() for log in tmp_path.glob("init-*")) == ["0\n", "1\n"]
+    assert len(list(tmp_path.glob("runtime-*"))) == 2
+    assert not multiprocessing.active_children()
+
+
+def _reject_initializer(worker_id: int) -> None:
+    """Fail one child after another child has had time to become ready."""
+    if worker_id == 1:
+        time.sleep(0.2)
+        raise ValueError("resource unavailable")
+
+
+def test_worker_initializer_failure_stops_pool_before_dispatch(
+    runtime: DatasetRuntime, tmp_path: Path, parallel_config: WriterConfig
+) -> None:
+    """Report a startup error for each source without publishing any cache."""
+    results = runtime.write_cache(
+        [Source("first"), Source("second")],
+        tmp_path,
+        writer_config=parallel_config,
+        worker_init_fn=_reject_initializer,
+    )
+    assert [result.source_name for result in results] == ["first", "second"]
+    for result in results:
+        assert isinstance(result, CacheWriteError)
+        assert "worker_init_fn failed for worker 1" in result.message
+        assert "resource unavailable" in result.message
+    assert not list(tmp_path.iterdir())
+    assert not multiprocessing.active_children()
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_worker_initializer_rejects_serial_execution(
+    runtime: DatasetRuntime, tmp_path: Path, profile: bool
+) -> None:
+    """Reject a callback that the effective execution mode cannot invoke."""
+    config = WriterConfig(
+        num_processes=2 if profile else 0,
+        profiler=WriterProfilerConfig(enabled=profile, path=tmp_path / "profile.json"),
+    )
+    with pytest.raises(ValueError, match="worker_init_fn requires"):
+        runtime.write_cache(
+            Source("unused"), tmp_path, writer_config=config, worker_init_fn=_reject_initializer
+        )
+    assert not list(tmp_path.iterdir())

@@ -2,6 +2,14 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.9
+
+### Features
+
+- Accept an optional `worker_init_fn(worker_id)` on both cache writer entry
+  points. Run it once per spawned process before receiving sources, and report
+  initialization failures through the existing source outcomes.
+
 ## 0.5.8
 
 ### Backwards Incompatible Changes

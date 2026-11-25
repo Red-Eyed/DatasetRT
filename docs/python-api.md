@@ -736,7 +736,7 @@ datasets loaded through it.
 
 Return the fixed worker count selected when this runtime was created.
 
-#### `DatasetRuntime.write_cache(sources: CacheSource | list[CacheSource], path: str | Path, *, writer_config: WriterConfig = DEFAULT_WRITER_CONFIG) -> list[CacheWriteResult]`
+#### `DatasetRuntime.write_cache(sources: CacheSource | list[CacheSource], path: str | Path, *, writer_config: WriterConfig = DEFAULT_WRITER_CONFIG, worker_init_fn: Callable[[int], None] | None = None) -> list[CacheWriteResult]`
 
 Write one immutable cache per source under `path`.
 
@@ -759,6 +759,16 @@ and outcomes cross processes; sample payloads do not. Worker death or
 `process_timeout_seconds` stops the pool without retrying unfinished
 sources. Profiling keeps serial execution even with a positive count.
 
+`worker_init_fn(worker_id)` runs once in each spawned process, before
+creating its native runtime or receiving any source. IDs start at zero
+for each call. The callable must be picklable and importable under spawn.
+Its execution counts toward the startup timeout. All initializers must
+succeed before sources are dispatched. An initializer exception stops the
+pool and reports the worker ID and cause in the per-source write outcomes.
+KeyboardInterrupt and SystemExit propagate after child cleanup.
+A non-callable initializer raises TypeError. Supplying an initializer
+when num_processes=0 or profiling forces serial execution raises ValueError.
+
 Each source has one owning worker; callers must exclude concurrent write
 invocations targeting the same destinations. Parallel mode refuses
 pre-existing temporary cache paths and reserves the `tmp` source name.
@@ -778,7 +788,7 @@ lengths while loading. Expensive checksum hashing is controlled by
 The returned dataset keeps this runtime's Rust worker pool alive and
 uses it for every future iterator.
 
-#### `DatasetRuntime.from_cache_sources(sources: CacheSource | list[CacheSource], path: str | Path, *, reader_config: ReaderConfig, writer_config: WriterConfig = DEFAULT_WRITER_CONFIG) -> CacheSourcesDatasetResult`
+#### `DatasetRuntime.from_cache_sources(sources: CacheSource | list[CacheSource], path: str | Path, *, reader_config: ReaderConfig, writer_config: WriterConfig = DEFAULT_WRITER_CONFIG, worker_init_fn: Callable[[int], None] | None = None) -> CacheSourcesDatasetResult`
 
 Create or reuse source caches, then load all successful cache paths.
 
@@ -792,7 +802,7 @@ was provided. The result always includes per-source write outcomes so
 callers can audit partial success.
 
 Parallel execution follows `write_cache`'s process, timeout, ownership,
-and serialization contract. Successful paths preserve input source order,
+initializer, and serialization contract. Successful paths preserve input source order,
 regardless of completion order; IDs come from v3 manifests or v2 positions.
 
 ### `ReaderConfig`

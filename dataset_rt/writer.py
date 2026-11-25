@@ -26,7 +26,7 @@ from dataset_rt.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from multiprocessing.connection import Connection
     from multiprocessing.process import BaseProcess
     from multiprocessing.queues import Queue
@@ -158,9 +158,20 @@ def _worker(
     config: WriterConfig,
     native_workers: int,
     reuse: bool,
+    worker_id: int,
+    worker_init_fn: Callable[[int], None] | None,
 ) -> None:
     """Create native state after spawn and reuse it across independent sources."""
     try:
+        if worker_init_fn is not None:
+            try:
+                worker_init_fn(worker_id)
+            except Exception as error:
+                _send(
+                    results,
+                    Failed(f"worker_init_fn failed for worker {worker_id}: {_diagnostic(error)}"),
+                )
+                return
         runtime = NativeRuntime(native_workers)
         _send(results, Ready())
         while True:
@@ -267,6 +278,8 @@ def _start(
     config: WriterConfig,
     native_workers: int,
     reuse: bool,
+    worker_id: int,
+    worker_init_fn: Callable[[int], None] | None,
 ) -> WriterProcess:
     """Allocate one child with one bounded mailbox; never inherit native state."""
     context = multiprocessing.get_context("spawn")
@@ -275,7 +288,7 @@ def _start(
     child_config = config.model_copy(update={"num_processes": 0, "show_progress": False})
     process = context.Process(
         target=_worker,
-        args=(jobs, sender, path, child_config, native_workers, reuse),
+        args=(jobs, sender, path, child_config, native_workers, reuse, worker_id, worker_init_fn),
     )
     try:
         process.start()
@@ -400,6 +413,8 @@ def _supervise(
     path: Path,
     config: WriterConfig,
     outcomes: dict[int, CacheWriteResult],
+    *,
+    wait_for_initializers: bool,
 ) -> Result[None, Failed]:
     """Assign one job per idle child without waiting for earlier source outcomes."""
     next_index = 0
@@ -412,6 +427,10 @@ def _supervise(
                     return result
                 case Ok():
                     pass
+        if wait_for_initializers and any(isinstance(worker.state, Starting) for worker in workers):
+            time.sleep(0.01)
+            continue
+        wait_for_initializers = False
         for worker in workers:
             while isinstance(worker.state, Idle) and next_index < len(jobs):
                 index = next_index
@@ -438,6 +457,7 @@ def write_parallel(
     config: WriterConfig,
     native_workers: int,
     reuse: bool,
+    worker_init_fn: Callable[[int], None] | None,
 ) -> list[CacheWriteResult]:
     """Run bounded independent source jobs, returning the existing ordered outcomes.
 
@@ -460,9 +480,11 @@ def write_parallel(
     public_path = path
     try:
         path = path.resolve()
-        for _ in range(min(config.num_processes, len(jobs))):
-            workers.append(_start(path, config, native_workers, reuse))
-        match _supervise(workers, jobs, path, config, outcomes):
+        for worker_id in range(min(config.num_processes, len(jobs))):
+            workers.append(_start(path, config, native_workers, reuse, worker_id, worker_init_fn))
+        match _supervise(
+            workers, jobs, path, config, outcomes, wait_for_initializers=worker_init_fn is not None
+        ):
             case Err(error=error):
                 failure = error.message
             case Ok():

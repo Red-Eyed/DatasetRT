@@ -20,7 +20,7 @@ from dataset_rt.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from dataset_rt._dataset_rt import CacheWriteRecord as _RawCacheWriteResult
 
@@ -103,6 +103,7 @@ class DatasetRuntime:
         path: str | Path,
         *,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
+        worker_init_fn: Callable[[int], None] | None = None,
     ) -> list[CacheWriteResult]:
         """Write one immutable cache per source under `path`.
 
@@ -125,13 +126,25 @@ class DatasetRuntime:
         `process_timeout_seconds` stops the pool without retrying unfinished
         sources. Profiling keeps serial execution even with a positive count.
 
+        `worker_init_fn(worker_id)` runs once in each spawned process, before
+        creating its native runtime or receiving any source. IDs start at zero
+        for each call. The callable must be picklable and importable under spawn.
+        Its execution counts toward the startup timeout. All initializers must
+        succeed before sources are dispatched. An initializer exception stops the
+        pool and reports the worker ID and cause in the per-source write outcomes.
+        KeyboardInterrupt and SystemExit propagate after child cleanup.
+        A non-callable initializer raises TypeError. Supplying an initializer
+        when num_processes=0 or profiling forces serial execution raises ValueError.
+
         Each source has one owning worker; callers must exclude concurrent write
         invocations targeting the same destinations. Parallel mode refuses
         pre-existing temporary cache paths and reserves the `tmp` source name.
         `show_progress` reports completed source count from the parent; child
         sample progress is disabled. Use a main guard when launching processes.
         """
-        return self._write_sources(sources, Path(path), writer_config, reuse_existing=False)
+        return self._write_sources(
+            sources, Path(path), writer_config, reuse_existing=False, worker_init_fn=worker_init_fn
+        )
 
     def _write_sources(
         self,
@@ -140,13 +153,22 @@ class DatasetRuntime:
         config: WriterConfig,
         *,
         reuse_existing: bool,
+        worker_init_fn: Callable[[int], None] | None,
     ) -> list[CacheWriteResult]:
         """Select optional process supervision without changing native serial writing."""
+        if worker_init_fn is not None and not callable(worker_init_fn):
+            raise TypeError("worker_init_fn must be callable")
         match config:
             case WriterConfig(num_processes=count) if count > 0 and not config.profiler.enabled:
                 from dataset_rt.writer import write_parallel
 
-                return write_parallel(sources, path, config, self.num_workers, reuse_existing)
+                return write_parallel(
+                    sources, path, config, self.num_workers, reuse_existing, worker_init_fn
+                )
+        if worker_init_fn is not None:
+            raise ValueError(
+                "worker_init_fn requires writer_config.num_processes > 0 and profiling disabled"
+            )
         return [
             _cache_write_result(result)
             for result in _write_cache(self._inner, sources, str(path), config, reuse_existing)
@@ -178,6 +200,7 @@ class DatasetRuntime:
         *,
         reader_config: ReaderConfig,
         writer_config: WriterConfig = DEFAULT_WRITER_CONFIG,
+        worker_init_fn: Callable[[int], None] | None = None,
     ) -> CacheSourcesDatasetResult:
         """Create or reuse source caches, then load all successful cache paths.
 
@@ -191,10 +214,12 @@ class DatasetRuntime:
         callers can audit partial success.
 
         Parallel execution follows `write_cache`'s process, timeout, ownership,
-        and serialization contract. Successful paths preserve input source order,
+        initializer, and serialization contract. Successful paths preserve input source order,
         regardless of completion order; IDs come from v3 manifests or v2 positions.
         """
-        results = self._write_sources(sources, Path(path), writer_config, reuse_existing=True)
+        results = self._write_sources(
+            sources, Path(path), writer_config, reuse_existing=True, worker_init_fn=worker_init_fn
+        )
         cache_paths = _successful_cache_paths(results)
         if not cache_paths:
             return _cache_sources_dataset_error(results)
