@@ -1,10 +1,11 @@
-//! Versioned records retain legacy identities and distinguish whole-record compression.
+//! Versioned records preserve identity and distinguish metadata-envelope and payload layouts.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use super::record::RecordLayout;
 use super::ShardManifest;
 use crate::types::{CacheId, CacheResult, MetadataField};
 
@@ -29,7 +30,7 @@ pub struct ManifestV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-/// Persistent-identity wire shape shared by v3 and v4 record layouts.
+/// Persistent-identity wire shape shared by v3, v4 and v5 record layouts.
 pub struct ManifestV3 {
     pub cache_id: u64,
     #[serde(flatten)]
@@ -42,6 +43,7 @@ pub enum Manifest {
     V2(ManifestV2),
     V3(ManifestV3),
     V4(ManifestV3),
+    V5(ManifestV3),
 }
 
 impl Manifest {
@@ -49,20 +51,35 @@ impl Manifest {
     pub fn fields(&self) -> &ManifestFields {
         match self {
             Self::V2(manifest) => &manifest.fields,
-            Self::V3(manifest) | Self::V4(manifest) => &manifest.fields,
+            Self::V3(manifest) | Self::V4(manifest) | Self::V5(manifest) => &manifest.fields,
         }
     }
 
-    /// Only v4 encloses metadata and payload in the same compression block.
-    pub fn whole_record(&self) -> bool {
-        matches!(self, Self::V4(_))
+    /// Resolve wire versions once so runtime paths depend only on physical record layouts.
+    pub(super) fn record_layout(&self) -> RecordLayout {
+        match self {
+            Self::V2(_) | Self::V3(_) => RecordLayout::LegacyEnvelope,
+            Self::V4(_) => RecordLayout::RecordEnvelope,
+            Self::V5(_) => RecordLayout::PayloadOnly,
+        }
+    }
+
+    /// Keep the inverse layout-to-wire mapping beside manifest serialization.
+    pub(super) fn for_layout(layout: RecordLayout, manifest: ManifestV3) -> Self {
+        match layout {
+            RecordLayout::LegacyEnvelope => Self::V3(manifest),
+            RecordLayout::RecordEnvelope => Self::V4(manifest),
+            RecordLayout::PayloadOnly => Self::V5(manifest),
+        }
     }
 
     /// Resolve legacy positions only for v2; persisted identities are authoritative in v3.
     pub fn resolve_cache_id(&self, position: usize) -> CacheResult<CacheId> {
         match self {
             Self::V2(_) => CacheId::from_position(position),
-            Self::V3(manifest) | Self::V4(manifest) => Ok(CacheId::from_u64(manifest.cache_id)),
+            Self::V3(manifest) | Self::V4(manifest) | Self::V5(manifest) => {
+                Ok(CacheId::from_u64(manifest.cache_id))
+            }
         }
     }
 
@@ -79,6 +96,7 @@ impl Manifest {
             }
             Self::V3(manifest) => Self::V3(manifest),
             Self::V4(manifest) => Self::V4(manifest),
+            Self::V5(manifest) => Self::V5(manifest),
         }
     }
 }
@@ -100,6 +118,11 @@ impl Serialize for Manifest {
             }
             .serialize(serializer),
             Self::V4(manifest) => Versioned {
+                format_version: 4,
+                data: manifest,
+            }
+            .serialize(serializer),
+            Self::V5(manifest) => Versioned {
                 format_version: super::FORMAT_VERSION,
                 data: manifest,
             }
@@ -133,19 +156,18 @@ impl<'de> Deserialize<'de> for Manifest {
             4 => serde_json::from_value(body)
                 .map(Self::V4)
                 .map_err(D::Error::custom),
+            5 => serde_json::from_value(body)
+                .map(Self::V5)
+                .map_err(D::Error::custom),
             _ => Err(D::Error::custom(format!(
-                "unsupported format version {version}; supported versions: 2, 3, 4. Upgrade DatasetRT to read newer cache formats"
+                "unsupported format version {version}; supported versions: 2, 3, 4, 5. Upgrade DatasetRT to read newer cache formats"
             ))),
         }?;
-        if manifest
-            .fields()
-            .shards
-            .iter()
-            .any(|shard| shard.compression.whole_record() != manifest.whole_record())
-        {
-            return Err(D::Error::custom(
-                "compression scope disagrees with manifest format version",
-            ));
+        let layout = manifest.record_layout();
+        for shard in &manifest.fields().shards {
+            layout
+                .validate_compression(&shard.compression)
+                .map_err(D::Error::custom)?;
         }
         Ok(manifest)
     }

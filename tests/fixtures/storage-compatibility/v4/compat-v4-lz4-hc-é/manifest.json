@@ -1,0 +1,69 @@
+{
+  "format_version": 4,
+  "cache_id": 868956078211799452,
+  "source_name": "compat-v4-lz4-hc-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "df95fe819dda0e7903b5c7106be6c647494aead46355cd6e447f7a037039c59a",
+  "index_sha256": "5d9766b0a715c166282076220e8a0e04de7502840a0ccaa84521950443715ed5",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 475,
+      "byte_len": 480,
+      "compression": {
+        "algo": "lz4",
+        "mode": "hc",
+        "level": 9
+      },
+      "sha256": "7ffbaa9771c106c4a1b0fbe726aa6be3cd18ccb2864a7be62f78c5a8d86f9aa7"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 394,
+      "byte_len": 398,
+      "compression": {
+        "algo": "lz4",
+        "mode": "hc",
+        "level": 9
+      },
+      "sha256": "f8dc60228080f37d39a6395c5934e76c0fc1068b772be466066d830de10682d2"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 5758,
+      "byte_len": 339,
+      "compression": {
+        "algo": "lz4",
+        "mode": "hc",
+        "level": 9
+      },
+      "sha256": "2081aca57fee41fe6dab5d341bae9929b771d7d7566fa6d2fc66529113711647"
+    }
+  ]
+}

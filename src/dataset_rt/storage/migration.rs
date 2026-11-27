@@ -124,20 +124,22 @@ fn inspect_target(
     }
     let bytes = fs::read(&path)?;
     let current: Manifest = serde_json::from_slice(&bytes)?;
-    if matches!(&current, Manifest::V3(manifest) | Manifest::V4(manifest) if manifest.cache_id != cache_id)
+    if matches!(&current, Manifest::V3(manifest) | Manifest::V4(manifest) | Manifest::V5(manifest) if manifest.cache_id != cache_id)
     {
         return Err(CacheError::InvalidCache(
             "manifest cache_id changed since dataset construction".to_string(),
         ));
     }
-    if matches!(cache.manifest, Manifest::V3(_) | Manifest::V4(_))
-        && matches!(current, Manifest::V2(_))
+    if matches!(
+        cache.manifest,
+        Manifest::V3(_) | Manifest::V4(_) | Manifest::V5(_)
+    ) && matches!(current, Manifest::V2(_))
     {
         return Err(CacheError::InvalidCache(
             "manifest was downgraded since dataset construction".to_string(),
         ));
     }
-    let expected = if matches!(current, Manifest::V3(_) | Manifest::V4(_)) {
+    let expected = if matches!(current, Manifest::V3(_) | Manifest::V4(_) | Manifest::V5(_)) {
         cache.manifest.clone().into_v3(cache_id)
     } else {
         cache.manifest.clone()

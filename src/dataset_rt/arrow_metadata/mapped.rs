@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
@@ -19,6 +20,7 @@ pub struct MappedMetadataReader {
     schema: SchemaRef,
     decoder: FileDecoder,
     blocks: std::vec::IntoIter<Block>,
+    version: arrow_ipc::MetadataVersion,
 }
 
 impl MappedMetadataReader {
@@ -70,11 +72,13 @@ impl MappedMetadataReader {
         for block in &blocks {
             block_buffer(&buffer, block, footer_start)?;
         }
+        let version = footer.version();
         Ok(Self {
             buffer,
             schema,
             decoder,
             blocks: blocks.into_iter(),
+            version,
         })
     }
 }
@@ -129,5 +133,158 @@ impl RecordBatchReader for MappedMetadataReader {
     /// Return the validated schema without reading record batches.
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+/// A shared mapping indexes batch headers only; payload pages are faulted on demand.
+#[derive(Debug)]
+pub struct MappedMetadataIndex {
+    buffer: Buffer,
+    schema: SchemaRef,
+    blocks: Vec<Block>,
+    ends: Vec<usize>,
+    version: arrow_ipc::MetadataVersion,
+    validated: Vec<AtomicBool>,
+}
+
+impl MappedMetadataIndex {
+    /// Index physical row ranges without decoding columns or retaining row objects.
+    pub fn open(path: &Path, expected_rows: usize) -> CacheResult<Self> {
+        let reader = MappedMetadataReader::open(path)?;
+        let blocks = reader.blocks.collect::<Vec<_>>();
+        let mut ends = Vec::with_capacity(blocks.len());
+        let mut rows = 0_usize;
+        for block in &blocks {
+            let buffer = block_buffer(&reader.buffer, block, reader.buffer.len())?;
+            let message = batch_message(&buffer, block)?;
+            let batch = message
+                .header_as_record_batch()
+                .ok_or_else(invalid_footer)?;
+            let count = usize::try_from(batch.length()).map_err(|_| invalid_footer())?;
+            rows = rows.checked_add(count).ok_or_else(invalid_footer)?;
+            ends.push(rows);
+        }
+        if rows != expected_rows {
+            return Err(CacheError::InvalidCache(format!(
+                "metadata row count does not match manifest: expected {expected_rows}, actual {rows}"
+            )));
+        }
+        let validated = blocks.iter().map(|_| AtomicBool::new(false)).collect();
+        Ok(Self {
+            buffer: reader.buffer,
+            schema: reader.schema,
+            blocks,
+            ends,
+            version: reader.version,
+            validated,
+        })
+    }
+
+    /// Binary search handles byte-bounded, variable-sized and zero-row batches.
+    pub fn location(&self, row: usize) -> CacheResult<(usize, usize)> {
+        let index = self.ends.partition_point(|end| *end <= row);
+        if index >= self.ends.len() {
+            return Err(CacheError::InvalidCache(format!(
+                "metadata row {row} is out of range"
+            )));
+        }
+        let start = index
+            .checked_sub(1)
+            .and_then(|previous| self.ends.get(previous))
+            .copied()
+            .unwrap_or_default();
+        Ok((index, row - start))
+    }
+
+    /// Decode only the addressed batch; primitive cache schemas need no dictionaries.
+    pub fn batch(&self, index: usize) -> CacheResult<RecordBatch> {
+        let block = self.blocks.get(index).ok_or_else(invalid_footer)?;
+        let validated = self.validated.get(index).ok_or_else(invalid_footer)?;
+        let buffer = block_buffer(&self.buffer, block, self.buffer.len())?;
+        let batch = native_result("metadata Arrow random-access batch", || {
+            let mut decoder = FileDecoder::new(self.schema.clone(), self.version);
+            if validated.load(Ordering::Acquire) {
+                // This exact block/schema has already passed the full Arrow decoder's
+                // validation. Its mapping is immutable for every subsequent decode.
+                decoder = unsafe { decoder.with_skip_validation(true) };
+            }
+            decoder
+                .read_record_batch(block, &buffer)?
+                .ok_or_else(invalid_footer)
+        })?;
+        validated.store(true, Ordering::Release);
+        Ok(batch)
+    }
+}
+
+/// Restrict flatbuffer parsing to the declared IPC message, excluding column bodies.
+fn batch_message<'a>(buffer: &'a Buffer, block: &Block) -> CacheResult<arrow_ipc::Message<'a>> {
+    let metadata_len = usize::try_from(block.metaDataLength()).map_err(|_| invalid_footer())?;
+    let bytes = buffer
+        .as_slice()
+        .get(..metadata_len)
+        .ok_or_else(invalid_footer)?;
+    let prefix = if bytes.starts_with(&[255; 4]) { 8 } else { 4 };
+    let message = bytes.get(prefix..).ok_or_else(invalid_footer)?;
+    arrow_ipc::root_as_message(message).map_err(|error| {
+        CacheError::InvalidCache(format!("invalid metadata batch header: {error}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestDirectory;
+    use arrow_array::{ArrayRef, StringArray};
+    use arrow_ipc::writer::FileWriter;
+
+    /// Create a native uncompressed string batch with a uniquely addressable UTF-8 value.
+    fn write_metadata(path: &Path) -> CacheResult<()> {
+        let array: ArrayRef = Arc::new(StringArray::from(vec!["unique-metadata-value"]));
+        let batch = RecordBatch::try_from_iter([("text", array)])?;
+        let mut writer = FileWriter::try_new(File::create(path)?, &batch.schema())?;
+        writer.write(&batch)?;
+        writer.finish()?;
+        Ok(())
+    }
+
+    /// Successful validation belongs to the immutable mapping, not to any worker-local decoder.
+    #[test]
+    fn repeated_decoding_reuses_validated_buffers() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.path().join("metadata.arrow");
+        write_metadata(&path)?;
+        let index = MappedMetadataIndex::open(&path, 1)?;
+        let validated = index.validated.first().ok_or_else(invalid_footer)?;
+        assert!(!validated.load(Ordering::Acquire));
+        let first = index.batch(0)?;
+        assert!(validated.load(Ordering::Acquire));
+        assert_eq!(first, index.batch(0)?);
+        Ok(())
+    }
+
+    /// Invalid UTF-8 must fail every attempt, never enabling the unchecked reuse path.
+    #[test]
+    fn failed_validation_never_marks_buffers_trusted() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.path().join("metadata.arrow");
+        write_metadata(&path)?;
+        let mut bytes = std::fs::read(&path)?;
+        let offset = bytes
+            .windows(b"unique-metadata-value".len())
+            .position(|part| part == b"unique-metadata-value")
+            .ok_or_else(invalid_footer)?;
+        *bytes.get_mut(offset).ok_or_else(invalid_footer)? = 255;
+        std::fs::write(&path, bytes)?;
+        let index = MappedMetadataIndex::open(&path, 1)?;
+        for _ in 0..2 {
+            assert!(index.batch(0).is_err());
+            assert!(!index
+                .validated
+                .first()
+                .ok_or_else(invalid_footer)?
+                .load(Ordering::Acquire));
+        }
+        Ok(())
     }
 }

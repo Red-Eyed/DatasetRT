@@ -1,0 +1,47 @@
+{
+  "format_version": 5,
+  "cache_id": 7023799656566707342,
+  "source_name": "compat-v5-lz4-hc-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "345e331be67bdbde9340f08f39cd383f971f2176ff30f721a18a74aff2bbc014",
+  "index_sha256": "7e76db528885e7bebd3c7a165b4545db5b882eaaa45bb0b9600e120ff72127ad",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 5821,
+      "byte_len": 429,
+      "compression": {
+        "algo": "lz4",
+        "mode": "hc",
+        "level": 9
+      },
+      "sha256": "2e714d5581b4d857f89ba8749c060f56c4ffa7e51b0d911ec2474568104d15a5"
+    }
+  ]
+}

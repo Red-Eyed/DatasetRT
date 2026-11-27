@@ -64,6 +64,9 @@ smoke: develop
 bench-reader *args: develop
     {{py}} scripts/bench_reader.py {{args}}
 
+bench-storage *args:
+    {{py}} scripts/bench_storage.py {{args}}
+
 build-all:
     {{py}} scripts/build_local.py
 

@@ -1,0 +1,47 @@
+{
+  "format_version": 5,
+  "cache_id": 2271622197146566480,
+  "source_name": "compat-v5-zstd-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "08e8ce1dbcb2c46e7be7f2d391d7572bf66299cc4cadbe7ad479da22d39de904",
+  "index_sha256": "90955a3f1550edadc2d7f05ea829f8ea1eee9186dc537b2b43aa3fa6ddec523f",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 5821,
+      "byte_len": 455,
+      "compression": {
+        "algo": "zstd",
+        "mode": "zstd",
+        "level": 3
+      },
+      "sha256": "9b6722b79028ee6742a72cfedf80148e0dc85e5a20ccb7c1da6aecb2e519a7c3"
+    }
+  ]
+}

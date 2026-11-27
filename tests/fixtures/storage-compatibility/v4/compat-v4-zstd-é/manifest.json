@@ -1,0 +1,69 @@
+{
+  "format_version": 4,
+  "cache_id": 4694964671378240164,
+  "source_name": "compat-v4-zstd-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "01497556a91131d29586f136eef5577d1432ed59fb083db5684cb37f70d57a40",
+  "index_sha256": "1e95982c866d8d93efe7b7ccd8756fbcdda58f8954daf4a5171e846ec1a8d991",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 469,
+      "byte_len": 488,
+      "compression": {
+        "algo": "zstd",
+        "mode": "zstd",
+        "level": 3
+      },
+      "sha256": "2d4590fce0e8f46501ab80364120ed15b129c3e498abbda37cba1b4cc524aff7"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 392,
+      "byte_len": 406,
+      "compression": {
+        "algo": "zstd",
+        "mode": "zstd",
+        "level": 3
+      },
+      "sha256": "5e413e0e7899aa405b02da02dc5ffa80ba418a516de5b65fe6fc21af8aa24742"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 5754,
+      "byte_len": 317,
+      "compression": {
+        "algo": "zstd",
+        "mode": "zstd",
+        "level": 3
+      },
+      "sha256": "b34d1c4b11744cda056b064fc290f8e55a45b3534507e15cb5413abc28ea158d"
+    }
+  ]
+}

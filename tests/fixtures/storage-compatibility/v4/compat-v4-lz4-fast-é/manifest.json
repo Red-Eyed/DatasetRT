@@ -1,0 +1,69 @@
+{
+  "format_version": 4,
+  "cache_id": 5811959044142003255,
+  "source_name": "compat-v4-lz4-fast-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "d309934953df373a861d8fe79bb5cb5bfa4a12ca7630d63f6242fa929c54a993",
+  "index_sha256": "07a8a98593e129ac66b75c6c15d7827feeea269486cbc4195282429073a02372",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 481,
+      "byte_len": 487,
+      "compression": {
+        "algo": "lz4",
+        "mode": "fast",
+        "acceleration": 1
+      },
+      "sha256": "fe9b194a90754b189dc67090bb2c787e0b4b6e91a0ba05dd6e0e7d104a183621"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 396,
+      "byte_len": 400,
+      "compression": {
+        "algo": "lz4",
+        "mode": "fast",
+        "acceleration": 1
+      },
+      "sha256": "51ba328937b1f7bd8afbfcd2ae9605679e9037a483615ae70b1c936175f28411"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 5762,
+      "byte_len": 345,
+      "compression": {
+        "algo": "lz4",
+        "mode": "fast",
+        "acceleration": 1
+      },
+      "sha256": "c93e938504d3d5cf4b2412d8a40acbddea9f3d04adce65b07fb91c9f368a9e7b"
+    }
+  ]
+}

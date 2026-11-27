@@ -1,0 +1,76 @@
+{
+  "format_version": 3,
+  "cache_id": 1751651634428298085,
+  "source_name": "compat-v3-none-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "626c34af8df0f6b88a3cd501bd43f00b44403f3629593b2a58f207e4796415b3",
+  "index_sha256": "44a8a28ee61156887e299ad5dad460321e57cb7718cf4645c0dd771880f62eb5",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 82,
+      "byte_len": 469,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "f6d2b355e4fe5c54ff5ad2341f4812b51ad4fe63151a3bc33ed6f7e064a9aa98"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 256,
+      "byte_len": 392,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "4a9d2e1a6c63122f1bc8bd0688396a1c6f8016e70679373d1bd9fb08736bfb54"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 4096,
+      "byte_len": 4231,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "e5901c7c9f770622c2d823453d5010aace03eb3937efa99902b4f7e4a0da5236"
+    },
+    {
+      "name": "000003.bin",
+      "uncompressed_byte_len": 1387,
+      "byte_len": 1523,
+      "compression": {
+        "algo": "none",
+        "ratio": 1.0
+      },
+      "sha256": "d6ccd981bce5288434a9f16c8d9a81a95c50c99446f790d911697f89933ce601"
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "format_version": 2,
+  "source_name": "compat-v2-lz4-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "fd85895bf761ec484b6e50126dedf8d293b0522657c2d48c31a3ca99940d2b0c",
+  "index_sha256": "f66002e7ed2600af4693b42c59895ad2966d91e3dba302106b81abf76c266d4d",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 82,
+      "byte_len": 482,
+      "compression": {
+        "algo": "lz4",
+        "ratio": 1.0
+      },
+      "sha256": "650a43c6909b1f93436f75e9acc365eac700021aa7c1c021557a62f8d75db69c"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 256,
+      "byte_len": 397,
+      "compression": {
+        "algo": "lz4",
+        "ratio": 1.0
+      },
+      "sha256": "205ae26a5f26e6921b30772a0bcef52ca183053f7a5357498d0b0054b8c2151c"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 5483,
+      "byte_len": 340,
+      "compression": {
+        "algo": "lz4",
+        "ratio": 1.0
+      },
+      "sha256": "0509b675d5eac97d46daf49739c653c2016086d092337a9a2e8f3b9382c5a554"
+    }
+  ]
+}

@@ -13,7 +13,7 @@ Core vocabulary:
 - **Cache source**: A Python object with `name` and `__iter__` that yields `CacheInput` values. Python owns source discovery and domain serialization into bytes.
 - **Cache directory**: One immutable DatasetRT cache containing `manifest.json`, `metadata.arrow`, `index.bin`, and `shards/`.
 - **Manifest**: The publication marker for a complete cache. Readers reject caches without a valid manifest.
-- **Metadata**: Primitive sample-level values stored columnarly in `metadata.arrow` and redundantly embedded in each shard record.
+- **Metadata**: Primitive sample-level values stored columnarly only in `metadata.arrow` for v5; legacy v2–v4 records also embed a redundant copy.
 - **Physical sample**: A concrete `(cache_id, sample_id)` pair. V3 manifests persist `cache_id`; legacy v2 caches retain their supplied path positions until explicit migration. `sample_id` is the row within that cache. Rust maps cache IDs to internal array positions; never index a cache array directly by public ID.
 - **Samples metadata table**: A Polars table with `cache_id`, `sample_id`, metadata columns, and `weight`. Rust owns the authoritative weight vector and validates all updates.
 - **Epoch plan**: The ordered list of physical samples emitted by an iterator. With `shuffle=True`, it is deterministic weighted multinomial sampling with replacement for the dataset seed, epoch, and weight vector; it is not a permutation.
@@ -37,7 +37,7 @@ Central formats:
 - `manifest.json`: JSON cache manifest with format version, schema, counts, shard metadata, and checksums.
 - `metadata.arrow`: Arrow IPC file with one metadata row per sample.
 - `index.bin`: Fixed-width little-endian binary table. Each row is `(shard_id: u64, offset: u64, byte_len: u64)`.
-- `shards/*.bin`: Concatenated records. Each record is metadata JSON length, metadata JSON, then stored payload bytes.
+- `shards/*.bin`: Concatenated records. V5 records contain only stored payload bytes; v2–v4 retain metadata envelopes.
 
 ## Non-Negotiable Design Rules
 
@@ -121,6 +121,9 @@ Rust modules:
 
 - `types.rs`: validated IDs, config newtypes, metadata enums, samples, and `CacheError`.
 - `storage.rs`: cache format, metadata Arrow files, indexes, shards, compression envelopes, checksums, and cache loading. `storage/manifest.rs` contains separate v2/v3 records; `storage/migration.rs` upgrades manifests while preserving resolved IDs.
+  `storage/record.rs` owns exhaustive layout codecs; `storage/metadata.rs` resolves
+  typed embedded-versus-Arrow metadata. Manifest versions resolve to a layout once
+  when loading a cache; keep version checks out of per-sample orchestration.
 - `writer.rs` and `writer/pipeline.rs`: source ingestion, bounded queues, serialization workers, ordered commit, progress, profiling, and publication.
 - `dataset.rs`: Python-facing `CachedDataset`, schema checks, weight state, weight validation, and iterator construction.
 - `runtime.rs`: Rust-owned synchronous reader pipeline with scheduler, workers, bounded result queue, and reorder buffer.
@@ -158,6 +161,12 @@ Before editing code, answer these questions in the plan:
 When changing storage format:
 
 - Preserve backward compatibility or bump `FORMAT_VERSION`.
+- Keep immutable producer-generated caches and ground truth for every format
+  from v2 onward under `tests/fixtures/storage-compatibility/`. Capture a new
+  format with `scripts/generate_storage_fixtures.py` using that format's own
+  writer and reader, preferably from a committed revision. Never regenerate old
+  oracles with the current implementation. The compatibility coverage guard
+  must fail when the latest writer format has no oracle.
 - Update `docs/storage-format.md`.
 - Add corruption/shape tests in `tests/test_integrity.py`.
 - Verify missing files, bad lengths, bad checksums, bad schema, and row-count mismatches fail clearly.
@@ -176,7 +185,7 @@ When changing reader runtime:
 - Keep queues bounded by `PrefetchSize`.
 - Preserve cancellation on iterator drop.
 - Preserve planned output order even when workers finish out of order.
-- Account for memory as `prefetch_size * max_loaded_sample_size` plus bounded reorder state.
+- Account for memory as `prefetch_size * max_loaded_sample_size` plus bounded reorder state, one decoded v5 metadata batch per reader worker, and shared mapped batch descriptors.
 
 When changing writer runtime:
 

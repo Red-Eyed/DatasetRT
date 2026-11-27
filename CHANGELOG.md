@@ -2,6 +2,26 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.10
+
+### Improvements
+
+- Write format v5 with typed compression policies, storing metadata exclusively
+  in `metadata.arrow` and only payload bytes in shards. New caches require
+  DatasetRT 0.5.10 or newer; older readers cannot read v5. The new reader remains
+  backward compatible with v2–v4 caches, which remain unchanged;
+  rewrite into a new destination to remove their metadata duplication. Deprecated
+  `ShardCompression` policies retain their historical v3 output.
+
+### Developers
+
+- Freeze v2–v5 caches and ground truth from isolated producer builds. Verify
+  payloads, metadata, identities and historical weighted epochs in the current
+  reader; require a new producer oracle whenever the writer format advances.
+- Add paired storage benchmarks for small text and large PNG payloads, with
+  correctness smoke tests, isolated release interpreters, JSON reports, and
+  optional repeated read-throughput regression gates.
+
 ## 0.5.9
 
 ### Features

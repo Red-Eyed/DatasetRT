@@ -1,0 +1,69 @@
+{
+  "format_version": 4,
+  "cache_id": 7588637569888640994,
+  "source_name": "compat-v4-brotli-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "4eaf17dee2be4648406f95322b392a08bcd3dfd58285917060590df8468c2c3e",
+  "index_sha256": "15d00775417e53a6de3e46c07a918ba6d669e8bd820135ab01b7a7ded144c357",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 475,
+      "byte_len": 404,
+      "compression": {
+        "algo": "brotli",
+        "mode": "brotli",
+        "level": 5
+      },
+      "sha256": "79de17b922faf4678c83fc1d20b42271555c079de044cfdc8a4739f718d1e9d9"
+    },
+    {
+      "name": "000001.bin",
+      "uncompressed_byte_len": 4627,
+      "byte_len": 508,
+      "compression": {
+        "algo": "brotli",
+        "mode": "brotli",
+        "level": 5
+      },
+      "sha256": "b4c647c7ce3afdb05bdbf18fc44782b5a72ff68f40d8e1b48bbdb906105512a3"
+    },
+    {
+      "name": "000002.bin",
+      "uncompressed_byte_len": 1525,
+      "byte_len": 143,
+      "compression": {
+        "algo": "brotli",
+        "mode": "brotli",
+        "level": 5
+      },
+      "sha256": "b21e004881e8a7f053ce7b660e4ddc152cee83218b7e749b294cc687f78663e1"
+    }
+  ]
+}

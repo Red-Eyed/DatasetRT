@@ -158,24 +158,23 @@ frame with its decoded size and a content checksum. Rust checks that size agains
 the shard's declared uncompressed length before allocating an exact output buffer,
 then rejects truncated frames, trailing data, and checksum or length mismatches.
 The native library is statically bundled in wheels; no system Zstd installation
-is needed, and the codec adds no worker threads. New Zstd caches require
-DatasetRT 0.5.3 or newer. Use `Lz4Fast()` explicitly when sharing new caches with
-0.5.0–0.5.2 readers.
+is needed, and the codec adds no worker threads. New typed-policy caches require DatasetRT 0.5.10 or newer because they use
+format v5, independently of codec choice.
 
-Default writes and these typed policies use format v4. Existing
+Default writes and these typed policies use format v5. Existing
 `ShardCompression` calls
-keep their payload-only v3 layout and warn when explicitly constructed; `ratio`
+keep their historical v3 metadata-envelope layout and warn when explicitly constructed; `ratio`
 is retained for compatibility and never controlled compression. Existing caches
 remain reusable. With `reuse_existing=True`, the writer keeps the existing cache
 and its recorded settings; use a new destination to build a differently
-compressed copy. New v4 caches require an updated reader.
+compressed copy. New v5 caches require an updated reader.
 
 ### Optional Brotli for text
 
 `Brotli(level=5)` uses a pure-Rust encoder and decoder. Levels 0–11 are validated
 in Python and Rust; higher levels spend more write effort on compression. Each
-sample remains independently readable, with the metadata JSON and serialized
-payload compressed together. The separate Arrow metadata table remains unchanged.
+sample remains independently readable, with only serialized payload bytes compressed. Metadata is stored exclusively
+in the separate Arrow metadata table.
 A four-byte decoded-size prefix bounds record output before decoding; malformed
 streams and inconsistent lengths return errors.
 

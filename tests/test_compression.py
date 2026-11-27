@@ -96,7 +96,7 @@ def runtime() -> DatasetRuntime:
     ],
 )
 @pytest.mark.parametrize("processes", [0, 2])
-def test_whole_record_round_trip(
+def test_payload_record_round_trip(
     tmp_path: Path, runtime: DatasetRuntime, policy: RecordCompression, processes: int
 ) -> None:
     """New variants persist their settings and preserve ordered records across source processes."""
@@ -109,7 +109,7 @@ def test_whole_record_round_trip(
     result = runtime.write_cache(source, tmp_path, writer_config=config)[0]
     assert isinstance(result, CacheWriteSuccess)
     manifest = Manifest.model_validate_json((result.path / "manifest.json").read_text())
-    assert manifest.format_version == 4
+    assert manifest.format_version == 5
     assert manifest.sample_count == source.count
     assert all(shard.compression == policy for shard in manifest.shards)
     dataset = runtime.cached_dataset(
@@ -175,7 +175,7 @@ def test_legacy_warning_and_mixed_caches(tmp_path: Path, runtime: DatasetRuntime
             raise AssertionError(error)
     assert (
         Manifest.model_validate_json((modern.path / "manifest.json").read_text()).format_version
-        == 4
+        == 5
     )
 
 
@@ -254,7 +254,7 @@ def test_invalid_manifest_settings_are_native_errors(
 
 
 def test_record_scope_cannot_be_relabelled_as_v3(tmp_path: Path, runtime: DatasetRuntime) -> None:
-    """A manifest-only edit cannot convert whole-record caches into payload-only caches."""
+    """A manifest-only edit cannot convert modern records into legacy v3 envelopes."""
     result = runtime.write_cache(
         CompressionSource(),
         tmp_path,
@@ -263,8 +263,8 @@ def test_record_scope_cannot_be_relabelled_as_v3(tmp_path: Path, runtime: Datase
     assert isinstance(result, CacheWriteSuccess)
     path = result.path / "manifest.json"
     original = path.read_text()
-    assert '"format_version": 4' in original
-    path.write_text(original.replace('"format_version": 4', '"format_version": 3'))
+    assert '"format_version": 5' in original
+    path.write_text(original.replace('"format_version": 5', '"format_version": 3'))
     with pytest.raises(RuntimeError, match="compression scope disagrees"):
         runtime.cached_dataset([result.path], reader_config=ReaderConfig(seed=7))
 
@@ -304,7 +304,7 @@ def test_default_compression_shrinks_zeroes(tmp_path: Path, runtime: DatasetRunt
     )[0]
     assert isinstance(result, CacheWriteSuccess)
     manifest = Manifest.model_validate_json((result.path / "manifest.json").read_text())
-    assert manifest.format_version == 4
+    assert manifest.format_version == 5
     assert manifest.shards[0].compression == Zstd(level=3)
     assert manifest.shards[0].byte_len < 8192 // 10
     dataset = runtime.cached_dataset(

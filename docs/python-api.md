@@ -248,7 +248,7 @@ _Generated from public docstrings behind the `dataset_rt.api` facade._
 
 ### `Brotli`
 
-Compress independent complete records with the pure-Rust Brotli codec.
+Compress independent payloads with the pure-Rust Brotli codec.
 
 Fields:
 - `algo: Literal['brotli']`: Persist the Brotli stream codec discriminator.
@@ -817,7 +817,7 @@ Fields:
 
 ### `Lz4Fast`
 
-Compress complete records with LZ4; higher acceleration favors write speed.
+Compress payloads with LZ4; higher acceleration favors write speed.
 
 Fields:
 - `algo: Literal['lz4']`: Persist the standard LZ4 block codec discriminator.
@@ -826,7 +826,7 @@ Fields:
 
 ### `Lz4HC`
 
-Compress complete records with LZ4 HC; higher levels increase compression effort.
+Compress payloads with LZ4 HC; higher levels increase compression effort.
 
 Fields:
 - `algo: Literal['lz4']`: Persist the standard LZ4 block codec discriminator.
@@ -835,11 +835,11 @@ Fields:
 
 ### `NoCompression`
 
-Write independent uncompressed records using the v4 record layout.
+Write independent uncompressed records using the v5 payload-only layout.
 
 Fields:
 - `algo: Literal['none']`: Persist an explicit uncompressed codec discriminator.
-- `mode: Literal['none']`: Select the uncompressed whole-record variant.
+- `mode: Literal['none']`: Select the uncompressed payload variant.
 
 ### `RecordCompression`
 
@@ -849,11 +849,11 @@ RecordCompression = Annotated[
 ]
 ```
 
-Closed whole-record policies with codec-specific settings.
+Closed per-payload policies with codec-specific settings.
 
 ### `ShardCompression`
 
-Deprecated payload-only policy retained for existing writers and saved configs.
+Deprecated v3 compression policy retained for existing writers and saved configs.
 
 Fields:
 - `algo: CompressionAlgo`: Compression algorithm to apply independently to each payload record.
@@ -880,7 +880,7 @@ Fields:
 - `process_timeout_seconds: float`: Deadline in seconds for child startup or a dispatched source, including deserialization. Timeout stops the pool without retries; ignored in serial mode.
 - `prefetch_size: int`: Maximum number of writer tasks/results buffered by Rust.
 - `max_shard_bytes: int`: Target shard byte size before Rust rotates to a new shard.
-- `shard_compression: RecordCompression | ShardCompression`: Whole-record compression variants, or the deprecated payload-only policy.
+- `shard_compression: RecordCompression | ShardCompression`: Per-payload compression variants, or the deprecated v3 policy.
 - `show_progress: bool`: Whether Rust renders cache write progress with samples/s and MB/s.
 - `validate_cache: bool`: Whether reused existing caches are checksum-validated before loading.
 - `profiler: WriterProfilerConfig`: Optional JSON writer-stage profiler configuration.
@@ -899,7 +899,7 @@ Fields:
 
 ### `Zstd`
 
-Compress independent complete records with statically bundled Zstandard.
+Compress independent payloads with statically bundled Zstandard.
 
 Levels 1–22 select increasing compression effort; level 3 is the writer
 default. Each record is one standard frame with a declared decoded size.
@@ -907,7 +907,7 @@ Rust validates settings and bounds decoded output before allocation.
 
 Fields:
 - `algo: Literal['zstd']`: Persist the Zstandard frame codec discriminator.
-- `mode: Literal['zstd']`: Select whole-record Zstandard independently of other codec settings.
+- `mode: Literal['zstd']`: Select per-payload Zstandard independently of other codec settings.
 - `level: int`: Accept positive standard levels 1–22; higher levels require more write effort.
 
 ### `AbsentManifestTarget`

@@ -97,3 +97,95 @@ fn streamed_cache_is_deterministic_and_valid() -> CacheResult<()> {
     }
     Ok(())
 }
+
+/// Random reads cross batch/cache boundaries without initializing a cache-wide row vector.
+#[test]
+fn payload_only_metadata_is_lazy_and_worker_bounded() -> CacheResult<()> {
+    let directory = TestDirectory::new()?;
+    let mut caches = Vec::new();
+    for name in ["first", "second"] {
+        let path = directory.path().join(name);
+        let mut builder =
+            CacheBuilder::create(path.clone(), name.to_string(), 1024, ShardCompression::None)?;
+        for row in 0..65_537 {
+            builder.push_sample(
+                Vec::new(),
+                BTreeMap::from([("index".to_string(), MetadataValue::Int(row))]),
+            )?;
+        }
+        builder.finish()?;
+        let cache = load_cache(path, false, 0)?;
+        assert!(cache.metadata_index.get().is_none());
+        caches.push(cache);
+    }
+    let mut readers = ShardReaderCache::new();
+    for row in [65_536, 0, 65_535, 12, 65_536] {
+        for cache in &caches {
+            let sample = cache.read_sample_with_cache(row, &mut readers)?;
+            assert!(sample.data.is_empty());
+            assert_eq!(sample.metadata, vec![MetadataValue::Int(row as i64)]);
+            assert!(cache
+                .metadata_rows
+                .lock()
+                .map_err(|_| CacheError::WorkerFailed)?
+                .is_none());
+            let batch = readers
+                .metadata_batch
+                .as_ref()
+                .ok_or(CacheError::WorkerFailed)?;
+            assert!(Arc::ptr_eq(
+                &batch.source,
+                cache.metadata_index.get().ok_or(CacheError::WorkerFailed)?
+            ));
+        }
+    }
+    let first = caches.first().ok_or(CacheError::WorkerFailed)?;
+    first.read_sample_with_cache(0, &mut readers)?;
+    let reopened = load_cache(first.path.clone(), false, 0)?;
+    reopened.read_sample_with_cache(0, &mut readers)?;
+    assert!(Arc::ptr_eq(
+        &readers
+            .metadata_batch
+            .as_ref()
+            .ok_or(CacheError::WorkerFailed)?
+            .source,
+        reopened
+            .metadata_index
+            .get()
+            .ok_or(CacheError::WorkerFailed)?
+    ));
+    let validated = load_cache(directory.path().join("first"), true, 0)?;
+    assert!(validated
+        .metadata_rows
+        .lock()
+        .map_err(|_| CacheError::WorkerFailed)?
+        .is_none());
+    Ok(())
+}
+
+/// V4 fixtures were produced by the unmodified 0.5.9 writer, not by the v5 implementation.
+#[test]
+fn existing_v4_codecs_remain_readable() -> CacheResult<()> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-v4");
+    for name in ["plain", "lz4", "zstd"] {
+        let cache = load_cache(directory.join(name), true, 0)?;
+        assert!(matches!(cache.manifest, Manifest::V4(_)));
+        for (row, expected) in [b"alpha".as_slice(), b"beta".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let sample = cache.read_sample_with_cache(row, &mut ShardReaderCache::new())?;
+            assert_eq!(sample.data, expected);
+            assert_eq!(
+                sample.metadata,
+                vec![
+                    MetadataValue::Int(row as i64),
+                    MetadataValue::String("train".to_string())
+                ]
+            );
+        }
+        let wire = serde_json::to_value(cache.manifest)?;
+        assert_eq!(wire.get("format_version"), Some(&serde_json::json!(4)));
+    }
+    Ok(())
+}

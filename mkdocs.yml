@@ -62,5 +62,6 @@ nav:
       - Cache storage format: storage-format.md
   - Benchmarks:
       - Reader measurements: benchmarks.md
+      - Storage layout benchmarks: storage-benchmarks.md
       - Run your own benchmarks: remote-validation.md
       - Compare dataset tools: comparisons.md

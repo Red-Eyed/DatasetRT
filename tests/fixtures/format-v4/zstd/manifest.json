@@ -1,0 +1,31 @@
+{
+  "format_version": 4,
+  "cache_id": 2606930916749579904,
+  "source_name": "zstd",
+  "sample_count": 2,
+  "metadata_schema": [
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "split",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "d0d06fc3ea41ed22e8fe1757edd9196510b15d7f56edff416956c2a815f68751",
+  "index_sha256": "3db7182718677a76aa467925236c3481149fdc17744c47b591620509580b357f",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 79,
+      "byte_len": 105,
+      "compression": {
+        "algo": "zstd",
+        "mode": "zstd",
+        "level": 3
+      },
+      "sha256": "c6af70e072d51f632fd67f7754af3dc7cbd39560a30df6f0a0d7838f8d5d62fe"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "format_version": 5,
+  "cache_id": 3169544276809658240,
+  "source_name": "compat-v5-brotli-é",
+  "sample_count": 6,
+  "metadata_schema": [
+    {
+      "name": "flag",
+      "kind": "bool"
+    },
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "label",
+      "kind": "string"
+    },
+    {
+      "name": "negative",
+      "kind": "int"
+    },
+    {
+      "name": "score",
+      "kind": "float"
+    },
+    {
+      "name": "source",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "a00c7b80f1f1cc01e2e9f5edad439684974313870afca7cda4890c3decbde51a",
+  "index_sha256": "a9332027658b0d2a37e9cc04d8733b54e9ca12a6c28a09bb42ebc6923d36eb20",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 5821,
+      "byte_len": 397,
+      "compression": {
+        "algo": "brotli",
+        "mode": "brotli",
+        "level": 5
+      },
+      "sha256": "51bea617a0b9878ced99c01c29ca60a1095d23f5e63d49a29d91fa8b62c61e99"
+    }
+  ]
+}

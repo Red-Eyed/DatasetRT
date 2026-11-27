@@ -1,0 +1,30 @@
+{
+  "format_version": 4,
+  "cache_id": 2384315073672126583,
+  "source_name": "plain",
+  "sample_count": 2,
+  "metadata_schema": [
+    {
+      "name": "index",
+      "kind": "int"
+    },
+    {
+      "name": "split",
+      "kind": "string"
+    }
+  ],
+  "metadata_sha256": "d0d06fc3ea41ed22e8fe1757edd9196510b15d7f56edff416956c2a815f68751",
+  "index_sha256": "31095b5ab411f85868ebe167e3f1e2d7939c3e574c5ba84119ec762b707dfc6d",
+  "shards": [
+    {
+      "name": "000000.bin",
+      "uncompressed_byte_len": 79,
+      "byte_len": 79,
+      "compression": {
+        "algo": "none",
+        "mode": "none"
+      },
+      "sha256": "00feeeffe27297a9c5ac4ea587e422a4844738f2c57767827afae0b89c921442"
+    }
+  ]
+}

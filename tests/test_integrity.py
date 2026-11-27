@@ -3,26 +3,30 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
 from dataset_rt import (
+    Brotli,
     CachedDataset,
     CacheInput,
     CacheWriteError,
     CacheWriteSuccess,
     DatasetRuntime,
+    Lz4Fast,
+    Lz4HC,
     NoCompression,
     ReaderConfig,
+    RecordCompression,
     WriterConfig,
     Zstd,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from dataset_rt.records import CacheSource, Metadata
 
@@ -304,7 +308,10 @@ def test_manifest_sample_count_mismatch_is_rejected(tmp_path: Path) -> None:
 
 
 def test_embedded_metadata_mismatch_is_rejected_during_iteration(tmp_path: Path) -> None:
-    cache_path = write_integrity_cache(tmp_path)
+    import shutil
+
+    cache_path = tmp_path / "legacy"
+    shutil.copytree(Path(__file__).parent / "fixtures" / "format-v4" / "plain", cache_path)
     replace_first_embedded_metadata(cache_path, {"index": 9, "split": "train"})
 
     with pytest.raises(ValueError, match="embedded metadata does not match"):
@@ -315,7 +322,7 @@ def test_embedded_metadata_mismatch_is_rejected_during_iteration(tmp_path: Path)
 def test_metadata_byte_batched_cache_round_trips(
     tmp_path: Path, sample_count: int, string_bytes: int
 ) -> None:
-    """Multiple Arrow batches preserve metadata order and redundant-record validation."""
+    """Multiple Arrow batches preserve metadata order across payload-only records."""
     import polars as pl
     import pyarrow.ipc as ipc
 
@@ -353,8 +360,11 @@ def test_invalid_record_length_returns_value_error(tmp_path: Path, invalid_lengt
         next(iter(dataset))
 
 
+@pytest.mark.parametrize("validate", [False, True])
 @pytest.mark.parametrize("invalid_schema", ["missing", "type", "null", "name"])
-def test_invalid_metadata_schema_returns_error(tmp_path: Path, invalid_schema: str) -> None:
+def test_invalid_metadata_schema_returns_error(
+    tmp_path: Path, invalid_schema: str, validate: bool
+) -> None:
     """Malformed Arrow shape produces an actionable error without worker panic."""
     import polars as pl
 
@@ -376,7 +386,67 @@ def test_invalid_metadata_schema_returns_error(tmp_path: Path, invalid_schema: s
     manifest.metadata_sha256 = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
     write_manifest(path, manifest)
     with pytest.raises(ValueError, match="metadata"):
-        load_cache(path)
+        dataset = RUNTIME.cached_dataset(
+            [path], reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=validate)
+        )
+        list(dataset)
+
+
+@dataclass
+class EmptySource:
+    """Exercise zero-byte shard ranges with and without primitive metadata columns."""
+
+    name: str = "empty-payload"
+    with_metadata: bool = True
+
+    def __iter__(self) -> Iterator[CacheInput]:
+        """Zero-byte payloads still have distinct physical identities and Arrow rows."""
+        for index in range(3):
+            yield CacheInput(b"", {"index": index} if self.with_metadata else {})
+
+
+@pytest.fixture(params=[False, True])
+def empty_source(request: pytest.FixtureRequest) -> EmptySource:
+    """Keep each schema scenario independent of other test-owned caches."""
+    return EmptySource(with_metadata=bool(request.param))
+
+
+@pytest.mark.parametrize("policy", [NoCompression(), Lz4Fast(), Lz4HC(), Brotli(), Zstd()])
+def test_empty_payloads_and_metadata_round_trip(
+    tmp_path: Path, empty_source: EmptySource, policy: RecordCompression
+) -> None:
+    """Every modern codec supports empty data; plain zero-length records may share offsets."""
+    result = RUNTIME.write_cache(
+        empty_source,
+        tmp_path,
+        writer_config=WriterConfig(shard_compression=policy, show_progress=False),
+    )[0]
+    assert isinstance(result, CacheWriteSuccess)
+    for expected, sample in zip(empty_source, load_cache(result.path), strict=True):
+        assert sample.data == expected.data
+        assert sample.metadata == expected.metadata
+    if isinstance(policy, NoCompression):
+        assert (result.path / "shards" / "000000.bin").stat().st_size == 0
+        assert (result.path / "index.bin").read_bytes() == bytes(3 * 24)
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("validate", [False, True])
+def test_mixed_v4_v5_preserves_records_and_determinism(
+    tmp_path: Path, shuffle: bool, validate: bool
+) -> None:
+    """Genuine legacy envelopes and Arrow-only metadata coexist in one epoch plan."""
+    modern = write_integrity_cache(tmp_path)
+    fixtures = Path(__file__).parent / "fixtures" / "format-v4"
+    paths = [modern, *(fixtures / name for name in ("plain", "lz4", "zstd"))]
+    config = ReaderConfig(seed=42, shuffle=shuffle, validate_cache=validate)
+    first = list(RUNTIME.cached_dataset(paths, reader_config=config))
+    second = list(RUNTIME.cached_dataset(paths, reader_config=config))
+    assert first == second
+    assert len(first) == 8
+    for sample in first:
+        assert sample.data == (b"alpha" if sample.sample_id == 0 else b"beta")
+        assert sample.metadata == {"index": sample.sample_id, "split": "train"}
 
 
 @pytest.fixture
@@ -433,13 +503,13 @@ def test_future_format_error_explains_supported_versions(diagnostic_cache: Path)
     """Unsupported formats explain which reader versions are understood and the next step."""
     manifest_path = diagnostic_cache / "manifest.json"
     original = manifest_path.read_text()
-    manifest_path.write_text(original.replace('"format_version": 4', '"format_version": 99'))
+    manifest_path.write_text(original.replace('"format_version": 5', '"format_version": 99'))
     with pytest.raises(RuntimeError) as caught:
         load_cache(diagnostic_cache)
     message = str(caught.value)
     assert str(manifest_path) in message
     assert "unsupported format version 99" in message
-    assert "supported versions: 2, 3, 4" in message
+    assert "supported versions: 2, 3, 4, 5" in message
     assert "Upgrade DatasetRT" in message
 
 

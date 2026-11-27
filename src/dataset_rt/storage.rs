@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
@@ -11,15 +11,17 @@ use arrow_schema::DataType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::compression::{compress_payload, decompress_payload};
 use crate::types::{
     native_result, CacheError, CacheId, CacheResult, CacheSample, MetadataField, MetadataKind,
     MetadataValue, ShardCompression,
 };
 
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 mod index;
 mod manifest;
+mod metadata;
+mod record;
+use record::{EncodedRecord, RecordLayout};
 mod write_tables;
 use write_tables::CacheTablesWriter;
 
@@ -29,7 +31,6 @@ mod tests;
 use index::MappedIndex;
 pub use manifest::{Manifest, ManifestFields, ManifestV3};
 const INDEX_ROW_BYTES: usize = 24;
-const RECORD_METADATA_LEN_BYTES: usize = 8;
 const MAX_CACHED_SHARD_READERS: usize = 64;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -56,12 +57,15 @@ pub struct LoadedCache {
     pub index: MappedIndex,
     pub path: PathBuf,
     validate_embedded_metadata: bool,
+    record_layout: RecordLayout,
+    metadata_index: OnceLock<Arc<crate::arrow_metadata::mapped::MappedMetadataIndex>>,
 }
 
 pub struct ShardReaderCache {
     readers: BTreeMap<PathBuf, BufReader<File>>,
     recent_paths: VecDeque<PathBuf>,
     max_readers: usize,
+    metadata_batch: Option<metadata::CachedMetadataBatch>,
 }
 
 impl LoadedCache {
@@ -149,38 +153,11 @@ impl LoadedCache {
         reader
             .read_exact(&mut record)
             .map_err(|error| CacheError::from(error).context(address()))?;
-        let sample = decode_stored_record(record, &self.manifest, shard)
+        let decoded = self
+            .record_layout
+            .decode(record, &self.manifest.fields().metadata_schema, shard)
             .map_err(|error| error.context(address()))?;
-        if self.validate_embedded_metadata {
-            self.with_metadata_rows(|metadata_rows| {
-                let metadata = metadata_rows.get(sample_index).ok_or_else(|| {
-                    CacheError::InvalidCache(format!("metadata row {sample_index} is out of range"))
-                })?;
-                validate_redundant_metadata(metadata, &sample.metadata, sample_index)
-            })?;
-        }
-        Ok(sample)
-    }
-
-    /// Lazily load `metadata.arrow` for validation or compatibility paths that need full rows.
-    pub fn with_metadata_rows<T>(
-        &self,
-        read_rows: impl FnOnce(&[Vec<MetadataValue>]) -> CacheResult<T>,
-    ) -> CacheResult<T> {
-        let mut guard = self
-            .metadata_rows
-            .lock()
-            .map_err(|_| CacheError::WorkerFailed)?;
-        if guard.is_none() {
-            *guard = Some(read_metadata_file(
-                &self.path.join("metadata.arrow"),
-                &self.manifest.fields().metadata_schema,
-            )?);
-        }
-        let rows = guard
-            .as_deref()
-            .ok_or_else(|| CacheError::InvalidCache("metadata rows are unavailable".to_string()))?;
-        read_rows(rows)
+        metadata::materialize(decoded, self, sample_index, &mut readers.metadata_batch)
     }
 }
 
@@ -191,6 +168,7 @@ impl ShardReaderCache {
             readers: BTreeMap::new(),
             recent_paths: VecDeque::new(),
             max_readers: MAX_CACHED_SHARD_READERS,
+            metadata_batch: None,
         }
     }
 
@@ -254,6 +232,7 @@ pub struct CacheBuilder {
     shards: Vec<ShardManifest>,
     shard_compression: ShardCompression,
     current_shard: OpenShard,
+    record_layout: RecordLayout,
 }
 
 /// Timing data returned by one sample write.
@@ -316,6 +295,7 @@ impl CacheBuilder {
             max_shard_bytes,
             tables: None,
             shards: Vec::new(),
+            record_layout: RecordLayout::for_write(&shard_compression),
             shard_compression,
             current_shard,
         })
@@ -339,7 +319,12 @@ impl CacheBuilder {
             uncompressed_byte_len,
             compression,
             record_encode,
-        } = encode_stored_record(data, &tables.schema, &metadata_row, &self.shard_compression)?;
+        } = self.record_layout.encode(
+            data,
+            &tables.schema,
+            &metadata_row,
+            &self.shard_compression,
+        )?;
         let stored_byte_len = u64::try_from(record.len()).map_err(|_| {
             CacheError::InvalidInput("stored payload byte length does not fit in u64".to_string())
         })?;
@@ -390,11 +375,7 @@ impl CacheBuilder {
                 extra: BTreeMap::new(),
             },
         };
-        let manifest = if self.shard_compression.whole_record() {
-            Manifest::V4(manifest_data)
-        } else {
-            Manifest::V3(manifest_data)
-        };
+        let manifest = Manifest::for_layout(self.record_layout, manifest_data);
         // The manifest is the publication marker: readers reject caches until it exists.
         let manifest_started_at = Instant::now();
         write_manifest(&self.path, &manifest)?;
@@ -536,30 +517,27 @@ fn load_cache_inner(
     verify_shards(&path, &manifest, validate_cache)?;
 
     let index = MappedIndex::open(&index_path)?;
-    let metadata_rows = if validate_cache {
-        Some(read_metadata_file(
-            &metadata_path,
-            &manifest.fields().metadata_schema,
-        )?)
-    } else {
-        fs::metadata(&metadata_path).map_err(|error| {
-            CacheError::from(error).context(format!(
-                "inspect metadata file '{}'",
-                metadata_path.display()
-            ))
-        })?;
-        None
-    };
+    let record_layout = manifest.record_layout();
+    let metadata_rows = metadata::prepare_rows(
+        record_layout,
+        &metadata_path,
+        &manifest.fields().metadata_schema,
+        validate_cache,
+    )?;
     validate_loaded_shapes(&manifest, metadata_rows.as_deref(), &index)?;
 
-    Ok(LoadedCache {
+    let cache = LoadedCache {
         cache_id,
         manifest,
         metadata_rows: Mutex::new(metadata_rows),
         index,
         path,
         validate_embedded_metadata: validate_cache,
-    })
+        record_layout,
+        metadata_index: OnceLock::new(),
+    };
+    metadata::validate_prepared(&cache, validate_cache)?;
+    Ok(cache)
 }
 
 /// Propagate serialization, final flush, and durability failures for the publication marker.
@@ -632,34 +610,15 @@ fn read_metadata_file(
 
         for batch in reader {
             let batch = batch?;
-            if batch.num_columns() != schema.len() {
-                return Err(CacheError::InvalidCache(
-                    format!("metadata column count does not match manifest schema: expected {}, actual {}", schema.len(), batch.num_columns()),
-                ));
-            }
-            for (actual, expected) in batch.schema().fields().iter().zip(schema) {
-                if actual.name() != &expected.name {
-                    return Err(CacheError::InvalidCache(format!(
-                        "metadata column name does not match '{}': actual '{}'",
-                        expected.name, actual.name()
-                    )));
-                }
-            }
-            for (column, field) in batch.columns().iter().zip(schema) {
-                if column.data_type() != &arrow_type(&field.kind) || column.null_count() != 0 {
-                    return Err(CacheError::InvalidCache(format!(
-                        "metadata '{}' has invalid type or null values: expected {:?} with no nulls, actual {:?} with {} nulls",
-                        field.name, arrow_type(&field.kind), column.data_type(), column.null_count()
-                    )));
-                }
-            }
+            metadata::validate_batch(&batch, schema)?;
             for row_index in 0..batch.num_rows() {
                 rows.push(read_metadata_row(&batch, schema, row_index)?);
             }
         }
 
         Ok(rows)
-    }).map_err(|error| error.context(format!("read metadata file '{}'", path.display())))
+    })
+    .map_err(|error| error.context(format!("read metadata file '{}'", path.display())))
 }
 
 fn read_metadata_row(
@@ -799,182 +758,6 @@ fn build_array(
 fn metadata_cell(row: &[MetadataValue], column_index: usize) -> CacheResult<&MetadataValue> {
     row.get(column_index)
         .ok_or_else(|| CacheError::InvalidInput("metadata column is out of range".to_string()))
-}
-
-/// One bounded encoded record retains timing and size counters for its actual codec input.
-struct EncodedRecord {
-    bytes: Vec<u8>,
-    uncompressed_byte_len: u64,
-    compression: Duration,
-    record_encode: Duration,
-}
-
-/// Preserve legacy byte layout while compressing the complete envelope for modern policies.
-fn encode_stored_record(
-    data: Vec<u8>,
-    schema: &[MetadataField],
-    metadata: &[MetadataValue],
-    compression: &ShardCompression,
-) -> CacheResult<EncodedRecord> {
-    if compression.whole_record() {
-        let started = Instant::now();
-        let record = encode_sample_record(&data, schema, metadata)?;
-        drop(data);
-        let record_encode = started.elapsed();
-        let uncompressed_byte_len = u64::try_from(record.len())
-            .map_err(|_| CacheError::InvalidInput("record length does not fit u64".to_string()))?;
-        let started = Instant::now();
-        let bytes = compress_payload(record, compression)?;
-        return Ok(EncodedRecord {
-            bytes,
-            uncompressed_byte_len,
-            record_encode,
-            compression: started.elapsed(),
-        });
-    }
-    let uncompressed_byte_len = u64::try_from(data.len())
-        .map_err(|_| CacheError::InvalidInput("payload length does not fit u64".to_string()))?;
-    let started = Instant::now();
-    let payload = compress_payload(data, compression)?;
-    let compression_time = started.elapsed();
-    let started = Instant::now();
-    let bytes = encode_sample_record(&payload, schema, metadata)?;
-    Ok(EncodedRecord {
-        bytes,
-        uncompressed_byte_len,
-        compression: compression_time,
-        record_encode: started.elapsed(),
-    })
-}
-
-/// Decode from the manifest-selected scope; remove v4 envelopes without a second payload allocation.
-fn decode_stored_record(
-    record: Vec<u8>,
-    manifest: &Manifest,
-    shard: &ShardManifest,
-) -> CacheResult<CacheSample> {
-    let schema = &manifest.fields().metadata_schema;
-    if manifest.whole_record() {
-        let mut decoded = if shard.compression.compressed() {
-            decompress_payload(&record, &shard.compression, shard.uncompressed_byte_len)?
-        } else {
-            record
-        };
-        let (metadata, payload) = split_sample_record(&decoded, schema)?;
-        let envelope_len = decoded.len() - payload.len();
-        decoded.drain(..envelope_len);
-        return Ok(CacheSample {
-            data: decoded,
-            metadata,
-        });
-    }
-    let (metadata, payload) = split_sample_record(&record, schema)?;
-    let data = decompress_payload(payload, &shard.compression, shard.uncompressed_byte_len)?;
-    Ok(CacheSample { data, metadata })
-}
-
-fn encode_sample_record(
-    stored_payload: &[u8],
-    schema: &[MetadataField],
-    metadata_row: &[MetadataValue],
-) -> CacheResult<Vec<u8>> {
-    let metadata_object = metadata_row_to_object(schema, metadata_row)?;
-    let metadata_json = serde_json::to_vec(&metadata_object)?;
-    let metadata_len = u64::try_from(metadata_json.len()).map_err(|_| {
-        CacheError::InvalidInput("metadata record length does not fit in u64".to_string())
-    })?;
-    let capacity = RECORD_METADATA_LEN_BYTES
-        .checked_add(metadata_json.len())
-        .and_then(|len| len.checked_add(stored_payload.len()))
-        .ok_or_else(|| {
-            CacheError::InvalidInput("record byte length overflowed usize".to_string())
-        })?;
-    let mut record = Vec::new();
-    record.try_reserve_exact(capacity).map_err(|error| {
-        CacheError::InvalidInput(format!("cannot allocate sample record: {error}"))
-    })?;
-    record.extend_from_slice(&metadata_len.to_le_bytes());
-    record.extend_from_slice(&metadata_json);
-    record.extend_from_slice(stored_payload);
-    Ok(record)
-}
-
-fn split_sample_record<'a>(
-    record: &'a [u8],
-    schema: &[MetadataField],
-) -> CacheResult<(Vec<MetadataValue>, &'a [u8])> {
-    let metadata_len = read_u64(record_range(record, 0, RECORD_METADATA_LEN_BYTES)?)?;
-    let metadata_len = usize::try_from(metadata_len).map_err(|_| {
-        CacheError::InvalidCache("metadata record length does not fit in usize".to_string())
-    })?;
-    let payload_start = RECORD_METADATA_LEN_BYTES
-        .checked_add(metadata_len)
-        .ok_or_else(|| CacheError::InvalidCache("metadata record length overflowed".to_string()))?;
-    let metadata_json = record_range(record, RECORD_METADATA_LEN_BYTES, payload_start)?;
-    let metadata_object = serde_json::from_slice(metadata_json)?;
-    let metadata = metadata_object_to_row(schema, metadata_object)?;
-    let stored_payload = record.get(payload_start..).ok_or_else(|| {
-        CacheError::InvalidCache("payload record is missing stored payload".to_string())
-    })?;
-    Ok((metadata, stored_payload))
-}
-
-fn metadata_row_to_object(
-    schema: &[MetadataField],
-    row: &[MetadataValue],
-) -> CacheResult<BTreeMap<String, MetadataValue>> {
-    if row.len() != schema.len() {
-        return Err(CacheError::InvalidInput(
-            "metadata row length does not match schema".to_string(),
-        ));
-    }
-
-    schema
-        .iter()
-        .zip(row.iter())
-        .map(|(field, value)| Ok((field.name.clone(), value.clone())))
-        .collect()
-}
-
-fn metadata_object_to_row(
-    schema: &[MetadataField],
-    metadata: BTreeMap<String, MetadataValue>,
-) -> CacheResult<Vec<MetadataValue>> {
-    if metadata.len() != schema.len() {
-        return Err(CacheError::InvalidCache(
-            "embedded metadata keys do not match schema".to_string(),
-        ));
-    }
-
-    schema
-        .iter()
-        .map(|field| match metadata.get(&field.name) {
-            Some(value) if value.kind() == field.kind => Ok(value.clone()),
-            Some(value) => Err(CacheError::InvalidCache(format!(
-                "embedded metadata field '{}' expected {}, got {}",
-                field.name,
-                field.kind,
-                value.kind()
-            ))),
-            None => Err(CacheError::InvalidCache(format!(
-                "embedded metadata field '{}' is missing",
-                field.name
-            ))),
-        })
-        .collect()
-}
-
-fn validate_redundant_metadata(
-    metadata: &[MetadataValue],
-    embedded_metadata: &[MetadataValue],
-    sample_index: usize,
-) -> CacheResult<()> {
-    if metadata != embedded_metadata {
-        return Err(CacheError::InvalidCache(format!(
-            "embedded metadata does not match metadata.arrow for sample {sample_index}"
-        )));
-    }
-    Ok(())
 }
 
 fn read_index_entry(bytes: &[u8]) -> CacheResult<IndexEntry> {

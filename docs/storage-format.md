@@ -19,7 +19,7 @@ cache/
 The manifest records:
 
 - Format version.
-- Persistent integer `cache_id` in formats v3 and v4.
+- Persistent integer `cache_id` in formats v3–v5.
 - Source name.
 - Sample count.
 - Metadata schema.
@@ -31,17 +31,17 @@ If `manifest.json` is missing, the cache is incomplete and must not be read.
 
 ### Versioned cache identity
 
-Readers support manifest versions 2 and 3 through separate data structures.
+Readers distinguish legacy v2 identity from persisted identity in v3–v5.
 Version 2 has no persistent cache identity: `cache_id` is the cache path's
 zero-based position in the supplied dataset list. Reading or reusing v2 caches
 does not change their manifests or their IDs. Version 3 requires an unsigned
 64-bit `cache_id`, which readers use regardless of path order or directory name.
-Unsupported versions and duplicate resolved IDs are rejected. Mixed v2/v3
+Unsupported versions and duplicate resolved IDs are rejected. Mixed-version
 datasets use each version's identity rule, without automatic renumbering.
 
 New caches use SHA-256 of the source name's exact UTF-8 bytes. Interpret the
 first eight digest bytes as a big-endian unsigned integer and clear the high bit.
-Store that nonnegative 63-bit result in the v3 manifest. Names are not normalized
+Store that nonnegative 63-bit result in the manifest. Names are not normalized
 before hashing, and Python's randomized `hash()` is not used. Equal names give
 equal IDs; readers reject collisions instead of assigning replacement IDs.
 
@@ -70,6 +70,23 @@ or removed as if they belonged to a later operation.
 
 Older DatasetRT releases that only accept v2 cannot read upgraded v3 caches.
 
+## Record layout dispatch
+
+Rust resolves each manifest once into a closed `RecordLayout`: `LegacyEnvelope`
+(v2/v3), `RecordEnvelope` (v4), or `PayloadOnly` (v5). The record module owns
+exhaustive framing and codec dispatch. Decoded values carry their metadata source
+as a typed variant, so storage orchestration does not inspect versions or infer
+missing metadata from an empty mapping. Metadata resolution and validation remain
+separate from binary record framing. Compression policy/layout conflicts are
+rejected when parsing the manifest.
+
+Compatibility is tested against immutable caches and complete reader ground truth
+captured from each format's own producer. The matrix covers v2–v5, all supported
+codec wire variants, weighted epochs and mixed-format datasets. See the
+`tests/fixtures/storage-compatibility/README.md` workflow
+and `tests/test_storage_compatibility.py`. A new default writer format requires
+its own saved oracle before the compatibility coverage guard can pass.
+
 ## Metadata
 
 `metadata.arrow` stores one row per physical sample. Writers stream rows into Arrow
@@ -89,7 +106,26 @@ record batch, and the manifest retains one descriptor per shard. Completed
 samples awaiting an earlier sample's ordered commit still count against the
 writer's scheduling window.
 
-The same metadata is also embedded redundantly in each shard record. That copy is for debugging, visualization, and sample-level inspection when iterating through raw shard records. Readers compare the embedded metadata with `metadata.arrow` when materializing a sample and reject mismatches.
+V5 stores metadata exclusively in `metadata.arrow`. Sample reads lazily map that
+file and index batch row ranges from IPC message headers, without decoding all
+columns or expanding rows at dataset construction. After first validation of a
+batch, lookup is O(log batches + metadata columns + selected metadata bytes). First access validates that batch's Arrow buffers in
+O(batch bytes). A shared per-batch marker allows later decoders to reuse that
+validation, avoiding repeated whole-column UTF-8 scans during shuffled reads.
+Only successfully validated bytes from the same immutable mapping are trusted;
+failed validation never enables reuse. Each worker retains one decoded batch
+total across all caches;
+file mappings and O(batches) descriptors are shared by that dataset's readers.
+Mapped pages are managed by the OS. Unaligned or externally compressed Arrow
+buffers may require copies of the addressed batch. Native writers bound batches
+by rows and bytes, except for a single oversized metadata row.
+
+Legacy v2–v4 records also embed metadata JSON. With `validate_cache=True`, readers
+compare that copy against Arrow when reading a sample. V5 has no redundant copy
+to compare; full validation checks checksums and streams Arrow schema/null
+validation one batch at a time. Default v5 reads validate row count from batch
+headers and validate each addressed batch's schema and nulls before reading cells.
+A raw v5 shard cannot provide sample metadata without `metadata.arrow`.
 
 Metadata values are primitive Arrow-compatible values:
 
@@ -147,7 +183,7 @@ For v2/v3, compression is applied per indexed payload, after the redundant metad
 
 ### Format v4: complete-record compression
 
-Typed `NoCompression`, `Lz4Fast`, `Lz4HC`, `Brotli`, and `Zstd` policies write format v4.
+DatasetRT 0.5.0–0.5.9 wrote format v4 with typed compression policies.
 The logical record remains an eight-byte metadata length, metadata JSON, then
 payload bytes. LZ4 compresses that entire record as one independent block, with
 a four-byte little-endian decoded-length prefix. `NoCompression` writes the
@@ -188,13 +224,26 @@ block-size limit; unsupported sizes return errors before compression.
 Existing `ShardCompression(...)` configurations retain their v3 payload-only
 behavior and emit a Python deprecation warning when constructed explicitly.
 Their historical `ratio` remains manifest metadata and is never used as a level.
-The default for new writes is `Zstd(level=3)`, using v4 without a
-deprecation warning. Old caches stay readable without
-rewriting, and a dataset can combine v2, v3, and v4 caches. Releases before
+The default for new writes is `Zstd(level=3)`, now using v5. Old caches stay readable without
+rewriting, and a dataset can combine v2, v3, v4, and v5 caches. Releases before
 0.5.0 reject v4; releases before 0.5.3 reject the Zstd codec discriminator even
-when they support other v4 codecs. Explicit `Lz4Fast()` preserves interoperability
-with 0.5.0–0.5.2 readers. Manifest-only identity migration still targets v3 and leaves
-v4 caches unchanged; it cannot convert record layouts.
+when they support other v4 codecs. Previously written LZ4 v4 caches remain compatible with 0.5.0–0.5.2 readers. Manifest-only identity migration still targets v3 and leaves
+v4/v5 caches unchanged; it cannot convert record layouts.
+
+### Format v5: payload-only shards
+
+Starting with 0.5.10, typed `NoCompression`, `Lz4Fast`, `Lz4HC`, `Brotli`, and
+`Zstd` policies write v5. Index rows address only stored payload bytes. Metadata
+JSON and its eight-byte length prefix are absent. Codec framing and settings
+are unchanged from v4, but codec input and `uncompressed_byte_len` count only
+payload bytes. Empty uncompressed payloads have zero-length index entries and
+may share an offset; an all-empty shard is a valid zero-byte file.
+
+Readers before 0.5.10 reject v5. Existing caches stay unchanged, including with
+`reuse_existing=True`. Removing duplication from an old cache requires rewriting
+it into a new destination; changing a manifest version cannot convert the layout.
+Deprecated `ShardCompression` policies continue writing the historical v3 layout.
+See [storage benchmarks](storage-benchmarks.md) for paired text/image comparisons.
 
 ## Integrity
 
@@ -215,9 +264,10 @@ Writers calculate SHA-256 checksums while committing files. Readers verify:
 - Shard lengths match the manifest.
 - SHA-256 checksums match the manifest.
 - Index and metadata checksums match the manifest.
-- Embedded shard metadata matches `metadata.arrow` when a sample is read.
+- Legacy embedded metadata matches `metadata.arrow` when full validation is enabled.
 
-Reader validation happens before iteration starts.
+Full checksum and shape validation happens at construction when explicitly enabled.
+Record bounds, codecs and addressed v5 metadata batches are checked during reads.
 
 ## Native error handling
 

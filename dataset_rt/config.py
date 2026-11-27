@@ -25,7 +25,7 @@ CompressionAlgo: TypeAlias = Literal["none", "lz4"]
 
 
 class ShardCompression(BaseModel):
-    """Deprecated payload-only policy retained for existing writers and saved configs."""
+    """Deprecated v3 compression policy retained for existing writers and saved configs."""
 
     # Existing pickles resolve public classes through the compatibility facade.
     __module__ = "dataset_rt.api"
@@ -66,7 +66,7 @@ class ShardCompression(BaseModel):
             "ShardCompression is deprecated; use NoCompression(), Lz4Fast(acceleration=1), "
             "Lz4HC(level=9), Brotli(level=5), or Zstd(level=3). "
             "Legacy ratio never controlled compression and remains ignored. "
-            "Legacy calls write payload-only v3 caches; new variants write whole-record v4 caches.",
+            "Legacy calls write v3 caches with embedded metadata; new variants write payload-only v5 caches.",
             DeprecationWarning,
             stacklevel=3,
         )
@@ -74,17 +74,17 @@ class ShardCompression(BaseModel):
 
 
 class NoCompression(BaseModel):
-    """Write independent uncompressed records using the v4 record layout."""
+    """Write independent uncompressed records using the v5 payload-only layout."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     algo: Literal["none"] = "none"
     """Persist an explicit uncompressed codec discriminator."""
     mode: Literal["none"] = "none"
-    """Select the uncompressed whole-record variant."""
+    """Select the uncompressed payload variant."""
 
 
 class Lz4Fast(BaseModel):
-    """Compress complete records with LZ4; higher acceleration favors write speed."""
+    """Compress payloads with LZ4; higher acceleration favors write speed."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     algo: Literal["lz4"] = "lz4"
@@ -96,7 +96,7 @@ class Lz4Fast(BaseModel):
 
 
 class Lz4HC(BaseModel):
-    """Compress complete records with LZ4 HC; higher levels increase compression effort."""
+    """Compress payloads with LZ4 HC; higher levels increase compression effort."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     algo: Literal["lz4"] = "lz4"
@@ -108,7 +108,7 @@ class Lz4HC(BaseModel):
 
 
 class Brotli(BaseModel):
-    """Compress independent complete records with the pure-Rust Brotli codec."""
+    """Compress independent payloads with the pure-Rust Brotli codec."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     algo: Literal["brotli"] = "brotli"
@@ -120,7 +120,7 @@ class Brotli(BaseModel):
 
 
 class Zstd(BaseModel):
-    """Compress independent complete records with statically bundled Zstandard.
+    """Compress independent payloads with statically bundled Zstandard.
 
     Levels 1–22 select increasing compression effort; level 3 is the writer
     default. Each record is one standard frame with a declared decoded size.
@@ -131,7 +131,7 @@ class Zstd(BaseModel):
     algo: Literal["zstd"] = "zstd"
     """Persist the Zstandard frame codec discriminator."""
     mode: Literal["zstd"] = "zstd"
-    """Select whole-record Zstandard independently of other codec settings."""
+    """Select per-payload Zstandard independently of other codec settings."""
     level: int = Field(default=3, ge=1, le=22, strict=True)
     """Accept positive standard levels 1–22; higher levels require more write effort."""
 
@@ -147,7 +147,7 @@ Zstd.__module__ = "dataset_rt.api"
 RecordCompression: TypeAlias = Annotated[
     NoCompression | Lz4Fast | Lz4HC | Brotli | Zstd, Field(discriminator="mode")
 ]
-"""Closed whole-record policies with codec-specific settings."""
+"""Closed per-payload policies with codec-specific settings."""
 
 DEFAULT_SHARD_COMPRESSION = Zstd()
 
@@ -227,9 +227,9 @@ class WriterConfig(BaseModel):
 
     shard_compression: RecordCompression | ShardCompression = Field(
         default=DEFAULT_SHARD_COMPRESSION,
-        description="Whole-record compression variants, or the deprecated payload-only policy.",
+        description="Per-payload compression variants, or the deprecated v3 policy.",
     )
-    """Typed whole-record policy, or a legacy payload-only policy for compatibility."""
+    """Typed per-payload policy, or a legacy v3 policy for compatibility."""
 
     show_progress: bool = Field(
         default=True,

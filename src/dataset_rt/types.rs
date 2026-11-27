@@ -303,11 +303,6 @@ impl ShardCompression {
         Ok(Self::Zstd { level })
     }
 
-    /// Only explicit modern variants change the on-disk record scope.
-    pub fn whole_record(&self) -> bool {
-        !matches!(self, Self::Legacy(_))
-    }
-
     /// Uncompressed variants bypass codec allocation.
     pub fn compressed(&self) -> bool {
         !matches!(
