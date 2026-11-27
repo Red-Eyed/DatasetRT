@@ -1,12 +1,16 @@
 # Build Artifacts
 
-DatasetRT distribution artifacts are built locally to avoid spending GitHub Actions minutes on wheel builds.
+DatasetRT release artifacts are built locally. Only the user publishes packages.
 
-GitHub CI remains checks-only. It validates Rust, Python linting, type checking, and tests on Python 3.11, but it does not publish artifacts.
+GitHub CI validates Rust, linting and types once, builds a standard wheel once,
+then installs that same artifact on CPython 3.10–3.15. Tests run outside the
+checkout so the source package cannot shadow the installed wheel. Dependencies
+must resolve to published binaries. CI never publishes packages.
 
 ## Local Build Matrix
 
-DatasetRT uses PyO3 `abi3-py310`. Each wheel is tagged `cp310-abi3`, so one wheel per platform supports Python 3.10, 3.11, 3.12, and 3.13.
+DatasetRT uses PyO3 `abi3-py310`. Each standard wheel is tagged `cp310-abi3`,
+so one wheel per platform supports standard CPython 3.10 through 3.15.
 
 `scripts/build_local.py` builds:
 
@@ -38,6 +42,9 @@ Useful build environment variables:
 - `DATASETRT_SKIP_MACOS`: set to `true` to skip host macOS wheels.
 - `DATASETRT_SKIP_LINUX`: set to `true` to skip Zig Linux wheels.
 - `DATASETRT_COMPATIBILITY`: Linux wheel compatibility tag, default `manylinux_2_17`.
+
+Free-threaded Python support is postponed. Release wheels support standard
+CPython only.
 
 ## Publishing
 

@@ -4,10 +4,10 @@ import os
 import platform
 import shutil
 import subprocess
-import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import tomllib
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
@@ -593,7 +593,7 @@ def environment() -> Environment:
         ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
     )
     return Environment(
-        recorded_at=datetime.now(UTC),
+        recorded_at=datetime.now(timezone.utc),
         revision=revision.stdout.strip(),
         worktree_dirty=bool(dirty.stdout),
         benchmark_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

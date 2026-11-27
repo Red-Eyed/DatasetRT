@@ -30,9 +30,12 @@ just check
 
 If `ruff format` changes files, re-read touched files before making further edits.
 
-CI runs the same checks on Python 3.11 and Rust stable. The editable extension is built with maturin before Python tests run.
+CI runs Rust, linting, type checking and API documentation checks on Python 3.11
+and Rust stable. It builds one standard wheel and tests the installed artifact
+on standard CPython 3.10–3.15, staging tests outside the source checkout.
 
-Distribution artifacts are built locally with Zig instead of GitHub Actions. See [Build Artifacts](build.md).
+Release artifacts are built locally with Zig. CI artifacts are for validation
+only; agents and CI never publish packages. See [Build Artifacts](build.md).
 
 ## Smoke Benchmark
 

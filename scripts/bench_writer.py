@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -13,7 +14,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -21,6 +22,7 @@ import psutil
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, CliApp, CliImplicitFlag, SettingsConfigDict
 
+import dataset_rt
 from dataset_rt import CacheInput, CacheWriteSuccess, DatasetRuntime, ReaderConfig, WriterConfig
 
 if TYPE_CHECKING:
@@ -152,10 +154,8 @@ class Benchmark(BaseSettings):
         if fingerprints() != source_fingerprints:
             raise RuntimeError("writer or benchmark sources changed during measurement")
         report = WriterReport(
-            recorded_at=datetime.now(UTC),
-            revision=subprocess.run(
-                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-            ).stdout.strip(),
+            recorded_at=datetime.now(timezone.utc),
+            revision=implementation_revision(),
             fingerprints=source_fingerprints,
             platform=platform.platform(),
             python=platform.python_version(),
@@ -187,15 +187,29 @@ class WriterReport(BaseModel):
 
 
 def fingerprints() -> dict[str, str]:
-    """Identify the uncommitted implementation actually measured."""
-    root = Path(__file__).resolve().parents[1]
-    names = (
-        "dataset_rt/writer.py",
-        "dataset_rt/config.py",
-        "dataset_rt/runtime.py",
-        "scripts/bench_writer.py",
+    """Fingerprint the loaded implementation, including when testing an installed wheel."""
+    package = Path(dataset_rt.__file__).resolve().parent
+    paths = {
+        f"dataset_rt/{name}.py": package / f"{name}.py" for name in ("writer", "config", "runtime")
+    }
+    paths["scripts/bench_writer.py"] = Path(__file__).resolve()
+    return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+
+
+def implementation_revision() -> str:
+    """Use the loaded package's checkout revision or explicitly identify an installed artifact."""
+    package = Path(dataset_rt.__file__).resolve().parent
+    if package.parent != Path(__file__).resolve().parents[1]:
+        return f"installed:dataset-rt=={importlib.metadata.version('dataset-rt')}"
+    result = subprocess.run(
+        ["git", "-C", str(package), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return f"installed:dataset-rt=={importlib.metadata.version('dataset-rt')}"
 
 
 def measure(

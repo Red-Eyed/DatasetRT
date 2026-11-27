@@ -8,7 +8,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Never
+from typing import TYPE_CHECKING, Literal
 
 import polars as pl
 import pytest
@@ -31,6 +31,7 @@ from dataset_rt.records import MetadataSnapshot, OriginalMetadata, ReaderRecipe
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from multiprocessing.connection import Connection
+    from typing import Never
 
 
 class NativeStateSentinel:

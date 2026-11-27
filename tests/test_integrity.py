@@ -337,7 +337,7 @@ def test_metadata_byte_batched_cache_round_trips(
     results = RUNTIME.write_cache(LargeMetadataSource(), tmp_path)
     assert isinstance(results[0], CacheWriteSuccess)
     path = results[0].path
-    table = pl.read_ipc(path / "metadata.arrow", rechunk=False)
+    table = pl.read_ipc(path / "metadata.arrow", columns=["index"])
     with ipc.open_file(path / "metadata.arrow") as reader:
         assert reader.num_record_batches > 1
     assert table["index"].equals(pl.Series("index", range(sample_count)))

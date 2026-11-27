@@ -12,7 +12,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -664,7 +664,7 @@ def run_rank(config: BenchmarkConfig) -> None:
                 for repeat in range(config.repeats)
             )
             report = Report(
-                recorded_at=datetime.now(UTC),
+                recorded_at=datetime.now(timezone.utc),
                 settings=config,
                 world_size=topology.world_size,
                 backend=dist.get_backend(),

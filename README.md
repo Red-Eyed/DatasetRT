@@ -23,7 +23,7 @@ Store serialized training records in immutable disk shards, then use a separate
 
 ## Installation
 
-DatasetRT supports Python 3.10 through 3.13. Prebuilt wheels are available for
+DatasetRT supports standard CPython 3.10 through 3.15. Prebuilt wheels are available for
 Linux (x86-64 and ARM64) and macOS (Intel and Apple Silicon). PyTorch is optional.
 
 Install **`dataset-rt`**, import **`dataset_rt`**.

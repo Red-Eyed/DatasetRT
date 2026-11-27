@@ -262,4 +262,4 @@ If `ruff format` changes a file, re-read the changed sections before continuing.
 
 ## Release Notes
 
-Distribution artifacts are built locally with `just build-all`; GitHub Actions is checks-only. Wheels use PyO3 `abi3-py310`, so one wheel per platform supports Python 3.10 through 3.13. PyPI artifacts are immutable; bump the version before rebuilding a changed release artifact.
+Distribution artifacts are built locally with `just build-all`. GitHub Actions builds test wheels and never publishes packages. Standard wheels use PyO3 `abi3-py310`; CI installs the same wheel on CPython 3.10 through 3.15. Free-threaded Python support is postponed. PyPI artifacts are immutable; bump the version before rebuilding a changed release artifact.

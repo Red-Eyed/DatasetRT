@@ -2,6 +2,15 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.11
+
+### Improvements
+
+- Support standard CPython 3.10–3.15 with the same platform `cp310-abi3`
+  wheel. Exercise installed artifacts in CI instead of rebuilding the extension
+  separately for each interpreter. Keep benchmark timestamp handling compatible
+  with Python 3.10 and fix test compatibility with Polars 2.
+
 ## 0.5.10
 
 ### Improvements

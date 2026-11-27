@@ -50,5 +50,40 @@ jobs:
       - name: Pyrefly
         run: uv run --python 3.11 --extra dev pyrefly check
 
-      - name: Pytest
-        run: uv run --python 3.11 --extra dev pytest
+      - name: Generated API documentation
+        run: uv run --python 3.11 --extra dev scripts/sync_api_docs.py --check
+
+      - name: Build standard wheel once
+        run: uv run --python 3.11 --extra dev maturin build --release --out wheelhouse --interpreter .venv/bin/python
+
+      - name: Save standard wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: standard-wheel
+          path: wheelhouse/*.whl
+
+  wheel-tests:
+    name: Installed wheel / Python ${{ matrix.python }}
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: standard-wheel
+          path: wheelhouse
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '${{ matrix.python }}'
+      - name: Create isolated interpreter
+        run: uv venv --python '${{ matrix.python }}' --seed /tmp/wheel-env
+      - name: Install wheel and published binary dependencies
+        run: uv pip install --python /tmp/wheel-env/bin/python --only-binary=:all: wheelhouse/*.whl pytest pytest-xdist pydantic-settings pyrefly torch psutil
+      - name: Test installed wheel outside checkout
+        run: uv run --no-project --python /tmp/wheel-env/bin/python scripts/test_wheel.py

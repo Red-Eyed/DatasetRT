@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING, cast
 
 import polars as pl
 import pytest
@@ -27,6 +27,7 @@ from dataset_rt import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+    from typing import Never
 
 RUNTIME = DatasetRuntime(num_workers=4)
 TINY_ID = 671_225_450_407_077_731
