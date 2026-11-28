@@ -2,6 +2,22 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.13
+
+### Bug Fixes
+
+- Remove the serial writer's temporary cache when source iterator construction
+  fails, including `KeyboardInterrupt` and `SystemExit`. Preserve the original
+  exception and allow a later write to retry the same destination.
+
+### Developers
+
+- Require at least 90% Rust and Python line coverage in CI. Include Python
+  subprocess coverage and publish both reports before enforcing the Rust gate,
+  so Codecov receives current data even when that threshold fails.
+- Exercise source discovery and iterator-construction failures through both
+  native writer entry points.
+
 ## 0.5.12
 
 ### Documentation

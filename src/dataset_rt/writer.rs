@@ -153,7 +153,14 @@ fn write_named_source(
             return Err(error);
         }
     };
-    let iterator = PyIterator::from_object(&source).map_err(py_error)?;
+    let iterator = match PyIterator::from_object(&source).map_err(py_error) {
+        Ok(iterator) => iterator,
+        Err(error) => {
+            drop(builder);
+            cleanup_temp_cache(&temp_path)?;
+            return Err(error);
+        }
+    };
     if let Err(error) = write_with_pipeline(
         iterator,
         builder,

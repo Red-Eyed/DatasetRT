@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import polars as pl
 import pytest
@@ -1150,6 +1150,62 @@ def test_native_writer_rejects_malformed_python_records(
     assert diagnostic in detail
     assert not (tmp_path / "malformed").exists()
     assert not (tmp_path / "tmp" / "malformed").exists()
+
+
+@pytest.mark.parametrize("as_list", [False, True])
+@pytest.mark.parametrize("phase", ["name", "iterator"])
+@pytest.mark.parametrize("exception", [ValueError, KeyboardInterrupt, SystemExit])
+def test_native_writer_preserves_source_setup_failures(
+    tmp_path: Path,
+    as_list: bool,
+    phase: Literal["name", "iterator"],
+    exception: type[ValueError] | type[KeyboardInterrupt] | type[SystemExit],
+) -> None:
+    """Source setup errors remain local; interrupts propagate after temporary-cache cleanup."""
+    from dataset_rt._dataset_rt import DatasetRuntime as NativeRuntime
+    from dataset_rt._dataset_rt import write_cache
+
+    class FailingSource:
+        """Fail before the first input, independently of generator-body exception handling."""
+
+        @property
+        def name(self) -> str:
+            """Source discovery may fail before any cache destination is available."""
+            if phase == "name":
+                raise exception("name unavailable")
+            return "setup"
+
+        def __iter__(self) -> Iterator[CacheInput]:
+            """Fail while obtaining the iterator rather than while advancing it."""
+            raise exception("iterator unavailable")
+
+    source = cast("CacheSource", FailingSource())
+    runtime = NativeRuntime(1)
+    config = WriterConfig(show_progress=False)
+    sources = [source] if as_list else source
+    if exception is ValueError:
+        outcomes = write_cache(runtime, sources, str(tmp_path), config, False)
+        assert len(outcomes) == 1
+        status, _, detail = outcomes[0]
+        assert status == "error"
+        assert f"{phase} unavailable" in detail
+    else:
+        with pytest.raises(exception, match=f"{phase} unavailable"):
+            write_cache(runtime, sources, str(tmp_path), config, False)
+    assert not (tmp_path / "setup").exists()
+    assert not (tmp_path / "tmp" / "setup").exists()
+
+    class RetrySource(TinySource):
+        """A failed setup cannot reserve the destination against a healthy retry."""
+
+        name = "setup"
+
+    retry = write_cache(runtime, RetrySource(), str(tmp_path), config, False)
+    assert retry[0][0] == "success"
+    dataset = RUNTIME.cached_dataset(
+        [tmp_path / "setup"], reader_config=ReaderConfig(seed=1, shuffle=False, validate_cache=True)
+    )
+    assert [sample.data for sample in dataset] == [b"zero", b"one", b"two"]
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:
