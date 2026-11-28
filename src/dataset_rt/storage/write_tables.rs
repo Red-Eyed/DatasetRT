@@ -236,6 +236,39 @@ mod tests {
     use crate::storage::index::MappedIndex;
     use crate::test_support::TestDirectory;
 
+    /// Schema drift and empty sources cannot be finalized as valid columnar artifacts.
+    #[test]
+    fn table_writer_rejects_schema_drift_and_empty_publication() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let initial = BTreeMap::from([("value".to_string(), MetadataValue::Int(1))]);
+        let writer = CacheTablesWriter::create(directory.path(), &initial)?;
+        for metadata in [
+            BTreeMap::new(),
+            BTreeMap::from([("other".to_string(), MetadataValue::Int(2))]),
+            BTreeMap::from([("value".to_string(), MetadataValue::Bool(true))]),
+        ] {
+            assert!(writer.metadata_row(metadata).is_err());
+        }
+        assert!(writer.finish().is_err());
+        Ok(())
+    }
+
+    /// File-open failures identify the blocked artifact before any cache can be published.
+    #[test]
+    fn blocked_artifact_paths_report_creation_context() -> CacheResult<()> {
+        for name in ["metadata.arrow", "index.bin"] {
+            let directory = TestDirectory::new()?;
+            std::fs::create_dir(directory.path().join(name))?;
+            let error = CacheTablesWriter::create(directory.path(), &BTreeMap::new())
+                .err()
+                .ok_or(crate::types::CacheError::WorkerFailed)?;
+            let message = error.to_string();
+            assert!(message.contains("create"));
+            assert!(message.contains(name));
+        }
+        Ok(())
+    }
+
     /// Persist multiple batches while index bytes grow and retained metadata stays bounded.
     #[test]
     fn streams_rows_and_index_before_finish() -> CacheResult<()> {

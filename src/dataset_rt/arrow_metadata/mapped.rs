@@ -238,6 +238,78 @@ mod tests {
     use arrow_array::{ArrayRef, StringArray};
     use arrow_ipc::writer::FileWriter;
 
+    /// Signed block offsets and lengths cannot escape the mapped data section.
+    #[test]
+    fn malformed_block_ranges_are_rejected() -> CacheResult<()> {
+        let buffer = Buffer::from(vec![0_u8; 64]);
+        for block in [
+            Block::new(-1, 0, 0),
+            Block::new(8, -1, 0),
+            Block::new(8, 0, -1),
+            Block::new(0, 8, 0),
+            Block::new(60, 8, 0),
+            Block::new(i64::MAX, 8, i64::MAX),
+        ] {
+            assert!(block_buffer(&buffer, &block, 64).is_err());
+        }
+        assert_eq!(block_buffer(&buffer, &Block::new(8, 8, 16), 64)?.len(), 24);
+        assert!(batch_message(&buffer, &Block::new(8, -1, 0)).is_err());
+        assert!(batch_message(&buffer, &Block::new(8, 100, 0)).is_err());
+        assert!(batch_message(&buffer, &Block::new(8, 3, 0)).is_err());
+        let malformed = Buffer::from(vec![255_u8; 64]);
+        assert!(batch_message(&malformed, &Block::new(8, 16, 0)).is_err());
+        Ok(())
+    }
+
+    /// Bad file markers and footer lengths fail before a decoder can observe mapped slices.
+    #[test]
+    fn malformed_files_and_out_of_range_batches_are_rejected() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.path().join("metadata.arrow");
+        for bytes in [
+            Vec::new(),
+            b"not-arrow".to_vec(),
+            b"ARROW1".to_vec(),
+            b"ARROW1\0\0\xff\xff\xff\x7fARROW1".to_vec(),
+        ] {
+            std::fs::write(&path, bytes)?;
+            assert!(MappedMetadataReader::open(&path).is_err());
+        }
+        write_metadata(&path)?;
+        assert!(MappedMetadataIndex::open(&path, 2).is_err());
+        let index = MappedMetadataIndex::open(&path, 1)?;
+        assert!(index.location(1).is_err());
+        assert!(index.batch(1).is_err());
+        let mut reader = MappedMetadataReader::open(&path)?;
+        reader.blocks = vec![Block::new(0, 0, 0)].into_iter();
+        assert!(matches!(reader.next(), Some(Err(_))));
+        assert!(reader.next().is_none());
+        Ok(())
+    }
+
+    /// Dictionary IPC files decode values while their buffers retain the immutable mapping.
+    #[test]
+    fn dictionary_batches_round_trip_through_mapped_reader() -> CacheResult<()> {
+        use arrow_array::types::Int32Type;
+        use arrow_array::{DictionaryArray, Int32Array};
+        let directory = TestDirectory::new()?;
+        let path = directory.path().join("dictionary.arrow");
+        let values = Arc::new(StringArray::from(vec!["first", "second"]));
+        let array: ArrayRef = Arc::new(DictionaryArray::<Int32Type>::try_new(
+            Int32Array::from(vec![0, 1, 0]),
+            values,
+        )?);
+        let batch = RecordBatch::try_from_iter([("dictionary", array)])?;
+        let mut writer = FileWriter::try_new(File::create(&path)?, &batch.schema())?;
+        writer.write(&batch)?;
+        writer.finish()?;
+        let mut reader = MappedMetadataReader::open(&path)?;
+        assert_eq!(reader.schema(), batch.schema());
+        assert_eq!(reader.next().ok_or_else(invalid_footer)??, batch);
+        assert!(reader.next().is_none());
+        Ok(())
+    }
+
     /// Create a native uncompressed string batch with a uniquely addressable UTF-8 value.
     fn write_metadata(path: &Path) -> CacheResult<()> {
         let array: ArrayRef = Arc::new(StringArray::from(vec!["unique-metadata-value"]));

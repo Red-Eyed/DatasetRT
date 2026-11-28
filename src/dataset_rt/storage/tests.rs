@@ -1,5 +1,83 @@
 use super::*;
 use crate::test_support::TestDirectory;
+use arrow_schema::{Field, Schema};
+
+/// Mismatched Arrow types cannot be interpreted as the manifest's primitive metadata kind.
+#[test]
+fn metadata_readers_reject_missing_and_mistyped_columns() -> CacheResult<()> {
+    let kinds = [
+        MetadataKind::Bool,
+        MetadataKind::Int,
+        MetadataKind::Float,
+        MetadataKind::String,
+    ];
+    for kind in kinds {
+        let wrong: ArrayRef = match kind {
+            MetadataKind::Int => Arc::new(BooleanArray::from(vec![true])),
+            _ => Arc::new(Int64Array::from(vec![1])),
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                wrong.data_type().clone(),
+                false,
+            )])),
+            vec![wrong],
+        )?;
+        let schema = vec![MetadataField {
+            name: "value".to_string(),
+            kind: kind.clone(),
+        }];
+        let error = read_metadata_row(&batch, &schema, 0)
+            .err()
+            .ok_or(CacheError::WorkerFailed)?;
+        assert!(error.to_string().contains("metadata 'value' is not"));
+        let wrong_value = match kind {
+            MetadataKind::Int => MetadataValue::Bool(true),
+            _ => MetadataValue::Int(1),
+        };
+        assert!(matches!(
+            build_array(0, &kind, &[vec![wrong_value]]),
+            Err(CacheError::InvalidInput(message)) if message == "metadata kind drifted"
+        ));
+        assert!(matches!(
+            build_array(1, &kind, &[Vec::new()]),
+            Err(CacheError::InvalidInput(message)) if message == "metadata column is out of range"
+        ));
+    }
+    let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
+    let schema = vec![MetadataField {
+        name: "missing".to_string(),
+        kind: MetadataKind::Int,
+    }];
+    assert!(read_metadata_row(&batch, &schema, 0).is_err());
+    assert!(read_u64(&[0; 7]).is_err());
+    assert!(read_index_entry(&[0; 23]).is_err());
+    Ok(())
+}
+
+/// A failed shard open reports its path, and repeated fixture construction never overwrites data.
+#[test]
+fn builder_and_shard_creation_failures_preserve_existing_paths() -> CacheResult<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("existing");
+    std::fs::create_dir(&path)?;
+    assert!(CacheBuilder::create(path, "test".to_string(), 1024, ShardCompression::None).is_err());
+    let path = directory.path().join("blocked-shard");
+    let _builder = CacheBuilder::create(
+        path.clone(),
+        "test".to_string(),
+        1024,
+        ShardCompression::None,
+    )?;
+    std::fs::create_dir(path.join("shards").join("000001.bin"))?;
+    let error = OpenShard::create(&path, 1)
+        .err()
+        .ok_or(CacheError::WorkerFailed)?;
+    assert!(error.to_string().contains("create shard"));
+    assert!(!path.join("manifest.json").exists());
+    Ok(())
+}
 
 struct FailingWriter {
     fail_write: bool,

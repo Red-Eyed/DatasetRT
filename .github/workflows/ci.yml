@@ -34,8 +34,8 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo test --locked
           uv run --python 3.11 --extra dev maturin develop
-          uv run --python 3.11 --extra dev pytest -n 2 --cov --cov-report=term-missing --cov-report=xml:coverage-python.xml
-          cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+          uv run --python 3.11 --extra dev pytest -n 2 --cov --cov-fail-under=90 --cov-precision=2 --cov-report=term-missing --cov-report=xml:coverage-python.xml
+          cargo llvm-cov report --fail-under-lines 90 --lcov --output-path coverage-rust.lcov
       - name: Save coverage reports
         uses: actions/upload-artifact@v4
         with:

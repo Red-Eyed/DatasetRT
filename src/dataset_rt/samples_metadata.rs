@@ -597,3 +597,183 @@ fn non_negative_i64_as_u64(value: i64, name: &str) -> CacheResult<u64> {
         ))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{load_cache, CacheBuilder};
+    use crate::test_support::TestDirectory;
+    use crate::types::{MetadataValue, ShardCompression};
+    use std::collections::BTreeMap;
+
+    /// Build an immutable population with every supported metadata kind.
+    fn cache(path: &Path) -> CacheResult<LoadedCache> {
+        let mut builder = CacheBuilder::create(
+            path.to_path_buf(),
+            "metadata".to_string(),
+            1024,
+            ShardCompression::None,
+        )?;
+        for index in 0..3 {
+            builder.push_sample(
+                vec![index as u8],
+                BTreeMap::from([
+                    ("bool".to_string(), MetadataValue::Bool(index % 2 == 0)),
+                    (
+                        "float".to_string(),
+                        MetadataValue::Float(index as f64 + 0.5),
+                    ),
+                    ("int".to_string(), MetadataValue::Int(index)),
+                    (
+                        "text".to_string(),
+                        MetadataValue::String(format!("row-{index}")),
+                    ),
+                ]),
+            )?;
+        }
+        builder.finish()?;
+        load_cache(path.to_path_buf(), true, 0)
+    }
+
+    /// IPC and file snapshots retain identities, typed metadata, and explicit row selection.
+    #[test]
+    fn metadata_snapshots_round_trip_selected_batches() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let caches = vec![cache(&directory.path().join("cache"))?];
+        let loaded = caches.first().ok_or(CacheError::WorkerFailed)?;
+        let schema = &loaded.manifest.fields().metadata_schema;
+        let lookup = HashMap::from([(loaded.cache_id.as_u64(), 0)]);
+        let original = build_samples_metadata(&caches, &[0], schema, &WeightState::Uniform)?;
+        let selected = original.select(UInt64Array::from(vec![2, 0, 2]))?;
+        let ipc = write_metadata_ipc(&selected)?;
+        let active = extract_metadata_ipc(&ipc, &caches, &[0], &lookup, schema)?;
+        assert_eq!(active.physical_indices.as_ref(), &[2, 0, 2]);
+        assert_eq!(active.weights, vec![1.0; 3]);
+        assert_eq!(active.metadata.len(), 3);
+        let snapshot = directory.path().join("metadata.arrow");
+        write_samples_metadata_file(&snapshot, &caches, &[0], schema)?;
+        let reader = FileReader::try_new(std::fs::File::open(&snapshot)?, None)?;
+        let batches = reader.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert!(write_samples_metadata_file(&snapshot, &caches, &[0], schema).is_err());
+        Ok(())
+    }
+
+    /// External IPC must contain nonempty rows and all authoritative control columns.
+    #[test]
+    fn ipc_rejects_empty_corrupt_and_incomplete_tables() -> CacheResult<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])?;
+        for (batches, diagnostic) in [
+            (
+                Vec::new(),
+                "metadata table must include at least one sample",
+            ),
+            (vec![batch], "samples metadata missing 'cache_id' column"),
+        ] {
+            let ipc = write_metadata_ipc(&ArrowMetadata::new(schema.clone(), batches)?)?;
+            let error = extract_metadata_ipc(&ipc, &[], &[], &HashMap::new(), &[])
+                .err()
+                .ok_or(CacheError::WorkerFailed)?;
+            assert!(error.to_string().contains(diagnostic));
+        }
+        assert!(extract_metadata_ipc(b"not arrow", &[], &[], &HashMap::new(), &[]).is_err());
+        Ok(())
+    }
+
+    /// Every numeric Arrow representation accepted at the IPC boundary resolves identically.
+    #[test]
+    fn numeric_ipc_columns_validate_before_state_changes() -> CacheResult<()> {
+        let directory = TestDirectory::new()?;
+        let caches = vec![cache(&directory.path().join("cache"))?];
+        let loaded = caches.first().ok_or(CacheError::WorkerFailed)?;
+        let lookup = HashMap::from([(loaded.cache_id.as_u64(), 0)]);
+        let identities: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(vec![1])),
+            Arc::new(UInt64Array::from(vec![1])),
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(Int64Array::from(vec![1])),
+        ];
+        let weights: Vec<ArrayRef> = vec![
+            Arc::new(Float32Array::from(vec![2.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(UInt32Array::from(vec![2])),
+            Arc::new(UInt64Array::from(vec![2])),
+            Arc::new(Int32Array::from(vec![2])),
+            Arc::new(Int64Array::from(vec![2])),
+        ];
+        for identity in &identities {
+            for weight in &weights {
+                let columns: Vec<ArrayRef> = vec![
+                    Arc::new(UInt64Array::from(vec![loaded.cache_id.as_u64()])),
+                    identity.clone(),
+                    weight.clone(),
+                ];
+                let schema = Arc::new(Schema::new(
+                    ["cache_id", "sample_id", "weight"]
+                        .into_iter()
+                        .zip(&columns)
+                        .map(|(name, column)| Field::new(name, column.data_type().clone(), false))
+                        .collect::<Vec<_>>(),
+                ));
+                let batch = RecordBatch::try_new(schema.clone(), columns)?;
+                let ipc = write_metadata_ipc(&ArrowMetadata::new(schema, vec![batch])?)?;
+                let active = extract_metadata_ipc(&ipc, &caches, &[0], &lookup, &[])?;
+                assert_eq!(active.physical_indices.as_ref(), &[1]);
+                assert_eq!(active.weights, vec![2.0]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Corrupt table dimensions and overflowing offsets fail before identity allocation.
+    #[test]
+    fn metadata_shape_and_offset_guards_are_explicit() -> CacheResult<()> {
+        assert!(
+            matches!(cache_offset(&[], 0), Err(CacheError::InvalidCache(message))
+            if message == "cache offset is out of range")
+        );
+        assert!(
+            matches!(physical_offset(usize::MAX, 1), Err(CacheError::InvalidInput(message))
+            if message == "physical metadata offset overflowed usize")
+        );
+        assert!(
+            matches!(sample_id_array(usize::MAX, 1), Err(CacheError::InvalidInput(message))
+            if message == "sample_id range overflowed usize")
+        );
+        assert!(
+            matches!(validate_cache_metadata_rows(4, 2, 1), Err(CacheError::InvalidCache(message))
+            if message.contains("cache 4 expected 2, got 1"))
+        );
+        let expected = MetadataField {
+            name: "value".to_string(),
+            kind: MetadataKind::Int,
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "wrong",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )?;
+        assert!(metadata_column(&batch, 0, &expected).is_err());
+        assert!(metadata_column(&batch, 1, &expected).is_err());
+        assert!(metadata_columns(&batch, &[]).is_err());
+        assert!(samples_metadata_batch(
+            7,
+            0,
+            &samples_metadata_schema(&[]),
+            &[],
+            &batch,
+            WeightSlice::Uniform { len: 0 },
+        )
+        .is_err());
+        Ok(())
+    }
+}

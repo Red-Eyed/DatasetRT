@@ -698,6 +698,106 @@ mod tests {
     use super::*;
     use crate::types::NumWorkers;
 
+    /// Construct an isolated committer without Python state or unbounded input queues.
+    fn committer() -> CacheResult<PipelineCommitter> {
+        let config = crate::writer::tests::writer_config(WorkerPool::new(NumWorkers::new(1)?)?)?;
+        let profiler = WriterProfiler::new(&config.profiler);
+        Ok(PipelineCommitter::new(
+            config,
+            SourceListProgress::new(false, 1),
+            1,
+            profiler,
+        ))
+    }
+
+    /// Missing or repeated lifecycle events cannot overwrite an already recorded source result.
+    #[test]
+    fn invalid_source_lifecycles_are_rejected() -> CacheResult<()> {
+        let mut processor = committer()?;
+        assert!(processor
+            .push_sample(WriterInput {
+                data: vec![],
+                metadata: BTreeMap::new()
+            })
+            .is_err());
+        assert!(processor.end_source().is_err());
+        assert!(processor.abort_source("unstarted".to_string()).is_err());
+        assert!(processor
+            .record_result(
+                1,
+                error_write_message("bad".to_string(), "failure".to_string())
+            )
+            .is_err());
+        processor.record_result(
+            0,
+            error_write_message("first".to_string(), "original".to_string()),
+        )?;
+        assert!(processor
+            .record_result(
+                0,
+                error_write_message("second".to_string(), "replacement".to_string())
+            )
+            .is_err());
+        assert!(complete_write_results(vec![None]).is_err());
+        Ok(())
+    }
+
+    /// Publication failures clean owned temporary artifacts and preserve the existing destination.
+    #[test]
+    fn failed_publication_cleans_only_its_owned_temporary_cache() -> CacheResult<()> {
+        let directory = crate::test_support::TestDirectory::new()?;
+        let processor = committer()?;
+        let temporary = directory.path().join("tmp").join("source");
+        let destination = directory.path().join("source");
+        std::fs::create_dir(&destination)?;
+        std::fs::write(destination.join("owned-by-caller"), b"keep")?;
+        let start = SourceWriteStart {
+            source_index: 0,
+            source_name: "source".to_string(),
+            cache_path: destination.clone(),
+            temp_path: temporary.clone(),
+        };
+        let mut active =
+            ActiveSourceWrite::new(start, &processor.config, None, processor.profiler.clone());
+        active.push_sample(WriterInput {
+            data: b"payload".to_vec(),
+            metadata: BTreeMap::new(),
+        });
+        let (status, name, detail) = active.finish();
+        assert_eq!(status, "error");
+        assert_eq!(name, "source");
+        assert!(detail.contains("publish cache"));
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(destination.join("owned-by-caller"))?, b"keep");
+        Ok(())
+    }
+
+    /// Builder setup failures remain ordered source errors rather than publication attempts.
+    #[test]
+    fn failed_builder_reports_source_error() -> CacheResult<()> {
+        let directory = crate::test_support::TestDirectory::new()?;
+        let processor = committer()?;
+        let temporary = directory.path().join("blocked");
+        std::fs::create_dir(&temporary)?;
+        let start = SourceWriteStart {
+            source_index: 0,
+            source_name: "source".to_string(),
+            cache_path: directory.path().join("source"),
+            temp_path: temporary.clone(),
+        };
+        let mut active =
+            ActiveSourceWrite::new(start, &processor.config, None, processor.profiler.clone());
+        active.push_sample(WriterInput {
+            data: vec![],
+            metadata: BTreeMap::new(),
+        });
+        let (status, _, detail) = active.finish();
+        assert_eq!(status, "error");
+        assert!(detail.contains("already exists"));
+        assert!(!temporary.exists());
+        Ok(())
+    }
+
     /// Source events awaiting ordered commit cannot release ingestion credits.
     #[test]
     fn reordered_event_holds_its_scheduling_credit() -> CacheResult<()> {

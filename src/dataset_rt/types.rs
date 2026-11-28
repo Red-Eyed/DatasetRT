@@ -453,3 +453,52 @@ pub fn native_result<T>(context: &str, action: impl FnOnce() -> CacheResult<T>) 
         Err(CacheError::NativeFailure(format!("{context}: {message}")))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Native dependency unwind payloads become bounded, meaningful operation failures.
+    #[test]
+    fn native_unwind_payloads_retain_boundary_diagnostics() -> CacheResult<()> {
+        let payloads: Vec<Box<dyn std::any::Any + Send>> = vec![
+            Box::new("borrowed diagnostic"),
+            Box::new(String::from("owned diagnostic")),
+            Box::new(7_u8),
+        ];
+        for (payload, diagnostic) in payloads.into_iter().zip([
+            "borrowed diagnostic",
+            "owned diagnostic",
+            "non-string panic payload",
+        ]) {
+            let result: CacheResult<()> =
+                native_result("test boundary", || std::panic::resume_unwind(payload));
+            let error = result.err().ok_or(CacheError::WorkerFailed)?;
+            assert!(matches!(error, CacheError::NativeFailure(_)));
+            assert!(error.to_string().contains(diagnostic));
+            assert!(error.to_string().contains("test boundary"));
+        }
+        Ok(())
+    }
+
+    /// Typed configuration boundaries reject zero capacities before work is scheduled.
+    #[test]
+    fn capacities_and_error_context_preserve_contracts() -> CacheResult<()> {
+        assert!(MaxShardBytes::new(0).is_err());
+        assert!(PrefetchSize::new(0).is_err());
+        assert!(EpochLen::new(0).is_err());
+        assert!(NumWorkers::new(0).is_err());
+        assert!(matches!(
+            CacheError::KeyboardInterrupt("stop".to_string()).context("stage"),
+            CacheError::KeyboardInterrupt(_)
+        ));
+        assert!(matches!(
+            CacheError::SystemExit("stop".to_string()).context("stage"),
+            CacheError::SystemExit(_)
+        ));
+        assert!(ShardCompression::new(CompressionAlgo::None, f64::NAN).is_err());
+        assert!(ShardCompression::new(CompressionAlgo::Brotli, 1.0).is_err());
+        assert!(CompressionAlgo::from_name("unknown").is_err());
+        Ok(())
+    }
+}

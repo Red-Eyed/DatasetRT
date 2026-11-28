@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 import polars as pl
 import pytest
@@ -29,10 +29,15 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Never
 
+    from dataset_rt.records import CacheSource
+
 RUNTIME = DatasetRuntime(num_workers=4)
 TINY_ID = 671_225_450_407_077_731
 FIVE_ID = 2_462_074_631_277_705_190
 OTHER_ID = 6_424_818_148_262_835_032
+MalformedCacheInput: TypeAlias = (
+    bytes | tuple[bytes] | tuple[bytes, list[str] | dict[int, str] | dict[str, list[str]]]
+)
 FIRST_ID = 2_851_758_661_582_890_383
 SECOND_ID = 1_600_601_599_791_221_249
 
@@ -1077,6 +1082,74 @@ def test_samples_metadata_and_set_samples_metadata_remain_compatible(
 
     assert len(tiny_dataset) == 1
     assert [sample.data for sample in samples] == [b"two"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_native_ipc_metadata_api_preserves_selection_and_rejects_corruption(
+    tiny_cache_paths: list[Path], legacy: bool
+) -> None:
+    """Explicit IPC compatibility calls share Rust validation with the Arrow API."""
+    from dataset_rt._dataset_rt import CachedDataset as NativeDataset
+    from dataset_rt._dataset_rt import DatasetRuntime as NativeRuntime
+
+    native = NativeDataset(NativeRuntime(1), [str(p) for p in tiny_cache_paths], 7, 2, False, False)
+    encoded = native.samples_metadata_ipc() if legacy else native.metadata_ipc()
+    original = pl.read_ipc(encoded)
+    selected = original.reverse().head(2)
+    buffer = selected.write_ipc(None)
+    assert buffer is not None
+    if legacy:
+        native.set_samples_metadata_ipc(buffer.getvalue())
+    else:
+        native.update_metadata_ipc(buffer.getvalue())
+    assert [row[0] for row in native] == [b"two", b"one"]
+    with pytest.raises(RuntimeError):
+        native.update_metadata_ipc(b"invalid Arrow file")
+    assert pl.read_ipc(native.metadata_ipc()).equals(selected)
+
+
+@pytest.mark.parametrize("as_list", [False, True])
+@pytest.mark.parametrize(
+    ("item", "diagnostic"),
+    [
+        (b"not a tuple", "CacheInput tuples"),
+        ((b"payload",), "contain data and metadata"),
+        ((b"payload", []), "metadata must be a dict"),
+        ((b"payload", {1: "value"}), "metadata keys must be strings"),
+        ((b"payload", {"value": []}), "metadata values must be"),
+    ],
+)
+def test_native_writer_rejects_malformed_python_records(
+    tmp_path: Path, item: MalformedCacheInput, diagnostic: str, as_list: bool
+) -> None:
+    """Rust validates untyped source records in both serial and source-list pipelines."""
+    from dataset_rt._dataset_rt import DatasetRuntime as NativeRuntime
+    from dataset_rt._dataset_rt import write_cache
+
+    class UntypedSource:
+        """Supply deliberately malformed boundary data without using production inputs."""
+
+        name = "malformed"
+
+        def __iter__(self) -> Iterator[MalformedCacheInput]:
+            """Yield one external value whose contract the native writer must validate."""
+            yield item
+
+    source = cast("CacheSource", UntypedSource())
+    outcomes = write_cache(
+        NativeRuntime(1),
+        [source] if as_list else source,
+        str(tmp_path),
+        WriterConfig(show_progress=False),
+        False,
+    )
+    assert len(outcomes) == 1
+    status, name, detail = outcomes[0]
+    assert status == "error"
+    assert name == "malformed"
+    assert diagnostic in detail
+    assert not (tmp_path / "malformed").exists()
+    assert not (tmp_path / "tmp" / "malformed").exists()
 
 
 def test_from_cache_sources_reuses_existing_cache(tmp_path: Path) -> None:

@@ -264,6 +264,34 @@ mod tests {
     use super::*;
     use crate::types::{CompressionAlgo, MetadataKind};
 
+    /// Envelope parsing rejects truncation, schema drift, and invalid declared lengths.
+    #[test]
+    fn malformed_envelopes_fail_before_payload_decode() -> CacheResult<()> {
+        let schema = vec![MetadataField {
+            name: "value".to_string(),
+            kind: MetadataKind::Int,
+        }];
+        assert!(metadata_row_to_object(&schema, &[]).is_err());
+        for metadata in [
+            BTreeMap::new(),
+            BTreeMap::from([("other".to_string(), MetadataValue::Int(1))]),
+            BTreeMap::from([("value".to_string(), MetadataValue::Bool(true))]),
+        ] {
+            assert!(metadata_object_to_row(&schema, metadata).is_err());
+        }
+        for bytes in [vec![], vec![0; 7], u64::MAX.to_le_bytes().to_vec()] {
+            assert!(split_sample_record(&bytes, &schema).is_err());
+        }
+        let mut invalid_json = 1_u64.to_le_bytes().to_vec();
+        invalid_json.push(b'{');
+        assert!(split_sample_record(&invalid_json, &schema).is_err());
+        let valid = encode_sample_record(b"payload", &schema, &[MetadataValue::Int(8)])?;
+        let (metadata, payload) = split_sample_record(&valid, &schema)?;
+        assert_eq!(metadata, vec![MetadataValue::Int(8)]);
+        assert_eq!(payload, b"payload");
+        Ok(())
+    }
+
     /// Each layout preserves bytes and metadata provenance across its supported codecs.
     #[test]
     fn layouts_preserve_provenance_and_accounting() -> CacheResult<()> {
