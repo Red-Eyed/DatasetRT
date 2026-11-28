@@ -2,6 +2,19 @@
 
 All notable changes to DatasetRT are documented here.
 
+## 0.5.12
+
+### Documentation
+
+- Add coverage, documentation build status, and supported Python version badges
+  to the README.
+
+### Developers
+
+- Collect Rust and Python coverage in a dedicated CI job, including native
+  code exercised by Python integration tests. Save reports as CI artifacts and
+  upload them to Codecov without imposing coverage thresholds.
+
 ## 0.5.11
 
 ### Improvements

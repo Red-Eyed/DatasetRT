@@ -1,0 +1,17 @@
+coverage:
+  status:
+    project: off
+    patch: off
+
+comment: false
+
+component_management:
+  individual_components:
+    - component_id: rust
+      name: Rust runtime
+      paths:
+        - src/dataset_rt/**
+    - component_id: python
+      name: Python API
+      paths:
+        - dataset_rt/**

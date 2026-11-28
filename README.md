@@ -1,7 +1,10 @@
 # DatasetRT
 
 [![CI](https://github.com/Red-Eyed/DatasetRT/actions/workflows/ci.yml/badge.svg)](https://github.com/Red-Eyed/DatasetRT/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/Red-Eyed/DatasetRT/branch/main/graph/badge.svg)](https://codecov.io/gh/Red-Eyed/DatasetRT)
+[![Docs](https://github.com/Red-Eyed/DatasetRT/actions/workflows/docs.yml/badge.svg)](https://red-eyed.github.io/DatasetRT/)
 [![PyPI](https://img.shields.io/pypi/v/dataset-rt.svg)](https://pypi.org/project/dataset-rt/)
+[![Python versions](https://img.shields.io/pypi/pyversions/dataset-rt)](https://pypi.org/project/dataset-rt/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Cache preprocessing once. Change subsets and sampling weights without rewriting payloads.**

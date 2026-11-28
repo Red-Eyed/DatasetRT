@@ -7,6 +7,51 @@ on:
       - main
 
 jobs:
+  coverage:
+    name: Rust and Python coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --python 3.11 --extra dev --locked
+      - name: Collect Rust and Python coverage
+        shell: bash
+        run: |
+          cargo llvm-cov show-env --sh > "${RUNNER_TEMP}/coverage-env.sh"
+          # shellcheck source=/dev/null
+          source "${RUNNER_TEMP}/coverage-env.sh"
+          cargo llvm-cov clean --workspace
+          cargo test --locked
+          uv run --python 3.11 --extra dev maturin develop
+          uv run --python 3.11 --extra dev pytest -n 2 --cov --cov-report=term-missing --cov-report=xml:coverage-python.xml
+          cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+      - name: Save coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            coverage-python.xml
+            coverage-rust.lcov
+          if-no-files-found: error
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: coverage-python.xml,coverage-rust.lcov
+          disable_search: true
+          fail_ci_if_error: true
+
   checks:
     name: Python 3.11 and Rust stable
     runs-on: ubuntu-latest
