@@ -572,6 +572,43 @@ def test_record_read_error_identifies_sample_and_address(diagnostic_cache: Path)
     assert "offset 0" in message
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "diagnostic"),
+    [
+        (1, 2**64 - 1, "record offset and length overflowed u64"),
+        (2, 1024, "record extends beyond shard length"),
+    ],
+)
+def test_corrupt_index_address_fails_before_payload_allocation(
+    diagnostic_cache: Path, field: int, value: int, diagnostic: str
+) -> None:
+    """Unchecked checksum mode still rejects invalid addresses with sample context."""
+    index_path = diagnostic_cache / "index.bin"
+    index = bytearray(index_path.read_bytes())
+    index[field * 8 : (field + 1) * 8] = value.to_bytes(8, "little")
+    index_path.write_bytes(index)
+    dataset = RUNTIME.cached_dataset(
+        [diagnostic_cache], reader_config=ReaderConfig(seed=1, shuffle=False, prefetch_size=1)
+    )
+    with pytest.raises(ValueError) as caught:
+        next(iter(dataset))
+    message = str(caught.value)
+    assert diagnostic in message
+    assert str(diagnostic_cache) in message
+    assert "sample_id=0" in message
+
+
+def test_unknown_index_shard_is_rejected_at_load(diagnostic_cache: Path) -> None:
+    """Index shape validation rejects unknown shards even without checksum hashing."""
+    index_path = diagnostic_cache / "index.bin"
+    index = bytearray(index_path.read_bytes())
+    index[:8] = (99).to_bytes(8, "little")
+    index_path.write_bytes(index)
+    with pytest.raises(ValueError, match="index references missing shard 99") as caught:
+        RUNTIME.cached_dataset([diagnostic_cache], reader_config=ReaderConfig(seed=1))
+    assert str(diagnostic_cache) in str(caught.value)
+
+
 def test_checksum_error_reports_expected_and_actual(diagnostic_cache: Path) -> None:
     """Checksum failures identify the file, both digests, and a valid recovery action."""
     manifest = read_manifest(diagnostic_cache)

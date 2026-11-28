@@ -1015,6 +1015,59 @@ def test_update_metadata_rejects_non_numeric_weight_columns(
         tiny_dataset.update_metadata(invalid)
 
 
+@pytest.mark.parametrize("identity_type", [pl.UInt32, pl.UInt64, pl.Int32, pl.Int64])
+@pytest.mark.parametrize(
+    "weight_type", [pl.Float32, pl.Float64, pl.UInt32, pl.UInt64, pl.Int32, pl.Int64]
+)
+def test_metadata_numeric_types_preserve_selected_rows(
+    tiny_dataset: dataset_rt_api.CachedDataset,
+    identity_type: type[pl.DataType],
+    weight_type: type[pl.DataType],
+) -> None:
+    """Supported Arrow numeric types resolve identities without changing row order."""
+    selected = (
+        tiny_dataset.get_metadata()
+        .reverse()
+        .with_columns(
+            pl.col("sample_id").cast(identity_type),
+            pl.col("cache_id").cast(pl.Int64),
+            pl.lit(2).cast(weight_type).alias("weight"),
+        )
+    )
+    tiny_dataset.update_metadata(selected)
+    assert [sample.data for sample in tiny_dataset] == [b"two", b"one", b"zero"]
+    assert tiny_dataset.get_metadata()["weight"].to_list() == [2, 2, 2]
+
+
+@pytest.mark.parametrize("weight", [-1.0, 0.0, float("nan"), float("inf"), -float("inf")])
+def test_rejected_weights_preserve_epoch_cursor(
+    tiny_dataset: dataset_rt_api.CachedDataset, weight: float
+) -> None:
+    """Failed validation cannot replace active rows or reset the cyclic epoch cursor."""
+    original = tiny_dataset.get_metadata()
+    tiny_dataset.set_epoch_len(1)
+    assert [sample.data for sample in tiny_dataset] == [b"zero"]
+    invalid = original.reverse().with_columns(pl.lit(weight).alias("weight"))
+    with pytest.raises(ValueError, match="positive and finite"):
+        tiny_dataset.update_metadata(invalid)
+    assert tiny_dataset.get_metadata().equals(original)
+    assert len(tiny_dataset) == 1
+    assert [sample.data for sample in tiny_dataset] == [b"one"]
+
+
+@pytest.mark.parametrize("column", ["cache_id", "sample_id"])
+def test_unknown_identity_preserves_active_metadata(
+    tiny_dataset: dataset_rt_api.CachedDataset, column: str
+) -> None:
+    """Unknown unsigned identities fail atomically with the rejected identity attached."""
+    original = tiny_dataset.get_metadata()
+    invalid = original.with_columns(pl.lit(2**64 - 1, dtype=pl.UInt64).alias(column))
+    with pytest.raises(ValueError, match=f"{column}={2**64 - 1}"):
+        tiny_dataset.update_metadata(invalid)
+    assert tiny_dataset.get_metadata().equals(original)
+    assert [sample.data for sample in tiny_dataset] == [b"zero", b"one", b"two"]
+
+
 def test_samples_metadata_and_set_samples_metadata_remain_compatible(
     tiny_dataset: dataset_rt_api.CachedDataset,
 ) -> None:

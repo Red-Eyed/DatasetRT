@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import pickle
 import signal
 import threading
 import time
@@ -745,6 +746,53 @@ def _reject_initializer(worker_id: int) -> None:
     if worker_id == 1:
         time.sleep(0.2)
         raise ValueError("resource unavailable")
+
+
+@pytest.mark.parametrize("payload", [b"broken pickle", pickle.dumps("unexpected record")])
+def test_worker_transport_rejects_invalid_messages(payload: bytes) -> None:
+    """Corrupt or unexpected lifecycle records become typed transport failures."""
+    from dataset_rt.writer import Err, _receive
+
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        sender.send_bytes(payload)
+        result = _receive(receiver)
+        assert isinstance(result, Err)
+        assert "writer" in result.error.message
+        assert "failed" in result.error.message or "invalid" in result.error.message
+    finally:
+        receiver.close()
+        sender.close()
+
+
+def test_worker_transport_eof_is_reported() -> None:
+    """A child closing its pipe cannot escape as an unclassified EOFError."""
+    from dataset_rt.writer import Err, _receive
+
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    sender.close()
+    try:
+        result = _receive(receiver)
+        assert isinstance(result, Err)
+        assert "writer transport failed: EOFError" in result.error.message
+    finally:
+        receiver.close()
+
+
+def test_worker_start_failure_returns_ordered_errors(
+    runtime: DatasetRuntime, tmp_path: Path, parallel_config: WriterConfig
+) -> None:
+    """OS startup failures preserve source identities without publishing caches."""
+    with patch("multiprocessing.process.BaseProcess.start", side_effect=OSError("spawn refused")):
+        results = runtime.write_cache(
+            [Source("first"), Source("second")], tmp_path, writer_config=parallel_config
+        )
+    assert [result.source_name for result in results] == ["first", "second"]
+    for result in results:
+        assert isinstance(result, CacheWriteError)
+        assert "writer pool failed: OSError: spawn refused" in result.message
+    assert not list(tmp_path.iterdir())
+    assert not multiprocessing.active_children()
 
 
 def test_worker_initializer_failure_stops_pool_before_dispatch(
