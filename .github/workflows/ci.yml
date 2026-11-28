@@ -84,6 +84,7 @@ jobs:
       - name: Create isolated interpreter
         run: uv venv --python '${{ matrix.python }}' --seed /tmp/wheel-env
       - name: Install wheel and published binary dependencies
-        run: uv pip install --python /tmp/wheel-env/bin/python --only-binary=:all: wheelhouse/*.whl pytest pytest-xdist pydantic-settings pyrefly torch psutil
+        run: >-
+          uv pip install --python /tmp/wheel-env/bin/python --only-binary=:all: wheelhouse/*.whl pytest pytest-xdist pydantic-settings pyrefly torch psutil
       - name: Test installed wheel outside checkout
         run: uv run --no-project --python /tmp/wheel-env/bin/python scripts/test_wheel.py
