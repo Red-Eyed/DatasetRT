@@ -35,7 +35,8 @@ jobs:
           cargo test --locked
           uv run --python 3.11 --extra dev maturin develop
           uv run --python 3.11 --extra dev pytest -n 2 --cov --cov-fail-under=90 --cov-precision=2 --cov-report=term-missing --cov-report=xml:coverage-python.xml
-          cargo llvm-cov report --fail-under-lines 90 --lcov --output-path coverage-rust.lcov
+          cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+          cargo llvm-cov report --summary-only
       - name: Save coverage reports
         uses: actions/upload-artifact@v4
         with:
@@ -51,6 +52,11 @@ jobs:
           files: coverage-python.xml,coverage-rust.lcov
           disable_search: true
           fail_ci_if_error: true
+      - name: Enforce Rust coverage threshold
+        shell: bash
+        run: |
+          source "${RUNNER_TEMP}/coverage-env.sh"
+          cargo llvm-cov report --fail-under-lines 90
 
   checks:
     name: Python 3.11 and Rust stable
